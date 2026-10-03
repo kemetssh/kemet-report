@@ -1,5 +1,5 @@
 {
- "offset": 277935906,
+ "offset": 277935913,
  "jobs": {
   "55": {
    "id": "55",
@@ -60,5 +60,166 @@
    "thumb": 0,
    "video_id": "OIS2regIxBg"
   }
+ },
+ "props": {
+  "p1": {
+   "type": "title",
+   "video_id": "UI6nMq8_uaU",
+   "old": "Anubis: Guardian of the Dead | Ancient Egypt #ancientegypt #ancienthistory #egypt #ancienthistory",
+   "new": "Anubis: The Jackal God of the Afterlife",
+   "created": 1791062964.8562257,
+   "views": 46,
+   "published": "2026-09-29T11:43:34Z"
+  },
+  "p2": {
+   "type": "title",
+   "video_id": "nkGBeZyJZck",
+   "old": "1.1. The Black Land : What Does Kemet Mean? The Real Name of Ancient Egypt #ancientegypt",
+   "new": "What Does Kemet Mean? The Real Name of Egypt",
+   "created": 1791062965.0718443,
+   "views": 14,
+   "published": "2026-09-29T11:32:58Z"
+  },
+  "p3": {
+   "type": "title",
+   "video_id": "I5ePHwZmIJY",
+   "old": "1.The Black Land.",
+   "new": "Why Did Ancient Egyptians Call Their Land Kemet?",
+   "created": 1791062965.2805572,
+   "views": 150,
+   "published": "2026-09-28T10:07:59Z"
+  },
+  "p4": {
+   "type": "title",
+   "video_id": "I5ePHwZmIJY",
+   "old": "1.The Black Land.",
+   "new": "Why Did Ancient Egyptians Call Their Land Kemet?",
+   "created": 1791062973.2378066,
+   "views": 150,
+   "published": "2026-09-28T10:07:59Z"
+  },
+  "p5": {
+   "type": "title",
+   "video_id": "UI6nMq8_uaU",
+   "old": "Anubis: Guardian of the Dead | Ancient Egypt #ancientegypt #ancienthistory #egypt #ancienthistory",
+   "new": "Anubis: The Jackal God of the Afterlife",
+   "created": 1791062973.4817228,
+   "views": 46,
+   "published": "2026-09-29T11:43:34Z"
+  },
+  "p6": {
+   "type": "title",
+   "video_id": "nkGBeZyJZck",
+   "old": "1.1. The Black Land : What Does Kemet Mean? The Real Name of Ancient Egypt #ancientegypt",
+   "new": "What Does Kemet Mean? The True Name of Ancient Egypt",
+   "created": 1791062973.7245789,
+   "views": 14,
+   "published": "2026-09-29T11:32:58Z"
+  },
+  "p7": {
+   "type": "ideas",
+   "ideas": [
+    {
+     "title": "Why Ancient Egyptians Wore Cones of Fat on Their Heads",
+     "hook": "Ever wondered why ancient Egyptian party-goers wore giant butter cones?",
+     "why": "Visual curiosity combined with a bizarre daily life ritual."
+    },
+    {
+     "title": "The Ancient Egyptian Pregnancy Test: Barley and Emmer",
+     "hook": "They didn't have sticks, but they could predict your baby's gender.",
+     "why": "Relatable modern medical history with an ancient twist."
+    },
+    {
+     "title": "Why Did Pharaohs Wear the False Beard?",
+     "hook": "Even the female Pharaoh, Hatshepsut, wore a fake beard. Here is why.",
+     "why": "Explains a striking visual element of power and gender roles."
+    },
+    {
+     "title": "Ancient Egyptian Makeup: More Than Just Style",
+     "hook": "Kohl wasn't just for fashion\u2014it literally saved their lives.",
+     "why": "Debunks the idea that beauty practices were purely aesthetic."
+    },
+    {
+     "title": "The Lost Secrets of Hieroglyphics: Deciphering the Gods",
+     "hook": "For 1,500 years, nobody could read the stones of Kemet. Until this.",
+     "why": "Focuses on the mystery and the breakthrough discovery of language."
+    }
+   ],
+   "created": 1791063035.6661167
+  },
+  "p8": {
+   "type": "ideas",
+   "ideas": [
+    {
+     "title": "Why Egyptians Shaved Their Eyebrows When a Cat Died",
+     "hook": "Did you know that in Ancient Egypt, losing a pet meant shaving your own eyebrows?",
+     "why": "It highlights a fascinating, relatable, and slightly bizarre cultural mourning ritual."
+    },
+    {
+     "title": "The Secret Life of an Ancient Egyptian Scribe",
+     "hook": "Forget the Pharaohs; this is the one job in Kemet that could actually make you rich.",
+     "why": "Focuses on social mobility and daily life, contrasting with common royal-focused tropes."
+    },
+    {
+     "title": "Why Ancient Egyptians Used Blue Makeup",
+     "hook": "This wasn't just fashion\u2014it was Ancient Egyptian high-tech sun protection.",
+     "why": "Combines beauty standards with practical historical science."
+    },
+    {
+     "title": "The Nile\u2019s Dark Secret: The Annual Flood",
+     "hook": "The lifeblood of Egypt was actually a terrifying, destructive force every single year.",
+     "why": "Creates conflict and tension by showing a dual side to their most sacred resource."
+    },
+    {
+     "title": "How to Build a Pyramid (Without Modern Tools)",
+     "hook": "We still can't fully explain how they moved these blocks, but here is the closest theory.",
+     "why": "Taps into the enduring mystery and engineering brilliance of the Old Kingdom."
+    }
+   ],
+   "created": 1791063052.8837502
+  }
+ },
+ "seen": [],
+ "n": 8,
+ "mem": {
+  "lessons": [],
+  "picks": [
+   "Anubis: The Jackal God of the Afterlife",
+   "What Does Kemet Mean? The Real Name of Egypt",
+   "Why Did Ancient Egyptians Call Their Land Kemet?"
+  ],
+  "skips": [],
+  "videos": {},
+  "exps": [
+   {
+    "video_id": "UI6nMq8_uaU",
+    "old": "Anubis: Guardian of the Dead | Ancient Egypt #ancientegypt #ancienthistory #egypt #ancienthistory",
+    "new": "Anubis: The Jackal God of the Afterlife",
+    "start_views": 46,
+    "start_ts": 1791063055.8826823,
+    "before_rate": 10.435826994860447,
+    "done": false
+   },
+   {
+    "video_id": "nkGBeZyJZck",
+    "old": "1.1. The Black Land : What Does Kemet Mean? The Real Name of Ancient Egypt #ancientegypt",
+    "new": "What Does Kemet Mean? The Real Name of Egypt",
+    "start_views": 14,
+    "start_ts": 1791063057.5055635,
+    "before_rate": 3.1708125400580314,
+    "done": false
+   },
+   {
+    "video_id": "I5ePHwZmIJY",
+    "old": "1.The Black Land.",
+    "new": "Why Did Ancient Egyptians Call Their Land Kemet?",
+    "start_views": 150,
+    "start_ts": 1791063058.9505901,
+    "before_rate": 27.400738623164663,
+    "done": false
+   }
+  ],
+  "last_plan": "",
+  "last_check": 1791062957.2587268
  }
 }
