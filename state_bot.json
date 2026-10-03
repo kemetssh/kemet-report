@@ -1,5 +1,5 @@
 {
- "offset": 277935913,
+ "offset": 277935914,
  "jobs": {
   "55": {
    "id": "55",
@@ -59,6 +59,71 @@
    "desc": 1,
    "thumb": 0,
    "video_id": "OIS2regIxBg"
+  },
+  "102": {
+   "id": "102",
+   "file_id": "BAACAgQAAxkBAANmasF2PvtByKKNAgLOydFF7DgOnRAAAr0eAAJ5RAlSYvLgI5f6DiI9BA",
+   "name": "IMG_8252.MP4",
+   "dur": 19.9,
+   "w": 720,
+   "h": 1280,
+   "review": {
+    "verdict": "fix first",
+    "score": 6,
+    "summary": "The video features high-quality AI visuals but fails to cite that these are non-historical artistic representations, which could mislead viewers. The audio quality is good, but the narration lacks a strong hook to differentiate it from standard encyclopedic entries.",
+    "issues": [
+     {
+      "at": "00:00",
+      "problem": "The background image is AI-generated and not a historical photograph.",
+      "fix": "Add an on-screen label like 'AI-generated interpretation' or 'Artistic representation' as per YouTube's policies on synthetic content."
+     },
+     {
+      "at": "00:06",
+      "problem": "The claim about scented fat cones melting to 'release perfume into the hair and clothing' is a contested theory.",
+      "fix": "Add qualifiers such as 'Some scholars believe...' or 'It is hypothesized that...' to represent this as a debated historical theory rather than an absolute fact."
+     }
+    ],
+    "strengths": [
+     "Visually stunning and high-quality AI-generated imagery.",
+     "Clear, well-paced, and professional voice-over narration.",
+     "Short, informative format that is easy to consume."
+    ],
+    "titles": [
+     "Were Scented Cones Actually Worn by Ancient Egyptians?",
+     "The Truth About The Mysterious Fat Cones of Ancient Egypt",
+     "Ancient Egyptian Beauty: The Mystery of Scented Cones"
+    ],
+    "descriptions": [
+     "Discover the mystery behind the scented fat cones often seen in Ancient Egyptian art. Were they a symbol of status or a practical beauty tool? Let's dive into the history.\n\n#AncientEgypt #Kemet #HistoryFacts #Shorts",
+     "Many depictions of Ancient Egyptian banquets feature guests wearing mysterious cones on their heads. Explore the theories surrounding these fragrant items.\n\n#AncientEgypt #History #Egyptology #Shorts"
+    ],
+    "tags": [
+     "Ancient Egypt",
+     "Kemet",
+     "History",
+     "Egyptology",
+     "Ancient Egyptian Culture",
+     "Fat Cones",
+     "Historical Mysteries",
+     "Archaeology",
+     "Ancient Beauty Rituals",
+     "Educational History",
+     "Ancient Civilizations",
+     "Ancient Egypt Facts"
+    ],
+    "thumb_times": [
+     1.0,
+     11.0,
+     15.0
+    ],
+    "ai_visuals": true,
+    "policy_notes": [
+     "Missing disclosure for AI-generated realistic imagery"
+    ]
+   },
+   "created": 1791063988.421785,
+   "stage": "title",
+   "ai": true
   }
  },
  "props": {
