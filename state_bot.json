@@ -1,4 +1,64 @@
 {
- "offset": 0,
- "jobs": {}
+ "offset": 277935906,
+ "jobs": {
+  "55": {
+   "id": "55",
+   "file_id": "BAACAgQAAxkBAAM3asEbsCxSTDis6V_lSbF_tmuvob8AAqEdAAJ5RAlSUu3A13zlz489BA",
+   "name": "IMG_7992.MP4",
+   "dur": 19.9,
+   "w": 720,
+   "h": 1280,
+   "review": {
+    "verdict": "ready",
+    "score": 9,
+    "summary": "The video is a beautifully crafted, atmospheric piece that effectively uses storytelling to introduce the myth of Ra. Its high-quality visuals and soothing voiceover make it a very compelling short-form history content piece.",
+    "issues": [
+     {
+      "at": "00:13",
+      "problem": "The narration claims 'the King of Kemet was the son of Ra'. While pharaohs were considered to have a divine connection to Ra, this phrasing oversimplifies a complex and evolving theological concept.",
+      "fix": "Refine to 'The pharaohs were often revered as children of Ra, a divine lineage central to their legitimacy.'"
+     }
+    ],
+    "strengths": [
+     "Visually stunning and consistent art style.",
+     "Excellent voiceover delivery with a calm, authoritative tone.",
+     "Strong emotional hook combined with concise historical narrative."
+    ],
+    "titles": [
+     "Ra: The God Who Sailed the Sun",
+     "How Ancient Egyptians Explained the Sunrise",
+     "The Myth of Ra and the Solar Boat"
+    ],
+    "descriptions": [
+     "Journey through the ancient Egyptian sky with Ra, the sun god who sailed the solar boat to battle darkness every single night. Discover how each sunrise was celebrated as a triumph of light over the underworld.\n\n#AncientEgypt #Ra #Mythology #History #Shorts",
+     "Who was Ra to the people of Kemet? Uncover the legend of the sun god's nightly journey through the underworld and his daily rebirth, a core belief of Ancient Egyptian life and death.\n\n#AncientEgypt #Ra #SunGod #Education #History #Shorts"
+    ],
+    "tags": [
+     "Ancient Egypt",
+     "Ra",
+     "Egyptian Mythology",
+     "History",
+     "Kemet",
+     "Sun God",
+     "Ancient History",
+     "Mythology Explained",
+     "Pharaohs",
+     "Egyptian Gods",
+     "Shorts",
+     "Educational"
+    ],
+    "thumb_times": [
+     1.0,
+     12.0,
+     19.0
+    ]
+   },
+   "created": 1791041144.6673622,
+   "stage": "done",
+   "title": "How Ancient Egyptians Explained the Sunrise",
+   "desc": 1,
+   "thumb": 0,
+   "video_id": "OIS2regIxBg"
+  }
+ }
 }
