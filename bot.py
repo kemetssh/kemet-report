@@ -451,7 +451,10 @@ def on_callback(cb, st):
     msg = cb["message"]
     if str(msg["chat"]["id"]) != CHAT:
         return
-    tg("answerCallbackQuery", callback_query_id=cb["id"])
+    try:
+        tg("answerCallbackQuery", callback_query_id=cb["id"])
+    except Exception:
+        pass  # tap is older than a minute (normal: the bot checks on a timer)
     try:
         tg("editMessageReplyMarkup", chat_id=CHAT, message_id=msg["message_id"],
            reply_markup={"inline_keyboard": []})
