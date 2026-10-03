@@ -33,6 +33,9 @@ GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
+YTA = os.getenv("YTA_BASE", "https://youtubeanalytics.googleapis.com")
+CAPTION_LANGS = [("en", "English"), ("ar", "العربية")]
+ST = {}  # the live state, set in main()
 
 S = requests.Session()
 _retry = Retry(total=4, connect=4, read=3, backoff_factor=1.5,
@@ -61,13 +64,44 @@ def load_state():
             return json.loads(STATE_FILE.read_text())
         except Exception:
             pass
-    return {"offset": 0, "jobs": {}}
+    return {"offset": 0, "jobs": {}, "props": {}, "seen": [], "n": 0}
 
 
 def save_state(st):
     now = time.time()
     st["jobs"] = {k: v for k, v in st["jobs"].items() if now - v.get("created", now) < 7 * 86400}
+    st["props"] = {k: v for k, v in st.get("props", {}).items() if now - v.get("created", now) < 7 * 86400}
+    st["seen"] = list(st.get("seen", []))[-2000:]
+    st.pop("_val", None)
     STATE_FILE.write_text(json.dumps(st, indent=1))
+
+
+# ---------------- the bot's memory (what it learns about you and the channel) ----------------
+def mem():
+    m = ST.setdefault("mem", {})
+    for k, v in (("lessons", []), ("picks", []), ("skips", []), ("videos", {}),
+                 ("exps", []), ("last_plan", ""), ("last_check", 0)):
+        m.setdefault(k, v)
+    return m
+
+
+def remember(kind, item):
+    m = mem()
+    if item and item not in m[kind]:
+        m[kind].append(item)
+    m[kind] = m[kind][-30:]
+
+
+def learned():
+    m = mem()
+    parts = []
+    if m["lessons"]:
+        parts.append("Lessons learned about this channel:\n" + "\n".join("- " + x for x in m["lessons"][-12:]))
+    if m["picks"]:
+        parts.append("Titles the owner CHOSE (his taste):\n" + "\n".join("- " + x for x in m["picks"][-8:]))
+    if m["skips"]:
+        parts.append("Titles the owner REJECTED:\n" + "\n".join("- " + x for x in m["skips"][-8:]))
+    return "\n".join(parts) or "No history yet."
 
 
 # ---------------- telegram ----------------
@@ -182,6 +216,9 @@ Rules: be honest and specific, never flatter. Facts about Ancient Egypt must be 
 Do not invent claims. If you are not sure something is true, say so.
 Video length: {dur:.0f} seconds, size {w}x{h}.
 
+What you already know about this channel and its owner:
+{memory}
+
 Return JSON only with exactly these keys:
 {{
  "verdict": "ready" or "fix first",
@@ -192,7 +229,9 @@ Return JSON only with exactly these keys:
  "titles": ["3 different titles, max 70 chars, curious but TRUE, no lies"],
  "descriptions": ["2 options, each 2-3 lines then hashtags (#AncientEgypt, add #Shorts if under 60s vertical)"],
  "tags": ["up to 12 search tags"],
- "thumb_times": [3 numbers in seconds inside the video, sharp frames with a clear subject]
+ "thumb_times": [3 numbers in seconds inside the video, sharp frames with a clear subject],
+ "ai_visuals": true or false,  // true if the pictures or video look realistic AI-generated or heavily altered (YouTube requires a label for that)
+ "policy_notes": ["short flags for YouTube policy: copyrighted music, film clips, logos, misleading claims, reused content. empty if clean"]
 }}"""
 
 
@@ -200,7 +239,7 @@ def review_video(path, dur, w, h):
     info = gemini_upload(path, "video/mp4")
     try:
         data = gemini([{"file_data": {"mime_type": "video/mp4", "file_uri": info["uri"]}},
-                       {"text": REVIEW_PROMPT.format(dur=dur, w=w, h=h)}])
+                       {"text": REVIEW_PROMPT.format(dur=dur, w=w, h=h, memory=learned())}])
     finally:
         try:
             S.delete(f"{GBASE}/v1beta/{info['name']}", headers={"x-goog-api-key": GKEY}, timeout=30)
@@ -213,6 +252,8 @@ def review_video(path, dur, w, h):
     while len(times) < 3 and dur > 0:
         times.append(dur * (len(times) + 1) / 4)
     data["thumb_times"] = times
+    data["ai_visuals"] = bool(data.get("ai_visuals"))
+    data["policy_notes"] = [str(x)[:200] for x in data.get("policy_notes", [])][:4]
     return data
 
 
@@ -221,6 +262,7 @@ def more_titles(job):
     data = gemini([{"text": (
         'Channel "Kemet | Ancient Egypt". Video summary: ' + r.get("summary", "")
         + ". Current titles: " + json.dumps(job["review"]["titles"])
+        + ". Owner history:\n" + learned() + "\n"
         + '. Give 3 NEW different titles, max 70 chars, curious but true. '
           'JSON only: {"titles": ["","",""]}')}])
     return [t[:100] for t in data.get("titles", [])][:3]
@@ -235,22 +277,33 @@ def yt_token():
     return r.json()["access_token"]
 
 
-def yt_upload(path, title, desc, tags, tok):
-    meta = {"snippet": {"title": title[:100], "description": desc[:4900], "tags": tags[:15],
-                        "categoryId": "27"},
-            "status": {"privacyStatus": "private", "selfDeclaredMadeForKids": False}}
+def yt_upload(path, title, desc, tags, tok, ai=False):
+    """Returns (video_id, label_ok). Falls back to no AI label if YouTube rejects the field."""
     size = os.path.getsize(path)
-    r = S.post(f"{YT}/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
-               headers={"Authorization": f"Bearer {tok}", "X-Upload-Content-Length": str(size),
-                        "X-Upload-Content-Type": "video/mp4", "Content-Type": "application/json"},
-               json=meta, timeout=60)
+
+    def start(with_label):
+        status = {"privacyStatus": "private", "selfDeclaredMadeForKids": False}
+        if with_label:
+            status["containsSyntheticMedia"] = bool(ai)
+        meta = {"snippet": {"title": title[:100], "description": desc[:4900], "tags": tags[:15],
+                            "categoryId": "27"}, "status": status}
+        return S.post(f"{YT}/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
+                      headers={"Authorization": f"Bearer {tok}", "X-Upload-Content-Length": str(size),
+                               "X-Upload-Content-Type": "video/mp4", "Content-Type": "application/json"},
+                      json=meta, timeout=60)
+
+    r = start(True)
+    label_ok = True
+    if r.status_code == 400:
+        r = start(False)
+        label_ok = False
     r.raise_for_status()
     url = r.headers["Location"]
     with open(path, "rb") as f:
         r = S.put(url, data=f, headers={"Content-Length": str(size), "Content-Type": "video/mp4"},
                   timeout=1800)
     r.raise_for_status()
-    return r.json()["id"]
+    return r.json()["id"], label_ok
 
 
 def yt_thumb(vid, img, tok):
@@ -293,6 +346,10 @@ def review_text(job):
             lines.append(f"• {i.get('at', '?')} - {i.get('problem', '')}  → {i.get('fix', '')}")
     if r.get("strengths"):
         lines += ["", "Good:"] + [f"+ {s}" for s in r["strengths"][:3]]
+    lines += ["", "YouTube policy check:"]
+    lines += [f"⚠️ {n}" for n in r.get("policy_notes", [])] or ["✓ Nothing risky spotted (I cannot hear every copyright match)"]
+    if r.get("ai_visuals"):
+        lines.append("🤖 Looks AI-made or altered. I will switch the AI label ON (you can change it).")
     return "\n".join(lines)
 
 
@@ -335,10 +392,14 @@ def ask_confirm(job):
     jid = job["id"]
     r = job["review"]
     thumb = "none" if job.get("thumb", -1) < 0 else f"option {job['thumb'] + 1}"
+    ai = "ON" if job.get("ai") else "OFF"
     send(f"Ready to upload (PRIVATE):\n\nTitle: {job['title']}\n\n"
-         f"Description:\n{r['descriptions'][job['desc']]}\n\nThumbnail: {thumb}\n\n"
+         f"Description:\n{r['descriptions'][job['desc']]}\n\nThumbnail: {thumb}\n"
+         f"AI / altered-content label: {ai}\n\n"
          "It stays private until you publish it.",
-         [[btn("⬆️ Upload as private", jid, "u")], [btn("Cancel", jid, "x")]])
+         [[btn("⬆️ Upload as private", jid, "u")],
+          [btn(f"AI label: {ai} (tap to switch)", jid, "l")],
+          [btn("Cancel", jid, "x")]])
 
 
 def start_job(msg, st):
@@ -360,7 +421,8 @@ def start_job(msg, st):
             return
         review = review_video(p, dur, w, h)
     job = {"id": jid, "file_id": v["file_id"], "name": name, "dur": dur, "w": w, "h": h,
-           "review": review, "created": time.time(), "stage": "title"}
+           "review": review, "created": time.time(), "stage": "title",
+           "ai": bool(review.get("ai_visuals"))}
     st["jobs"][jid] = job
     send(review_text(job))
     ask_title(job)
@@ -374,7 +436,8 @@ def do_upload(job):
         tg_download(job["file_id"], p)
         tok = yt_token()
         desc = job["review"]["descriptions"][job["desc"]]
-        vid = yt_upload(p, job["title"], desc, job["review"].get("tags", []), tok)
+        vid, label_ok = yt_upload(p, job["title"], desc, job["review"].get("tags", []), tok,
+                                  ai=job.get("ai", False))
         thumb_note = ""
         if job.get("thumb", -1) >= 0:
             img = Path(d) / "chosen.jpg"
@@ -387,8 +450,17 @@ def do_upload(job):
         status = yt_privacy(vid, tok)
     job["video_id"] = vid
     job["stage"] = "uploaded"
-    send(f"✅ Uploaded. {thumb_note}Status: {status.upper()}\nhttps://youtu.be/{vid}\n\n{NOTICE}",
+    label_note = ""
+    if job.get("ai"):
+        label_note = ("AI label set. " if label_ok else
+                      "I could not set the AI label by code: switch it on in YouTube Studio. ")
+    mem()["videos"][vid] = {"uploaded": time.time(), "title": job["title"], "file_id": job["file_id"],
+                            "summary": job["review"].get("summary", ""), "checked": False}
+    pid = new_pid(ST)
+    ST["props"][pid] = {"type": "subgen", "video_id": vid, "created": time.time()}
+    send(f"✅ Uploaded. {thumb_note}{label_note}Status: {status.upper()}\nhttps://youtu.be/{vid}\n\n{NOTICE}",
          [[btn("Try to make it public", job["id"], "p")],
+          [btn("Add subtitles (English + Arabic)", pid, "sg")],
           [btn("I will publish it myself", job["id"], "k")]])
 
 
@@ -423,8 +495,510 @@ def trigger_report():
          else f"Could not start the report (HTTP {r.status_code}). It still runs every morning.")
 
 
+# ---------------- titles and comments (each waits for your tap) ----------------
+def yt_get(path, tok, **params):
+    r = S.get(f"{YT}/youtube/v3/{path}", params=params,
+              headers={"Authorization": f"Bearer {tok}"}, timeout=60)
+    r.raise_for_status()
+    return r.json()
+
+
+def my_videos(tok, n=15):
+    ch = yt_get("channels", tok, part="contentDetails", mine="true")["items"][0]
+    pl = ch["contentDetails"]["relatedPlaylists"]["uploads"]
+    ids = [i["contentDetails"]["videoId"] for i in
+           yt_get("playlistItems", tok, part="contentDetails", playlistId=pl, maxResults=n)["items"]]
+    if not ids:
+        return [], ch["id"]
+    vids = yt_get("videos", tok, part="snippet,statistics", id=",".join(ids))["items"]
+    return vids, ch["id"]
+
+
+def new_pid(st):
+    st["n"] = st.get("n", 0) + 1
+    return f"p{st['n']}"
+
+
+TITLES_PROMPT = """You help the YouTube history channel "Kemet | Ancient Egypt".
+Below are the channel's recent videos as JSON. Pick at most 3 whose TITLE could clearly be
+better (more curious, clearer, under 70 characters) while staying 100% true to the video.
+Do not touch titles that are already good. Never invent facts or use clickbait lies.
+Return JSON only: {"proposals": [{"video_id": "...", "new_title": "...", "why": "one short line"}]}
+Videos: """
+
+COMMENTS_PROMPT = """You reply to YouTube comments for the history channel "Kemet | Ancient Egypt".
+Voice: warm, calm, short (1-2 sentences), no emoji spam, never argue, never promise anything,
+only state facts you are sure of. For each comment decide: "reply" (praise, question, interest)
+or "hold" (rude, hateful, spam, scam links, bait). Return JSON only:
+{"items": [{"id": "...", "action": "reply" or "hold", "reply": "text, empty if hold"}]}
+Comments: """
+
+
+def cmd_titles(st):
+    send("Looking at your videos...")
+    tok = yt_token()
+    vids, _ = my_videos(tok)
+    if not vids:
+        return send("I could not find any videos on the channel yet.")
+    data = [{"id": v["id"], "title": v["snippet"]["title"],
+             "description": v["snippet"].get("description", "")[:200],
+             "views": int(v.get("statistics", {}).get("viewCount", 0))} for v in vids]
+    out = gemini([{"text": "What you know about the owner's taste:\n" + learned() + "\n\n" + TITLES_PROMPT + json.dumps(data)}])
+    byid = {v["id"]: v for v in vids}
+    shown = 0
+    for p in out.get("proposals", [])[:3]:
+        v = byid.get(p.get("video_id"))
+        new = (p.get("new_title") or "").strip()[:100]
+        if not v or not new or new == v["snippet"]["title"]:
+            continue
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "title", "video_id": v["id"], "old": v["snippet"]["title"],
+                            "new": new, "created": time.time(),
+                            "views": int(v.get("statistics", {}).get("viewCount", 0)),
+                            "published": v["snippet"].get("publishedAt", "")}
+        send(f"Title idea\nNow: {v['snippet']['title']}\nNew: {new}\nWhy: {p.get('why', '')}\n"
+             f"https://youtu.be/{v['id']}",
+             [[btn("✅ Apply", pid, "ta"), btn("Skip", pid, "ts")]])
+        shown += 1
+    if not shown:
+        send("Your titles look fine. Nothing to change right now.")
+
+
+def set_title(video_id, title):
+    tok = yt_token()
+    sn = yt_get("videos", tok, part="snippet", id=video_id)["items"][0]["snippet"]
+    body = {"title": title, "description": sn.get("description", ""),
+            "categoryId": sn.get("categoryId", "27"), "tags": sn.get("tags", [])}
+    if sn.get("defaultLanguage"):
+        body["defaultLanguage"] = sn["defaultLanguage"]
+    r = S.put(f"{YT}/youtube/v3/videos?part=snippet", headers={"Authorization": f"Bearer {tok}"},
+              json={"id": video_id, "snippet": body}, timeout=60)
+    r.raise_for_status()
+
+
+def cmd_comments(st):
+    send("Checking new comments...")
+    tok = yt_token()
+    vids, chid = my_videos(tok, 8)
+    seen = set(st.get("seen", []))
+    items = []
+    for v in vids:
+        try:
+            threads = yt_get("commentThreads", tok, part="snippet", videoId=v["id"],
+                             maxResults=15, order="time")["items"]
+        except Exception:
+            continue  # comments off on this video
+        for t in threads:
+            top = t["snippet"]["topLevelComment"]
+            cid = top["id"]
+            author_id = top["snippet"].get("authorChannelId", {}).get("value")
+            if cid in seen or t["snippet"].get("totalReplyCount", 0) > 0 or author_id == chid:
+                continue
+            items.append({"id": cid, "video": v["snippet"]["title"],
+                          "author": top["snippet"].get("authorDisplayName", ""),
+                          "text": top["snippet"].get("textOriginal", "")[:500]})
+    items = items[:6]
+    if not items:
+        return send("No new comments waiting for a reply.")
+    out = gemini([{"text": COMMENTS_PROMPT + json.dumps(items)}])
+    by = {i["id"]: i for i in items}
+    held = []
+    for r in out.get("items", []):
+        it = by.get(r.get("id"))
+        if not it:
+            continue
+        seen.add(it["id"])
+        reply = (r.get("reply") or "").replace('"', "'").strip()[:500]
+        if r.get("action") != "reply" or not reply:
+            held.append(it)
+            continue
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "comment", "parent": it["id"], "reply": reply, "created": time.time()}
+        send(f"💬 {it['author']} on \"{it['video']}\":\n{it['text']}\n\nDraft reply:\n{reply}",
+             [[btn("✅ Post reply", pid, "ca"), btn("Skip", pid, "cs")]])
+    if held:
+        send("Held back (rude, spam or bait). I will not reply to these:\n" +
+             "\n".join(f"• {h['author']}: {h['text'][:120]}" for h in held))
+    st["seen"] = sorted(seen)[-2000:]
+
+
+def post_reply(parent, text):
+    tok = yt_token()
+    r = S.post(f"{YT}/youtube/v3/comments?part=snippet", headers={"Authorization": f"Bearer {tok}"},
+               json={"snippet": {"parentId": parent, "textOriginal": text}}, timeout=60)
+    r.raise_for_status()
+
+
+def iso_ts(text):
+    try:
+        import calendar
+        return calendar.timegm(time.strptime(text[:19], "%Y-%m-%dT%H:%M:%S"))
+    except Exception:
+        return None
+
+
+def on_prop(jid, act, st):
+    prop = st["props"].get(jid)
+    if not prop:
+        return send("That suggestion is too old. Ask again with /titles, /comments or /idea.")
+    kind = prop["type"]
+    if act in ("ts", "cs"):
+        if kind == "title":
+            remember("skips", prop["new"])
+        st["props"].pop(jid, None)
+        return send("Skipped.")
+    if act == "ta" and kind == "title":
+        set_title(prop["video_id"], prop["new"])
+        remember("picks", prop["new"])
+        pub = iso_ts(prop.get("published", ""))
+        age = max((time.time() - pub) / 86400, 1) if pub else 30
+        mem()["exps"].append({"video_id": prop["video_id"], "old": prop["old"], "new": prop["new"],
+                              "start_views": prop.get("views", 0), "start_ts": time.time(),
+                              "before_rate": prop.get("views", 0) / age, "done": False})
+        return send(f"✅ Title changed to:\n{prop['new']}\n\nI will compare its views in 3 days and tell you "
+                    "if I would keep it.", [[btn("↩️ Undo", jid, "tu")]])
+    if act == "tu" and kind == "title":
+        set_title(prop["video_id"], prop["old"])
+        mem()["exps"] = [e for e in mem()["exps"] if not (e["video_id"] == prop["video_id"] and not e["done"])]
+        st["props"].pop(jid, None)
+        return send(f"↩️ Back to the old title:\n{prop['old']}")
+    if act == "ca" and kind == "comment":
+        post_reply(prop["parent"], prop["reply"])
+        st["props"].pop(jid, None)
+        return send("✅ Reply posted.")
+    if act == "ek" and kind == "exp":
+        remember("picks", prop["new"])
+        st["props"].pop(jid, None)
+        return send("👍 Kept the new title.")
+    if act == "er" and kind == "exp":
+        set_title(prop["video_id"], prop["old"])
+        remember("skips", prop["new"])
+        st["props"].pop(jid, None)
+        return send(f"↩️ Reverted to:\n{prop['old']}")
+    if act == "sg" and kind == "subgen":
+        return make_subtitles(prop, st)
+    if act == "cu" and kind == "caps":
+        return upload_captions(prop, jid, st)
+    if act == "is" and kind == "ideas":
+        return write_script(prop["ideas"][int(st.get("_val", "0"))])
+    send("That button is out of date.")
+
+
+# ---------------- subtitles ----------------
+SUBS_PROMPT = """Listen to this video and write subtitles.
+Return JSON only: {"has_speech": true or false, "captions": [{"lang": "en", "srt": "..."}, {"lang": "ar", "srt": "..."}]}
+Rules: standard SRT (numbered cues, 00:00:01,000 --> 00:00:03,500, blank line between cues), 1-2 short lines per cue.
+Transcribe exactly what is said; if the speech is not English, still write the "en" track as a faithful translation.
+The "ar" track is natural Modern Standard Arabic. Spell Ancient Egyptian names correctly (Anubis, Ma'at, Osiris, Ra, Duat).
+If nobody speaks, return has_speech false and empty captions."""
+
+SRT_CUE = re.compile(r"\d\d:\d\d:\d\d,\d{3} --> \d\d:\d\d:\d\d,\d{3}")
+
+
+def make_subtitles(prop, st):
+    rec = mem()["videos"].get(prop["video_id"])
+    if not rec or not rec.get("file_id"):
+        return send("I no longer have that video file. Send the video again and I will redo it.")
+    send("Listening to your video and writing subtitles (1-3 minutes)...")
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "v.mp4"
+        tg_download(rec["file_id"], p)
+        info = gemini_upload(p, "video/mp4")
+        try:
+            out = gemini([{"file_data": {"mime_type": "video/mp4", "file_uri": info["uri"]}},
+                          {"text": SUBS_PROMPT}])
+        finally:
+            try:
+                S.delete(f"{GBASE}/v1beta/{info['name']}", headers={"x-goog-api-key": GKEY}, timeout=30)
+            except Exception:
+                pass
+    caps = {}
+    for c in out.get("captions", []):
+        srt = (c.get("srt") or "").strip()
+        if c.get("lang") in dict(CAPTION_LANGS) and len(SRT_CUE.findall(srt)) >= 1:
+            caps[c["lang"]] = srt
+    if not out.get("has_speech", True) or not caps:
+        return send("I could not hear clear speech to write subtitles from. Nothing was added.")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "caps", "video_id": prop["video_id"], "caps": caps, "created": time.time()}
+    preview = []
+    for lang, name in CAPTION_LANGS:
+        if lang in caps:
+            cues = caps[lang].split("\n\n")[:2]
+            preview.append(f"{name} ({len(SRT_CUE.findall(caps[lang]))} lines):\n" + "\n\n".join(cues))
+    send("Subtitles ready. Preview:\n\n" + "\n\n".join(preview) +
+         "\n\nCheck the names are spelled right. Upload them to the video?",
+         [[btn("✅ Upload subtitles", pid, "cu"), btn("Skip", pid, "cs")]])
+
+
+def yt_caption(vid, lang, name, srt, tok):
+    bnd = "kemetboundary"
+    meta = json.dumps({"snippet": {"videoId": vid, "language": lang, "name": name, "isDraft": False}})
+    body = (f"--{bnd}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{meta}\r\n"
+            f"--{bnd}\r\nContent-Type: application/octet-stream\r\n\r\n").encode("utf-8") \
+        + srt.encode("utf-8") + f"\r\n--{bnd}--".encode()
+    r = S.post(f"{YT}/upload/youtube/v3/captions?part=snippet&uploadType=multipart",
+               headers={"Authorization": f"Bearer {tok}", "Content-Type": f"multipart/related; boundary={bnd}"},
+               data=body, timeout=120)
+    r.raise_for_status()
+
+
+def upload_captions(prop, jid, st):
+    tok = yt_token()
+    done, failed = [], []
+    for lang, name in CAPTION_LANGS:
+        if lang in prop["caps"]:
+            try:
+                yt_caption(prop["video_id"], lang, name, prop["caps"][lang], tok)
+                done.append(name)
+            except Exception as e:
+                failed.append(f"{name}: {clean(e)[:100]}")
+    st["props"].pop(jid, None)
+    send(("✅ Subtitles added: " + ", ".join(done) if done else "No subtitles were added.") +
+         ("\n⚠️ Failed: " + "; ".join(failed) if failed else ""))
+
+
+# ---------------- idea desk and scripts ----------------
+IDEAS_PROMPT = """You are the head of ideas for the YouTube history Shorts channel "Kemet | Ancient Egypt".
+What you know about the owner and the channel:
+{memory}
+
+Recent videos already made (do not repeat them): {titles}
+
+Give 5 NEW video ideas that are historically solid and each has a strong first-3-seconds hook.
+Prefer patterns that worked for this channel. Return JSON only:
+{{"ideas": [{{"title": "max 70 chars", "hook": "the opening line", "why": "one short line"}}]}}"""
+
+SCRIPT_PROMPT = """Write a 45-60 second YouTube Shorts script for the channel "Kemet | Ancient Egypt".
+Topic: {title}. Opening hook idea: {hook}
+Use web search to check every fact (names, dates, places). Format exactly:
+HOOK (first 3 seconds) / BEAT 1 / BEAT 2 / BEAT 3 / CLOSE (end with a question for comments).
+Under 150 spoken words. Cinematic, mysterious but accurate. English.
+After the script add a line "CHECK:" listing any claim you could not confirm, or "CHECK: none"."""
+
+
+def gemini_text(prompt, search=False):
+    body = {"contents": [{"parts": [{"text": prompt}]}]}
+    if search:
+        body["tools"] = [{"google_search": {}}]
+    last = "no model answered"
+    for m in MODELS:
+        for attempt in range(3):
+            r = S.post(f"{GBASE}/v1beta/models/{m}:generateContent",
+                       headers={"x-goog-api-key": GKEY}, json=body, timeout=240)
+            if r.status_code in (429, 500, 502, 503, 504):
+                last = f"{m} HTTP {r.status_code}"
+                time.sleep(6 * (attempt + 1))
+                continue
+            if r.status_code == 404:
+                break
+            r.raise_for_status()
+            cand = r.json()["candidates"][0]
+            text = "".join(p.get("text", "") for p in cand["content"]["parts"]).strip()
+            chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
+            sources = [(c["web"].get("title", ""), c["web"].get("uri", "")) for c in chunks if c.get("web")]
+            return text, sources
+    raise RuntimeError(f"Gemini failed: {last}")
+
+
+def cmd_idea(st):
+    send("Thinking of ideas based on what works for you...")
+    tok = yt_token()
+    vids, _ = my_videos(tok, 20)
+    titles = [v["snippet"]["title"] for v in vids]
+    out = gemini([{"text": IDEAS_PROMPT.format(memory=learned(), titles=json.dumps(titles))}])
+    ideas = [i for i in out.get("ideas", []) if i.get("title")][:5]
+    if not ideas:
+        return send("I could not come up with ideas right now. Try again later.")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "ideas", "ideas": ideas, "created": time.time()}
+    body = "Video ideas:\n\n" + "\n\n".join(
+        f"{n + 1}. {i['title']}\nOpening: {i.get('hook', '')}\nWhy: {i.get('why', '')}" for n, i in enumerate(ideas))
+    send(body + "\n\nTap one and I will write a fact-checked script.",
+         [[btn(f"Script {n + 1}", pid, "is", n) for n in range(len(ideas))]])
+
+
+def write_script(idea):
+    send(f"Writing and fact-checking: {idea['title']} ...")
+    text, sources = gemini_text(SCRIPT_PROMPT.format(title=idea["title"], hook=idea.get("hook", "")), search=True)
+    msg = f"🎬 {idea['title']}\n\n{text}"
+    if sources:
+        seen, lines = set(), []
+        for t, u in sources:
+            if u not in seen:
+                seen.add(u)
+                lines.append(f"• {t}: {u}")
+        msg += "\n\nSources I checked:\n" + "\n".join(lines[:5])
+    msg += "\n\nRecord it in your own voice, then send me the video. (AI can still be wrong: glance at the sources.)"
+    send(msg)
+
+
+# ---------------- results, experiments, weekly plan ----------------
+RESULTS_PROMPT = """You are the analyst for the YouTube history channel "Kemet | Ancient Egypt".
+A video just had its first days. Be honest, no flattery.
+Title: {title}
+Producer review at upload: {summary}
+Views so far: {views}. Typical views for this channel's recent videos (median): {median}.
+Analytics: {analytics}
+What you already know about the channel:
+{memory}
+
+Return JSON only:
+{{"verdict": "2 honest sentences: did it do well, and the likely reason",
+ "repeat": "what to repeat",
+ "avoid": "what to avoid or fix next time",
+ "lessons": ["at most 2 short rules for future videos, based on evidence, not guesses"]}}"""
+
+PLAN_PROMPT = """You plan the week for the YouTube history channel "Kemet | Ancient Egypt".
+What you know about the channel and its owner:
+{memory}
+Recent video titles: {titles}
+Days since the last upload: {gap}
+
+Return JSON only: {{"note": "one honest, friendly line about the channel's rhythm", "plan": [{{"day": "Mon", "topic": "...", "angle": "..."}}]}}
+At most 3 items, historically solid, not repeating recent titles."""
+
+
+def analytics_video(tok, vid, start_ts):
+    r = S.get(f"{YTA}/v2/reports", params={
+        "ids": "channel==MINE", "startDate": time.strftime("%Y-%m-%d", time.gmtime(start_ts)),
+        "endDate": time.strftime("%Y-%m-%d", time.gmtime()),
+        "metrics": "views,averageViewPercentage,estimatedMinutesWatched,subscribersGained",
+        "filters": f"video=={vid}"}, headers={"Authorization": f"Bearer {tok}"}, timeout=60)
+    if r.status_code != 200:
+        return None
+    rows = r.json().get("rows") or []
+    if not rows:
+        return None
+    v, pct, mins, subs = rows[0]
+    return {"views": v, "avg_view_percent": round(pct, 1), "minutes_watched": round(mins), "subs_gained": subs}
+
+
+def video_results(vid, rec, tok, vids):
+    stat = [v for v in vids if v["id"] == vid]
+    views = int(stat[0]["statistics"].get("viewCount", 0)) if stat else 0
+    others = sorted(int(v["statistics"].get("viewCount", 0)) for v in vids if v["id"] != vid)
+    median = others[len(others) // 2] if others else "unknown"
+    an = analytics_video(tok, vid, rec["uploaded"])
+    out = gemini([{"text": RESULTS_PROMPT.format(
+        title=rec["title"], summary=rec.get("summary", ""), views=views, median=median,
+        analytics=json.dumps(an) if an else "not available yet", memory=learned())}])
+    lines = [f"📈 Results: {rec['title']}", f"Views: {views} (channel typical: {median})"]
+    if an:
+        lines.append(f"Average watched: {an['avg_view_percent']}%   New subscribers: {an['subs_gained']}")
+    lines += ["", out.get("verdict", ""), "", f"Repeat: {out.get('repeat', '')}", f"Avoid: {out.get('avoid', '')}"]
+    new = [x for x in out.get("lessons", []) if x][:2]
+    for x in new:
+        remember("lessons", x[:200])
+    if new:
+        lines += ["", "I learned: " + " | ".join(new)]
+    send("\n".join(lines))
+
+
+def run_results(force=False):
+    m = mem()
+    pending = {v: r for v, r in m["videos"].items() if not r.get("checked")}
+    if force and not pending and m["videos"]:
+        last = max(m["videos"].items(), key=lambda kv: kv[1]["uploaded"])
+        pending = {last[0]: last[1]}
+    if not pending:
+        return False
+    tok = yt_token()
+    vids, _ = my_videos(tok, 20)
+    shown = False
+    for vid, rec in pending.items():
+        if yt_privacy(vid, tok) == "public" and not rec.get("public_at"):
+            rec["public_at"] = time.time()
+        if not force and (not rec.get("public_at") or time.time() - rec["public_at"] < 48 * 3600):
+            continue
+        video_results(vid, rec, tok, vids)
+        rec["checked"] = True
+        shown = True
+    return shown
+
+
+def run_exps(st):
+    m = mem()
+    due = [e for e in m["exps"] if not e["done"] and time.time() - e["start_ts"] >= 72 * 3600]
+    if not due:
+        return
+    tok = yt_token()
+    vids, _ = my_videos(tok, 20)
+    by = {v["id"]: v for v in vids}
+    for e in due:
+        v = by.get(e["video_id"])
+        if not v:
+            e["done"] = True
+            continue
+        days = max((time.time() - e["start_ts"]) / 86400, 0.5)
+        after = (int(v["statistics"].get("viewCount", 0)) - e["start_views"]) / days
+        before = e["before_rate"]
+        better = after > before * 1.15
+        worse = after < before * 0.85
+        verdict = ("faster than before" if better else "slower than before" if worse else "about the same")
+        e["done"] = True
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "exp", "video_id": e["video_id"], "old": e["old"], "new": e["new"],
+                            "created": time.time()}
+        send(f"🧪 Title test result\nNew: {e['new']}\nOld: {e['old']}\n\n"
+             f"Views per day before: {before:.1f}\nViews per day since the change: {after:.1f}\n"
+             f"→ {verdict}.\nThis is a hint, not proof: views fade as a video ages, so weigh it yourself.",
+             [[btn("👍 Keep new", pid, "ek"), btn("↩️ Revert to old", pid, "er")]])
+
+
+def do_plan(st):
+    tok = yt_token()
+    vids, _ = my_videos(tok, 15)
+    titles = [v["snippet"]["title"] for v in vids]
+    gap = "unknown"
+    if vids:
+        pubs = [iso_ts(v["snippet"].get("publishedAt", "")) for v in vids]
+        pubs = [p for p in pubs if p]
+        if pubs:
+            gap = round((time.time() - max(pubs)) / 86400)
+    out = gemini([{"text": PLAN_PROMPT.format(memory=learned(), titles=json.dumps(titles), gap=gap)}])
+    items = out.get("plan", [])[:3]
+    body = "🗓 Your week\n" + out.get("note", "") + "\n\n" + "\n\n".join(
+        f"{i.get('day', '')}: {i.get('topic', '')}\n{i.get('angle', '')}" for i in items)
+    send(body + "\n\nType /idea if you want fresh options.")
+
+
+def housekeeping(st):
+    m = mem()
+    now = time.time()
+    if now - m["last_check"] > 1800:
+        m["last_check"] = now
+        for step in (lambda: run_results(False), lambda: run_exps(st)):
+            try:
+                step()
+            except Exception as e:
+                print("housekeeping:", clean(e))
+    g = time.gmtime()
+    week = time.strftime("%G-%V", g)
+    if g.tm_wday == 6 and g.tm_hour >= 7 and m["last_plan"] != week:
+        m["last_plan"] = week
+        try:
+            do_plan(st)
+        except Exception as e:
+            print("plan:", clean(e))
+
+
+def show_lessons():
+    m = mem()
+    if not (m["lessons"] or m["picks"] or m["skips"]):
+        return send("I have not learned anything yet. Choose some titles and publish a video: "
+                    "I learn from your picks and from how each video performs.")
+    send("What I have learned so far:\n\n" + learned())
+
+
 HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "I will check it and give you choices to tap. Nothing goes on YouTube without your tap.\n\n"
+        "/idea - fresh video ideas, then a fact-checked script\n"
+        "/titles - better titles for your older videos (you approve each)\n"
+        "/comments - draft replies to new comments (you approve each)\n"
+        "/subtitles - English + Arabic subtitles for your latest video\n"
+        "/results - how your latest video is doing\n/plan - this week's plan\n"
+        "/lessons - what I have learned about your channel\n"
         "/report - daily channel report now\n/status - videos waiting for you\n/help")
 
 
@@ -439,6 +1013,26 @@ def on_message(msg, st):
         send(HELP)
     elif text == "/report":
         trigger_report()
+    elif text == "/titles":
+        cmd_titles(st)
+    elif text == "/comments":
+        cmd_comments(st)
+    elif text == "/idea":
+        cmd_idea(st)
+    elif text == "/plan":
+        do_plan(st)
+    elif text == "/results":
+        if not run_results(force=True):
+            send("No video from this bot to check yet. Upload one first.")
+    elif text == "/subtitles":
+        vids = mem()["videos"]
+        if not vids:
+            send("Upload a video through me first, then I can write its subtitles.")
+        else:
+            vid = max(vids.items(), key=lambda kv: kv[1]["uploaded"])[0]
+            make_subtitles({"video_id": vid}, st)
+    elif text == "/lessons":
+        show_lessons()
     elif text == "/status":
         open_jobs = [j for j in st["jobs"].values() if j["stage"] not in ("done", "cancelled", "uploaded")]
         send("Waiting for your choice:\n" + "\n".join(f"• {j['name']} ({j['stage']})" for j in open_jobs)
@@ -461,6 +1055,9 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is"):
+        st["_val"] = val or "0"
+        return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
     if not job:
         return send("That video is no longer waiting (too old). Send it again.")
@@ -470,8 +1067,14 @@ def on_callback(cb, st):
         return send("Cancelled. Nothing was uploaded.")
     if act == "t" and stage == "title":
         job["title"] = job["review"]["titles"][int(val)]
+        remember("picks", job["title"])
+        for t in job["review"]["titles"]:
+            if t != job["title"]:
+                remember("skips", t)
         return ask_desc(job)
     if act == "m" and stage == "title":
+        for t in job["review"]["titles"]:
+            remember("skips", t)
         job["review"]["titles"] = more_titles(job)
         return ask_title(job)
     if act == "d" and stage == "desc":
@@ -482,6 +1085,9 @@ def on_callback(cb, st):
             return ask_thumb(job, p)
     if act == "h" and stage == "thumb":
         job["thumb"] = int(val)
+        return ask_confirm(job)
+    if act == "l" and stage == "confirm":
+        job["ai"] = not job.get("ai")
         return ask_confirm(job)
     if act == "u" and stage == "confirm":
         return do_upload(job)
@@ -495,6 +1101,28 @@ def on_callback(cb, st):
 
 def main():
     st = load_state()
+    st.setdefault("props", {}); st.setdefault("seen", []); st.setdefault("n", 0)
+    global ST
+    ST = st
+    try:
+        tg("setMyCommands", commands=[
+            {"command": "idea", "description": "Fresh video ideas + script"},
+            {"command": "titles", "description": "Better titles for old videos"},
+            {"command": "subtitles", "description": "English + Arabic subtitles"},
+            {"command": "results", "description": "How your latest video did"},
+            {"command": "plan", "description": "This week's plan"},
+            {"command": "lessons", "description": "What I have learned"},
+            {"command": "comments", "description": "Draft replies to comments"},
+            {"command": "report", "description": "Daily channel report now"},
+            {"command": "status", "description": "Videos waiting for you"},
+            {"command": "help", "description": "How to use the bot"}])
+    except Exception:
+        pass
+    try:
+        housekeeping(st)
+        save_state(st)
+    except Exception as e:
+        print("housekeeping error:", clean(e))
     end = time.time() + RUN_SECONDS
     first = True
     while first or time.time() < end:
