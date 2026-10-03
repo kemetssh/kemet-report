@@ -1,5 +1,5 @@
 {
- "offset": 277935914,
+ "offset": 277935927,
  "jobs": {
   "55": {
    "id": "55",
@@ -124,6 +124,80 @@
    "created": 1791063988.421785,
    "stage": "title",
    "ai": true
+  },
+  "106": {
+   "id": "106",
+   "file_id": "BAACAgQAAxkBAANqasF6EXNN-mX4yFR0XjSuh2cryt4AAr4eAAJ5RAlSHubkQgeeyLw9BA",
+   "name": "IMG_8253.MP4",
+   "dur": 19.9,
+   "w": 720,
+   "h": 1280,
+   "review": {
+    "verdict": "fix first",
+    "score": 6,
+    "summary": "The video features high-quality AI-generated visuals that pair well with the intriguing historical topic. However, the lack of disclosure about the AI generation violates YouTube's policy and the voiceover could benefit from more dynamic narration.",
+    "issues": [
+     {
+      "at": "00:00",
+      "problem": "No disclosure of AI-generated content.",
+      "fix": "Add a text overlay or include in the description that the visual elements are AI-generated to comply with YouTube's transparency guidelines."
+     },
+     {
+      "at": "00:05",
+      "problem": "Ambiguous pronunciation.",
+      "fix": "Ensure the narration is crisp and clear, particularly when describing cultural items to maintain the professional tone of a history channel."
+     },
+     {
+      "at": "00:15",
+      "problem": "Misleading visuals.",
+      "fix": "While historically thematic, clarify that these depictions are artistic interpretations rather than historically accurate visual records of the event."
+     }
+    ],
+    "strengths": [
+     "Visually stunning and aesthetically consistent imagery.",
+     "Concise and informative delivery that fits the short-form format well.",
+     "Strong thematic branding aligned with the channel name 'Kemet'."
+    ],
+    "titles": [
+     "The Truth About The Mysterious Cones in Egyptian Art",
+     "Ancient Egypt: The Real Purpose of Head Cones",
+     "Did They Really Wear Fat Cones? An Ancient Egyptian Mystery"
+    ],
+    "descriptions": [
+     "Explore the fascinating, debated history behind the scented cones worn by Ancient Egyptians during social gatherings. What were they really made of? \n\n#AncientEgypt #HistoryFacts #Kemet #Shorts",
+     "Were ancient Egyptians really wearing cones of wax and perfume on their heads at parties? Dive into this unique beauty ritual from the Nile Valley. \n\n#AncientEgypt #Archaeology #Egyptology #Shorts"
+    ],
+    "tags": [
+     "Ancient Egypt",
+     "Kemet",
+     "History",
+     "Ancient Egyptian Fashion",
+     "Egyptology",
+     "Archaeology",
+     "Ancient History Facts",
+     "Pharaohs",
+     "Cultural History",
+     "Ancient Civilization",
+     "Historical Curiosities",
+     "Educational"
+    ],
+    "thumb_times": [
+     2.0,
+     10.0,
+     18.0
+    ],
+    "ai_visuals": true,
+    "policy_notes": [
+     "Must include a disclosure label for Al-generated content as per YouTube policy."
+    ]
+   },
+   "created": 1791064682.946715,
+   "stage": "uploaded",
+   "ai": true,
+   "title": "Did They Really Wear Fat Cones? An Ancient Egyptian Mystery",
+   "desc": 1,
+   "thumb": 2,
+   "video_id": "ilMueZ9RnQw"
   }
  },
  "props": {
@@ -242,19 +316,39 @@
     }
    ],
    "created": 1791063052.8837502
+  },
+  "p9": {
+   "type": "subgen",
+   "video_id": "ilMueZ9RnQw",
+   "created": 1791064865.918729
   }
  },
  "seen": [],
- "n": 8,
+ "n": 10,
  "mem": {
   "lessons": [],
   "picks": [
    "Anubis: The Jackal God of the Afterlife",
    "What Does Kemet Mean? The Real Name of Egypt",
-   "Why Did Ancient Egyptians Call Their Land Kemet?"
+   "Why Did Ancient Egyptians Call Their Land Kemet?",
+   "Did They Really Wear Fat Cones? An Ancient Egyptian Mystery"
   ],
-  "skips": [],
-  "videos": {},
+  "skips": [
+   "Did Ancient Egyptians Wear Melting Fat Cones?",
+   "The Mystery of Ancient Egyptian Scented Cones",
+   "Fact Check: What were those cones on Egyptian heads?",
+   "The Truth About The Mysterious Cones in Egyptian Art",
+   "Ancient Egypt: The Real Purpose of Head Cones"
+  ],
+  "videos": {
+   "ilMueZ9RnQw": {
+    "uploaded": 1791064865.91872,
+    "title": "Did They Really Wear Fat Cones? An Ancient Egyptian Mystery",
+    "file_id": "BAACAgQAAxkBAANqasF6EXNN-mX4yFR0XjSuh2cryt4AAr4eAAJ5RAlSHubkQgeeyLw9BA",
+    "summary": "The video features high-quality AI-generated visuals that pair well with the intriguing historical topic. However, the lack of disclosure about the AI generation violates YouTube's policy and the voiceover could benefit from more dynamic narration.",
+    "checked": false
+   }
+  },
   "exps": [
    {
     "video_id": "UI6nMq8_uaU",
