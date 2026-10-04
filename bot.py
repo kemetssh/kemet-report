@@ -33,6 +33,8 @@ GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
+WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
+WORKER_SECRET = os.getenv("WORKER_SECRET", "")
 YTA = os.getenv("YTA_BASE", "https://youtubeanalytics.googleapis.com")
 CAPTION_LANGS = [("en", "English"), ("ar", "العربية")]
 ST = {}  # the live state, set in main()
@@ -1958,6 +1960,32 @@ def on_callback(cb, st):
     send("That button is out of date.")
 
 
+def fetch_updates(st, wait):
+    """New Telegram updates: from the relay Worker if configured, else straight from Telegram."""
+    if WORKER:
+        r = S.get(WORKER + "/pending", headers={"Authorization": "Bearer " + WORKER_SECRET}, timeout=30)
+        r.raise_for_status()
+        raw = r.json()
+        ups = [u for u in raw if u["update_id"] >= st["offset"]]
+        if raw and not ups:
+            worker_ack(st["offset"] - 1)      # already handled earlier
+        if not ups and wait > 0:
+            time.sleep(min(wait, 3))
+        return ups
+    return S.get(f"{TGAPI}/getUpdates", params={
+        "offset": st["offset"], "timeout": wait,
+        "allowed_updates": json.dumps(["message", "callback_query"])},
+        timeout=wait + 30).json().get("result", [])
+
+
+def worker_ack(upto):
+    try:
+        S.post(WORKER + "/ack", headers={"Authorization": "Bearer " + WORKER_SECRET},
+               json={"upto": upto}, timeout=30)
+    except Exception as e:
+        print("ack error:", clean(e))
+
+
 def main():
     st = load_state()
     st.setdefault("props", {}); st.setdefault("seen", []); st.setdefault("n", 0)
@@ -2000,10 +2028,7 @@ def main():
         wait = 0 if RUN_SECONDS <= 0 else int(min(25, max(end - time.time(), 0)))
         first = False
         try:
-            updates = S.get(f"{TGAPI}/getUpdates", params={
-                "offset": st["offset"], "timeout": wait,
-                "allowed_updates": json.dumps(["message", "callback_query"])},
-                timeout=wait + 30).json().get("result", [])
+            updates = fetch_updates(st, wait)
         except Exception as e:
             print("poll error:", clean(e))
             time.sleep(3)
@@ -2022,6 +2047,8 @@ def main():
                 except Exception:
                     pass
             save_state(st)
+        if WORKER and updates:
+            worker_ack(st["offset"] - 1)
         if RUN_SECONDS <= 0:
             break
     save_state(st)
