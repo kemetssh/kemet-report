@@ -928,12 +928,13 @@ Return JSON only: {{"claims": ["one claim as a short plain sentence, max 90 char
 AUDIT_PROMPT = """You host "Kemet Audited", a YouTube series that audits claims about Ancient Egypt like a quality auditor. Use web search.
 CLAIM: {claim}
 Rules: rely on archaeology, inscriptions, peer-reviewed work and museum or university sources. Separate what is directly evidenced from what is only inferred. Never invent sources, quotes or numbers. If evidence is thin, say so.
+Do not overclaim: scholars often disagree on details (for example whether workers were paid in goods, were rotating state labour, or included some captives), so use careful words like 'most likely', 'the evidence suggests', and name what is still debated. Always fill 'unsure' with at least the main open question unless the claim is simple fact. Prefer 'FALSE' only when evidence clearly contradicts the claim; otherwise use UNPROVEN or DISPUTED.
 Return JSON only: {{"verdict": "PROVEN" or "LIKELY" or "DISPUTED" or "UNPROVEN" or "FALSE",
  "score": integer 0-100 (how strongly the evidence supports the claim),
  "evidence_for": ["max 3 short points"],
  "evidence_against": ["max 3 short points"],
  "bottom_line": "one plain sentence",
- "script": "45-60 second voice-over, under 150 words: hook that states the claim, then the evidence, then the verdict. Calm cinematic English. Ends with 'Verdict: ...'",
+ "script": "45-60 second voice-over, STRICTLY under 130 words (count them): hook that states the claim, then the evidence, then the verdict. Calm cinematic English. Ends with 'Verdict: ...'",
  "card": ["3-4 short lines for an on-screen score card"],
  "unsure": ["anything you could not confirm, else empty"]}}"""
 
