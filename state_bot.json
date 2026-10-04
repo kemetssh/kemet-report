@@ -1,5 +1,5 @@
 {
- "offset": 277935941,
+ "offset": 277935942,
  "jobs": {
   "55": {
    "id": "55",
@@ -458,6 +458,10 @@
    }
   ],
   "last_plan": "2026-40",
-  "last_check": 1791108572.0189402
+  "last_check": 1791108572.0189402,
+  "links": [],
+  "cadence_days": 3,
+  "last_nudge": 0,
+  "last_news": ""
  }
 }
