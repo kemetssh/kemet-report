@@ -251,7 +251,8 @@ Return JSON only with exactly these keys:
  "tags": ["up to 12 search tags"],
  "thumb_times": [3 numbers in seconds inside the video, sharp frames with a clear subject],
  "ai_visuals": true or false,  // true if the pictures or video look realistic AI-generated or heavily altered (YouTube requires a label for that)
- "policy_notes": ["short flags for YouTube policy: copyrighted music, film clips, logos, misleading claims, reused content. empty if clean"]
+ "policy_notes": ["short flags for YouTube policy: copyrighted music, film clips, logos, misleading claims, reused content. empty if clean"],
+ "claims": ["up to 8 factual claims about history that the narrator states (names, dates, places, causes), each as one plain sentence; empty if none"]
 }}"""
 
 
@@ -424,11 +425,13 @@ def ask_confirm(job):
          f"Description:\n{r['descriptions'][job['desc']]}\n\nThumbnail: {thumb}\n"
          f"AI / altered-content label: {ai}\n"
          + (f"Links block: {'ON' if job.get('links_on', True) else 'OFF'} ({len(mem()['links'])} links)\n"
-            if mem()["links"] else "") +
+            if mem()["links"] else "")
+         + (f"Sources block: {'ON' if job.get('ev_on', True) else 'OFF'}\n" if job.get("evidence") else "") +
          "\nIt stays private until you publish it.",
          [[btn("⬆️ Upload as private", jid, "u")],
           [btn(f"AI label: {ai} (tap to switch)", jid, "l")]]
          + ([[btn("Links block on/off", jid, "lk")]] if mem()["links"] else [])
+         + ([[btn("Sources block on/off", jid, "ev")]] if job.get("evidence") else [])
          + [[btn("Cancel", jid, "x")]])
 
 
@@ -453,8 +456,15 @@ def start_job(msg, st):
     job = {"id": jid, "file_id": v["file_id"], "name": name, "dur": dur, "w": w, "h": h,
            "review": review, "created": time.time(), "stage": "title",
            "ai": bool(review.get("ai_visuals"))}
+    pa = mem().get("pending_audit")
+    if pa:
+        job["evidence"] = pa
+        job["ev_on"] = True
     st["jobs"][jid] = job
     send(review_text(job))
+    if review.get("claims"):
+        send(f"🔎 I noted {len(review['claims'])} factual claims in your video. Want them checked against sources?",
+             [[btn("Fact-check my claims", jid, "fc")]])
     ask_title(job)
 
 
@@ -465,7 +475,7 @@ def do_upload(job):
         p = Path(d) / "v.mp4"
         tg_download(job["file_id"], p)
         tok = yt_token()
-        desc = job["review"]["descriptions"][job["desc"]] + links_block(job)
+        desc = job["review"]["descriptions"][job["desc"]] + links_block(job) + evidence_block(job)
         vid, label_ok = yt_upload(p, job["title"], desc, job["review"].get("tags", []), tok,
                                   ai=job.get("ai", False))
         thumb_note = ""
@@ -480,6 +490,8 @@ def do_upload(job):
         status = yt_privacy(vid, tok)
     job["video_id"] = vid
     job["stage"] = "uploaded"
+    if job.get("evidence") and job.get("ev_on", True):
+        mem().pop("pending_audit", None)
     label_note = ""
     if job.get("ai"):
         label_note = ("AI label set. " if label_ok else
@@ -721,6 +733,15 @@ def on_prop(jid, act, st):
         return cmd_crosspost(st, prop["video_id"])
     if act == "ls" and kind == "longs":
         return write_long(prop["concepts"][int(st.get("_val", "0"))])
+    if act == "ad" and kind == "claims":
+        return run_audit(prop["claims"][int(st.get("_val", "0"))], st)
+    if act == "am":
+        return cmd_audit(st)
+    if act == "as" and kind == "audit":
+        mem()["pending_audit"] = {"claim": "KEMET AUDITED: " + prop["claim"], "verdict": prop["verdict"],
+                                  "sources": prop["sources"]}
+        mem()["pending_audit"]["claim"] = prop["claim"]
+        return send("📌 Saved. On your next upload I will offer a sources block for the description (you can switch it off).")
     if act == "ci" and kind == "nudge":
         return cmd_idea(st)
     if act == "pa" and kind == "pl":
@@ -895,6 +916,139 @@ def write_script(idea):
         msg += "\n\nSources I checked:\n" + "\n".join(lines[:5])
     msg += "\n\nRecord it in your own voice, then send me the video. (AI can still be wrong: glance at the sources.)"
     send(msg)
+
+
+
+# ---------------- Kemet Audited ----------------
+AUDIT_CLAIMS_PROMPT = """You host "Kemet Audited", a YouTube series that audits popular claims about Ancient Egypt like a quality auditor: evidence first.
+List 6 widely repeated claims, myths or viral theories about Ancient Egypt that people argue about (pyramid building, curses, lost technology, who built what, famous rulers). Mix true, false and disputed ones.
+Already audited, avoid: {done}
+Return JSON only: {{"claims": ["one claim as a short plain sentence, max 90 characters"]}}"""
+
+AUDIT_PROMPT = """You host "Kemet Audited", a YouTube series that audits claims about Ancient Egypt like a quality auditor. Use web search.
+CLAIM: {claim}
+Rules: rely on archaeology, inscriptions, peer-reviewed work and museum or university sources. Separate what is directly evidenced from what is only inferred. Never invent sources, quotes or numbers. If evidence is thin, say so.
+Return JSON only: {{"verdict": "PROVEN" or "LIKELY" or "DISPUTED" or "UNPROVEN" or "FALSE",
+ "score": integer 0-100 (how strongly the evidence supports the claim),
+ "evidence_for": ["max 3 short points"],
+ "evidence_against": ["max 3 short points"],
+ "bottom_line": "one plain sentence",
+ "script": "45-60 second voice-over, under 150 words: hook that states the claim, then the evidence, then the verdict. Calm cinematic English. Ends with 'Verdict: ...'",
+ "card": ["3-4 short lines for an on-screen score card"],
+ "unsure": ["anything you could not confirm, else empty"]}}"""
+
+FACT_PROMPT = """Use web search. Fact-check these claims taken from a short Ancient Egypt video. Be strict and honest; never invent sources.
+Claims: {claims}
+Return JSON only: {{"results": [{{"claim": "...", "status": "solid" or "shaky" or "wrong", "note": "short reason", "fix": "how to say it correctly, or empty"}}]}}"""
+
+VERDICT_ICON = {"PROVEN": "✅", "LIKELY": "🟢", "DISPUTED": "🟡", "UNPROVEN": "🟠", "FALSE": "❌"}
+
+
+def parse_obj(text):
+    a, b = text.find("{"), text.rfind("}")
+    try:
+        return json.loads(text[a:b + 1])
+    except Exception:
+        return {}
+
+
+def dedupe_sources(sources, n=6):
+    seen, out = set(), []
+    for t, u in sources:
+        if u and u not in seen:
+            seen.add(u)
+            out.append([t or u, u])
+    return out[:n]
+
+
+def cmd_audit(st, raw="/audit"):
+    parts = raw.split(None, 1)
+    if len(parts) > 1 and parts[1].strip():
+        return run_audit(parts[1].strip()[:300], st)
+    send("Finding popular Ancient Egypt claims worth auditing...")
+    done = [a["claim"] for a in mem().get("audits", [])][-15:]
+    out = gemini([{"text": AUDIT_CLAIMS_PROMPT.format(done=json.dumps(done))}])
+    claims = [c for c in out.get("claims", []) if isinstance(c, str) and c.strip()][:6]
+    if not claims:
+        return send("I could not find claims right now. Type /audit and then your own claim, for example: /audit aliens built the pyramids")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "claims", "claims": claims, "created": time.time()}
+    send("🔎 Kemet Audited. Which claim should I audit?\n\n" + "\n".join(f"{n + 1}. {c}" for n, c in enumerate(claims))
+         + "\n\nOr type: /audit and your own claim.",
+         [[btn(str(n + 1), pid, "ad", n) for n in range(len(claims))]])
+
+
+def run_audit(claim, st):
+    send(f"🔎 Auditing: {claim}\n(about a minute: evidence first)")
+    text, sources = gemini_text(AUDIT_PROMPT.format(claim=claim), search=True)
+    a = parse_obj(text)
+    if not a.get("verdict"):
+        return send("I could not finish that audit. Try rewording the claim, or try again in a minute.")
+    verdict = str(a["verdict"]).upper()
+    srcs = dedupe_sources(sources)
+    bullets = lambda k: "\n".join("• " + str(x) for x in (a.get(k) or [])[:3]) or "• none found"
+    msg = (f"🔎 KEMET AUDITED\nClaim: {claim}\n\n{VERDICT_ICON.get(verdict, '•')} Verdict: {verdict}  |  Evidence score: {a.get('score', '?')}/100\n"
+           f"{a.get('bottom_line', '')}\n\nEvidence for:\n{bullets('evidence_for')}\n\nEvidence against:\n{bullets('evidence_against')}")
+    if a.get("unsure"):
+        msg += "\n\n⚠️ Not confirmed: " + "; ".join(str(x) for x in a["unsure"][:3])
+    if a.get("card"):
+        msg += "\n\n🎞 On-screen card:\n" + "\n".join(str(x) for x in a["card"][:4])
+    msg += "\n\n🎬 Script (record it in your own voice):\n" + str(a.get("script", ""))[:1500]
+    if srcs:
+        msg += "\n\nSources:\n" + "\n".join(f"• {t}: {u}" for t, u in srcs[:5])
+    msg += "\n\nAI can still be wrong: open the sources before you film."
+    au = mem().setdefault("audits", [])
+    au.append({"claim": claim, "verdict": verdict, "score": a.get("score"), "ts": time.time()})
+    mem()["audits"] = au[-30:]
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "audit", "claim": claim, "verdict": verdict, "sources": srcs, "created": time.time()}
+    send(msg[:4000], [[btn("📌 Put these sources in my next upload", pid, "as")],
+                      [btn("🔁 Another claim", pid, "am")]])
+
+
+def evidence_block(job):
+    ev = job.get("evidence")
+    if not ev or not job.get("ev_on", True) or not ev.get("sources"):
+        return ""
+    lines = [f"🔎 {ev['claim']}"]
+    if ev.get("verdict"):
+        lines.append(f"Verdict: {ev['verdict']}")
+    lines.append("Sources:")
+    lines += [f"- {t}: {u}" for t, u in ev["sources"][:6]]
+    return "\n\n" + "\n".join(lines)
+
+
+def factcheck_job(job):
+    claims = job["review"].get("claims") or []
+    if not claims:
+        return send("I did not hear specific factual claims in this video, so there is nothing to check.")
+    send("🔎 Checking every claim in your video against sources (about a minute)...")
+    text, sources = gemini_text(FACT_PROMPT.format(claims=json.dumps(claims[:8])), search=True)
+    res = [r for r in parse_obj(text).get("results", []) if r.get("claim")]
+    if not res:
+        return send("I could not complete the fact-check. Try again in a minute.")
+    icon = {"solid": "✅", "shaky": "⚠️", "wrong": "❌"}
+    lines = []
+    for r in res[:8]:
+        st_ = str(r.get("status", "shaky")).lower()
+        line = f"{icon.get(st_, '⚠️')} {r['claim']}\n   {r.get('note', '')}"
+        if st_ != "solid" and r.get("fix"):
+            line += f"\n   Say instead: {r['fix']}"
+        lines.append(line)
+    srcs = dedupe_sources(sources)
+    bad = [r for r in res if str(r.get("status", "")).lower() in ("shaky", "wrong")]
+    msg = "🔎 Fact-check of your video\n\n" + "\n\n".join(lines)
+    if srcs:
+        msg += "\n\nSources:\n" + "\n".join(f"• {t}: {u}" for t, u in srcs[:5])
+        job["evidence"] = {"claim": "Facts in this video were checked against these sources", "verdict": "", "sources": srcs}
+        job["ev_on"] = True
+        msg += "\n\nI can add these sources to your description (switch on the confirm screen)."
+    msg += ("\n\n⚠️ Fix the flagged lines before publishing. You can still upload as private."
+            if bad else "\n\nEvery claim held up. 🏺")
+    remember_fact = [r["claim"] for r in bad][:2]
+    for c in remember_fact:
+        remember("lessons", "Double-check this kind of claim before filming: " + c[:100])
+    send(msg[:4000])
 
 
 # ---------------- results, experiments, weekly plan ----------------
@@ -1545,7 +1699,7 @@ He wrote: "{text}"
 Choose the action. Actions: idea (wants video ideas), script (gave a topic to write a script about; put the topic in "topic"),
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist),
-progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about),
+progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
 longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), lessons (what you have learned), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
@@ -1586,6 +1740,8 @@ def run_action(action, topic, st, text=""):
         return cmd_retention(st)
     if action == "news":
         return cmd_news(st)
+    if action == "audit":
+        return cmd_audit(st, "/audit " + (topic or ""))
     if action == "longform":
         return cmd_longform(st)
     if action == "batch":
@@ -1650,6 +1806,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/progress - how close you are to earning on YouTube\n"
         "/retention - where viewers leave your latest video, and why\n"
         "/news - fresh Egypt news to turn into videos\n"
+        "/audit - Kemet Audited: test a myth against evidence (or /audit your claim)\n"
         "/longform - plan long videos (they earn more)\n"
         "/batch - 4 scripts to film in one sitting\n"
         "/collab - draft messages to similar channels\n"
@@ -1702,6 +1859,8 @@ def on_message(msg, st):
         cmd_retention(st)
     elif text == "/news":
         cmd_news(st)
+    elif text.startswith("/audit"):
+        cmd_audit(st, raw)
     elif text == "/longform":
         cmd_longform(st)
     elif text == "/batch":
@@ -1746,7 +1905,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "pa", "ls", "ci"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "pa", "ls", "ci", "ad", "am", "as"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -1776,6 +1935,11 @@ def on_callback(cb, st):
             return ask_thumb(job, p)
     if act == "h" and stage == "thumb":
         job["thumb"] = int(val)
+        return ask_confirm(job)
+    if act == "fc" and stage in ("title", "desc", "thumb", "confirm"):
+        return factcheck_job(job)
+    if act == "ev" and stage == "confirm":
+        job["ev_on"] = not job.get("ev_on", True)
         return ask_confirm(job)
     if act == "lk" and stage == "confirm":
         job["links_on"] = not job.get("links_on", True)
@@ -1807,6 +1971,7 @@ def main():
             {"command": "series", "description": "Add latest video to a playlist"},
             {"command": "progress", "description": "Progress toward earning"},
             {"command": "retention", "description": "Where viewers leave your video"},
+            {"command": "audit", "description": "Kemet Audited: check a claim vs evidence"},
             {"command": "news", "description": "Egypt news to make videos about"},
             {"command": "longform", "description": "Plan long videos"},
             {"command": "batch", "description": "4 scripts to film today"},
