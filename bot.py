@@ -1145,6 +1145,118 @@ def apply_playlist(prop, jid, st):
     send(f"✅ Added to the playlist.\nhttps://www.youtube.com/playlist?list={pl_id}")
 
 
+# ---------------- drop-off finder (audience retention) ----------------
+RETENTION_PROMPT = """You are a retention coach for the YouTube history Shorts channel "Kemet | Ancient Egypt".
+This is the video (watch it). YouTube's audience-retention data says viewers leave at these moments:
+{drops}
+Share still watching at 3 seconds: {at3}%. At the end: {end}%. Length: {dur:.0f}s.
+Note: on Shorts the share can pass 100% because people replay.
+For each drop, say what is on screen or said at that moment and why people may leave. Be specific and honest,
+do not invent. Then give one fix for each.
+What you already know about the channel:
+{memory}
+Return JSON only:
+{{"moments": [{{"at": "mm:ss", "what": "what happens there", "fix": "one concrete fix"}}],
+ "verdict": "2 honest sentences on the hook and the pacing",
+ "lessons": ["at most 2 short rules for future videos, based on this evidence"]}}"""
+
+
+def iso_dur(text):
+    m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$", text or "")
+    if not m:
+        return 0.0
+    h, mi, se = (float(x or 0) for x in m.groups())
+    return h * 3600 + mi * 60 + se
+
+
+def retention_curve(tok, vid, start_ts):
+    r = S.get(f"{YTA}/v2/reports", params={
+        "ids": "channel==MINE",
+        "startDate": time.strftime("%Y-%m-%d", time.gmtime(start_ts)),
+        "endDate": time.strftime("%Y-%m-%d", time.gmtime()),
+        "metrics": "audienceWatchRatio", "dimensions": "elapsedVideoTimeRatio",
+        "filters": f"video=={vid}"}, headers={"Authorization": f"Bearer {tok}"}, timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"Analytics HTTP {r.status_code}")
+    return sorted((float(a), float(b)) for a, b in (r.json().get("rows") or []))
+
+
+def find_drops(curve, dur):
+    if len(curve) < 10 or dur <= 0:
+        return None
+    win = max(len(curve) // 20, 1)
+    cand = sorted(((curve[i][1] - curve[i + win][1], curve[i][0], curve[i + win][0])
+                   for i in range(len(curve) - win)), reverse=True)
+    chosen = []
+    for d, a, b in cand:
+        if d < 0.03:
+            break
+        if all(abs(a - c[1]) > 0.1 for c in chosen):
+            chosen.append((d, a, b))
+        if len(chosen) == 3:
+            break
+    near3 = min(curve, key=lambda p: abs(p[0] - min(3 / dur, 1)))
+    return {"at3": round(near3[1] * 100), "end": round(curve[-1][1] * 100),
+            "drops": [{"from": round(a * dur, 1), "to": round(b * dur, 1), "lost_points": round(d * 100)}
+                      for d, a, b in chosen]}
+
+
+def mmss(sec):
+    sec = int(sec)
+    return f"{sec // 60}:{sec % 60:02d}"
+
+
+def cmd_retention(st, video_id=None):
+    vids = mem()["videos"]
+    if not vids:
+        return send("Upload a video through me first. I can only study videos I have seen.")
+    vid = video_id if video_id in vids else max(vids.items(), key=lambda kv: kv[1]["uploaded"])[0]
+    rec = vids[vid]
+    tok = yt_token()
+    dur = iso_dur(yt_get("videos", tok, part="contentDetails", id=vid)["items"][0]["contentDetails"]["duration"])
+    curve = retention_curve(tok, vid, rec["uploaded"])
+    info = find_drops(curve, dur)
+    if not info:
+        return send("YouTube has not given me enough viewing data for this video yet. "
+                    "Try again in a few days, once more people have watched it.")
+    if not info["drops"]:
+        return send(f"📉 {rec['title']}\nStill watching at 3 seconds: {info['at3']}%. At the end: {info['end']}%.\n"
+                    "I see no big drop-off moment. Viewers stay fairly steady, which is a good sign.")
+    send("Studying where viewers leave and what happens there...")
+    drops_txt = "\n".join(f"- {mmss(d['from'])} to {mmss(d['to'])}: lost {d['lost_points']} points of viewers"
+                          for d in info["drops"])
+    analysis = None
+    if rec.get("file_id"):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "v.mp4"
+            tg_download(rec["file_id"], p)
+            g = gemini_upload(p, "video/mp4")
+            try:
+                analysis = gemini([{"file_data": {"mime_type": "video/mp4", "file_uri": g["uri"]}},
+                                   {"text": RETENTION_PROMPT.format(drops=drops_txt, at3=info["at3"], end=info["end"],
+                                                                    dur=dur, memory=learned())}])
+            finally:
+                try:
+                    S.delete(f"{GBASE}/v1beta/{g['name']}", headers={"x-goog-api-key": GKEY}, timeout=30)
+                except Exception:
+                    pass
+    lines = [f"📉 Drop-off finder: {rec['title']}",
+             f"Still watching at 3 seconds: {info['at3']}%   At the end: {info['end']}%", "", "Biggest drops:", drops_txt]
+    if analysis:
+        lines += ["", "What is happening there:"]
+        for m_ in analysis.get("moments", [])[:3]:
+            lines.append(f"• {m_.get('at', '')} - {m_.get('what', '')}\n  Fix: {m_.get('fix', '')}")
+        lines += ["", analysis.get("verdict", "")]
+        new = [x for x in analysis.get("lessons", []) if x][:2]
+        for x in new:
+            remember("lessons", x[:200])
+        if new:
+            lines += ["", "I learned: " + " | ".join(new)]
+    else:
+        lines += ["", "(I no longer have this video file, so I can only give you the timestamps.)"]
+    send("\n".join(lines))
+
+
 # ---------------- health, pause, free-text brain ----------------
 def cmd_health(st):
     lines = ["🩺 Health check"]
@@ -1179,7 +1291,7 @@ He wrote: "{text}"
 Choose the action. Actions: idea (wants video ideas), script (gave a topic to write a script about; put the topic in "topic"),
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist),
-progress (how close to earning on YouTube), lessons (what you have learned), health (is everything working),
+progress (how close to earning on YouTube), retention (where viewers leave a video), lessons (what you have learned), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -1215,6 +1327,8 @@ def run_action(action, topic, st, text=""):
         return cmd_series(st)
     if action == "progress":
         return cmd_progress(st)
+    if action == "retention":
+        return cmd_retention(st)
     if action == "lessons":
         return show_lessons()
     if action == "health":
@@ -1271,6 +1385,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/crosspost - captions for TikTok, Reels, Facebook\n"
         "/series - add your latest video to a playlist\n"
         "/progress - how close you are to earning on YouTube\n"
+        "/retention - where viewers leave your latest video, and why\n"
         "/health - check that everything works\n/pause /resume - stop or restart my own messages\n"
         "Or just write or speak to me normally: I work out what you want.\n"
         "/results - how your latest video is doing\n/plan - this week's plan\n"
@@ -1314,6 +1429,8 @@ def on_message(msg, st):
         show_lessons()
     elif text == "/progress":
         cmd_progress(st)
+    elif text == "/retention":
+        cmd_retention(st)
     elif text == "/crosspost":
         cmd_crosspost(st)
     elif text == "/series":
@@ -1405,6 +1522,7 @@ def main():
             {"command": "crosspost", "description": "TikTok / Reels / Facebook kit"},
             {"command": "series", "description": "Add latest video to a playlist"},
             {"command": "progress", "description": "Progress toward earning"},
+            {"command": "retention", "description": "Where viewers leave your video"},
             {"command": "health", "description": "Check everything works"},
             {"command": "pause", "description": "Pause my own messages"},
             {"command": "results", "description": "How your latest video did"},
