@@ -161,27 +161,46 @@ def frame(path, t, out):
 
 
 # ---------------- gemini ----------------
-def gemini(parts):
-    body = {"contents": [{"parts": parts}],
-            "generationConfig": {"responseMimeType": "application/json"}}
+class GeminiBusy(RuntimeError):
+    pass
+
+
+def _gpost(body, rounds=3):
+    """POST to Gemini with patient backoff across models. Returns response or raises GeminiBusy."""
     last = "no model answered"
-    for m in MODELS:
-        for attempt in range(3):
+    busy = False
+    for rnd in range(rounds):
+        for m in MODELS:
             r = S.post(f"{GBASE}/v1beta/models/{m}:generateContent",
                        headers={"x-goog-api-key": GKEY}, json=body, timeout=240)
             if r.status_code in (429, 500, 502, 503, 504):
                 last = f"{m} HTTP {r.status_code}"
-                time.sleep(6 * (attempt + 1))
+                busy = busy or r.status_code == 429
+                try:
+                    wait = float(r.headers.get("Retry-After", 0))
+                except ValueError:
+                    wait = 0
+                time.sleep(min(max(wait, 8 * (rnd + 1)), 45))
                 continue
             if r.status_code == 404:
                 last = f"{m} not found"
-                break
+                continue
             r.raise_for_status()
-            cand = r.json()["candidates"][0]["content"]["parts"]
-            text = "".join(p.get("text", "") for p in cand)
-            a, b = text.find("{"), text.rfind("}")
-            return json.loads(text[a:b + 1])
+            return r
+    if busy:
+        raise GeminiBusy("Gemini's free limit is busy right now. Wait a minute or two and try again.")
     raise RuntimeError(f"Gemini failed: {last}")
+
+
+def gemini(parts):
+    body = {"contents": [{"parts": parts}],
+            "generationConfig": {"responseMimeType": "application/json"}}
+    r = _gpost(body)
+    cand = r.json()["candidates"][0]["content"]["parts"]
+    text = "".join(p.get("text", "") for p in cand)
+    a, b = text.find("{"), text.rfind("}")
+    return json.loads(text[a:b + 1])
+
 
 
 def gemini_upload(path, mime):
@@ -810,24 +829,23 @@ def gemini_text(prompt, search=False):
     body = {"contents": [{"parts": [{"text": prompt}]}]}
     if search:
         body["tools"] = [{"google_search": {}}]
-    last = "no model answered"
-    for m in MODELS:
-        for attempt in range(3):
-            r = S.post(f"{GBASE}/v1beta/models/{m}:generateContent",
-                       headers={"x-goog-api-key": GKEY}, json=body, timeout=240)
-            if r.status_code in (429, 500, 502, 503, 504):
-                last = f"{m} HTTP {r.status_code}"
-                time.sleep(6 * (attempt + 1))
-                continue
-            if r.status_code == 404:
-                break
-            r.raise_for_status()
-            cand = r.json()["candidates"][0]
-            text = "".join(p.get("text", "") for p in cand["content"]["parts"]).strip()
-            chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
-            sources = [(c["web"].get("title", ""), c["web"].get("uri", "")) for c in chunks if c.get("web")]
-            return text, sources
-    raise RuntimeError(f"Gemini failed: {last}")
+    try:
+        r = _gpost(body, rounds=2 if search else 3)
+    except GeminiBusy:
+        if not search:
+            raise
+        # search grounding has a tighter free quota: fall back to plain answer
+        body.pop("tools")
+        r = _gpost(body, rounds=2)
+        prompt_note = "\n\n(Note: live web search was rate-limited, so this is NOT verified against today's news.)"
+        cand = r.json()["candidates"][0]
+        text = "".join(p.get("text", "") for p in cand["content"]["parts"]).strip()
+        return text + prompt_note, []
+    cand = r.json()["candidates"][0]
+    text = "".join(p.get("text", "") for p in cand["content"]["parts"]).strip()
+    chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
+    sources = [(c["web"].get("title", ""), c["web"].get("uri", "")) for c in chunks if c.get("web")]
+    return text, sources
 
 
 def recent_comments(tok, vids, limit=30):
