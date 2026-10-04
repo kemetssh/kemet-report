@@ -1,5 +1,5 @@
 {
- "offset": 277935937,
+ "offset": 277935938,
  "jobs": {
   "55": {
    "id": "55",
@@ -382,10 +382,17 @@
    "type": "subgen",
    "video_id": "0BJioTOLM24",
    "created": 1791081773.3356874
+  },
+  "p12": {
+   "type": "pl",
+   "video_id": "0BJioTOLM24",
+   "playlist_id": "",
+   "new_title": "Life on the Nile",
+   "created": 1791087442.1702201
   }
  },
  "seen": [],
- "n": 11,
+ "n": 12,
  "mem": {
   "lessons": [],
   "picks": [
@@ -417,7 +424,8 @@
     "title": "Ancient Egypt's Bizarre Pregnancy Test",
     "file_id": "BAACAgQAAxkBAAOEasG83NudqHcvfslzLwnazngi-ocAAvsdAAJ5RBFSI5YF6vPXsBY9BA",
     "summary": "This is a concise and engaging historical fact presented in a visually aesthetic format. The narration is clear and directly addresses the topic, making it a perfect quick-hit educational video.",
-    "checked": false
+    "checked": false,
+    "public_at": 1791087431.0651689
    }
   },
   "exps": [
@@ -450,6 +458,6 @@
    }
   ],
   "last_plan": "",
-  "last_check": 1791080844.2986484
+  "last_check": 1791087430.3622174
  }
 }
