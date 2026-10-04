@@ -1,5 +1,5 @@
 {
- "offset": 277935930,
+ "offset": 277935936,
  "jobs": {
   "55": {
    "id": "55",
@@ -198,6 +198,62 @@
    "desc": 1,
    "thumb": 2,
    "video_id": "ilMueZ9RnQw"
+  },
+  "132": {
+   "id": "132",
+   "file_id": "BAACAgQAAxkBAAOEasG83NudqHcvfslzLwnazngi-ocAAvsdAAJ5RBFSI5YF6vPXsBY9BA",
+   "name": "IMG_8254.MP4",
+   "dur": 19.9,
+   "w": 720,
+   "h": 1280,
+   "review": {
+    "verdict": "ready",
+    "score": 9,
+    "summary": "This is a concise and engaging historical fact presented in a visually aesthetic format. The narration is clear and directly addresses the topic, making it a perfect quick-hit educational video.",
+    "issues": [],
+    "strengths": [
+     "High-quality visuals that perfectly match the theme",
+     "Clear, well-paced narration",
+     "Historical fact is presented accurately"
+    ],
+    "titles": [
+     "Ancient Egypt's Bizarre Pregnancy Test",
+     "How Did Ancient Egyptians Test for Pregnancy?",
+     "The Barley Pregnancy Test of Ancient Kemet"
+    ],
+    "descriptions": [
+     "Did you know Ancient Egyptians had a unique way to test for pregnancy using barley and emmer wheat? Discover the fascinating method mentioned in ancient medical texts. #AncientEgypt #Kemet #History #Shorts",
+     "Ancient medical texts reveal a curious pregnancy test used in Kemet involving grain. Learn how they believed sprouting seeds could determine pregnancy and even the baby's sex. #AncientEgypt #HistoryFacts #PregnancyTest #Shorts"
+    ],
+    "tags": [
+     "Ancient Egypt",
+     "Kemet",
+     "History",
+     "Ancient Medicine",
+     "Pregnancy Test",
+     "History Facts",
+     "Archaeology",
+     "Ancient Egyptian Culture",
+     "Barley Test",
+     "Educational",
+     "Shorts",
+     "History Channel"
+    ],
+    "thumb_times": [
+     1.0,
+     11.0,
+     19.0
+    ],
+    "ai_visuals": true,
+    "policy_notes": []
+   },
+   "created": 1791081703.8827333,
+   "stage": "done",
+   "ai": true,
+   "title": "Ancient Egypt's Bizarre Pregnancy Test",
+   "desc": 0,
+   "thumb": 0,
+   "video_id": "0BJioTOLM24"
   }
  },
  "props": {
@@ -321,24 +377,32 @@
    "type": "subgen",
    "video_id": "ilMueZ9RnQw",
    "created": 1791064865.918729
+  },
+  "p11": {
+   "type": "subgen",
+   "video_id": "0BJioTOLM24",
+   "created": 1791081773.3356874
   }
  },
  "seen": [],
- "n": 10,
+ "n": 11,
  "mem": {
   "lessons": [],
   "picks": [
    "Anubis: The Jackal God of the Afterlife",
    "What Does Kemet Mean? The Real Name of Egypt",
    "Why Did Ancient Egyptians Call Their Land Kemet?",
-   "Did They Really Wear Fat Cones? An Ancient Egyptian Mystery"
+   "Did They Really Wear Fat Cones? An Ancient Egyptian Mystery",
+   "Ancient Egypt's Bizarre Pregnancy Test"
   ],
   "skips": [
    "Did Ancient Egyptians Wear Melting Fat Cones?",
    "The Mystery of Ancient Egyptian Scented Cones",
    "Fact Check: What were those cones on Egyptian heads?",
    "The Truth About The Mysterious Cones in Egyptian Art",
-   "Ancient Egypt: The Real Purpose of Head Cones"
+   "Ancient Egypt: The Real Purpose of Head Cones",
+   "How Did Ancient Egyptians Test for Pregnancy?",
+   "The Barley Pregnancy Test of Ancient Kemet"
   ],
   "videos": {
    "ilMueZ9RnQw": {
@@ -346,6 +410,13 @@
     "title": "Did They Really Wear Fat Cones? An Ancient Egyptian Mystery",
     "file_id": "BAACAgQAAxkBAANqasF6EXNN-mX4yFR0XjSuh2cryt4AAr4eAAJ5RAlSHubkQgeeyLw9BA",
     "summary": "The video features high-quality AI-generated visuals that pair well with the intriguing historical topic. However, the lack of disclosure about the AI generation violates YouTube's policy and the voiceover could benefit from more dynamic narration.",
+    "checked": false
+   },
+   "0BJioTOLM24": {
+    "uploaded": 1791081773.335678,
+    "title": "Ancient Egypt's Bizarre Pregnancy Test",
+    "file_id": "BAACAgQAAxkBAAOEasG83NudqHcvfslzLwnazngi-ocAAvsdAAJ5RBFSI5YF6vPXsBY9BA",
+    "summary": "This is a concise and engaging historical fact presented in a visually aesthetic format. The narration is clear and directly addresses the topic, making it a perfect quick-hit educational video.",
     "checked": false
    }
   },
