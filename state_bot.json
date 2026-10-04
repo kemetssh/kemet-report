@@ -1,5 +1,5 @@
 {
- "offset": 277935944,
+ "offset": 277935961,
  "jobs": {
   "55": {
    "id": "55",
@@ -254,6 +254,144 @@
    "desc": 0,
    "thumb": 0,
    "video_id": "0BJioTOLM24"
+  },
+  "164": {
+   "id": "164",
+   "file_id": "BAACAgQAAxkBAAOkasI8DXuPkAfyHuG3s-AG0E-sG-8AAmYeAAJ5RBFSnTb8k8SNbG49BA",
+   "name": "IMG_8258.MP4",
+   "dur": 19.9,
+   "w": 720,
+   "h": 1280,
+   "review": {
+    "verdict": "fix first",
+    "score": 6,
+    "summary": "The video presents an interesting discovery, but the claim that this tomb was discovered in 2026 is factually impossible as the date is in the future. The voiceover and visuals are engaging, but the inaccuracies in the narrative undermine the credibility of the channel.",
+    "issues": [
+     {
+      "at": "00:00",
+      "problem": "The video claims a discovery occurred in 2026, which is impossible.",
+      "fix": "Correct the year to reflect an actual archaeological event or remove the specific date if discussing a hypothetical."
+     },
+     {
+      "at": "00:00",
+      "problem": "The text on screen 'Kemet - New Tomb in Luxor' combined with the audio is misleading if this is purely an artistic representation.",
+      "fix": "Add an 'Artistic Representation' overlay or a disclosure in the description to ensure viewers don't believe this is a real photograph of a new find."
+     }
+    ],
+    "strengths": [
+     "High-quality visual production.",
+     "Clear, professional-sounding voiceover.",
+     "Appropriate and engaging pacing."
+    ],
+    "titles": [
+     "A Newly Discovered Tomb in Luxor: What Was Inside?",
+     "The Hidden Tomb of Paser: Ancient Egyptian Burial Rituals",
+     "Secrets of a 3,000-Year-Old Egyptian Tomb"
+    ],
+    "descriptions": [
+     "Archaeologists have uncovered a 3,000-year-old tomb near Luxor belonging to a man named Paser. Join us as we explore the beautiful wall paintings depicting offerings to the gods. #AncientEgypt #Shorts #Archaeology",
+     "Discover the secrets inside the newly found tomb of Paser, dating back 3,000 years. Witness the stunning art and rituals that defined the afterlife in ancient Kemet. #AncientEgypt #Luxor #HistoryShorts"
+    ],
+    "tags": [
+     "Ancient Egypt",
+     "Kemet",
+     "Archaeology",
+     "Luxor",
+     "Tomb of Paser",
+     "Egyptian History",
+     "Ancient Discoveries",
+     "Afterlife",
+     "Egyptology",
+     "History",
+     "Ancient Civilizations",
+     "Shorts"
+    ],
+    "thumb_times": [
+     2.0,
+     11.0,
+     19.0
+    ],
+    "ai_visuals": true,
+    "policy_notes": [
+     "The content uses AI-generated imagery and should be labeled as such per YouTube's policies regarding 'altered or synthetic content'."
+    ]
+   },
+   "created": 1791114791.0105326,
+   "stage": "uploaded",
+   "ai": true,
+   "title": "A Newly Discovered Tomb in Luxor: What Was Inside?",
+   "desc": 0,
+   "thumb": 0,
+   "video_id": "Hc2sQbRKwRw"
+  },
+  "165": {
+   "id": "165",
+   "file_id": "BAACAgQAAxkBAAOlasI8DQtBlD6GnCzYqyTvA9IBxTMAAmceAAJ5RBFS70qDqPOkvqY9BA",
+   "name": "IMG_8257.MP4",
+   "dur": 19.9,
+   "w": 720,
+   "h": 1280,
+   "review": {
+    "verdict": "fix first",
+    "score": 6,
+    "summary": "The video has high production value with excellent visuals, but it includes a significant factual error regarding the opening status of the Grand Egyptian Museum. The narration claims the museum is 'fully open', which is misleading as only limited trial openings have occurred and the grand opening has been repeatedly delayed.",
+    "issues": [
+     {
+      "at": "00:00",
+      "problem": "The claim 'fully open to the public' is inaccurate.",
+      "fix": "Update to 'has begun limited trial openings' to reflect reality."
+     },
+     {
+      "at": "00:00",
+      "problem": "The visual of the Egyptian columns is AI-generated (evidenced by 'ARTISTIC RENDERING' watermark).",
+      "fix": "YouTube requires an 'Altered content' label for this in the upload settings."
+     }
+    ],
+    "strengths": [
+     "High-quality voiceover",
+     "Professional editing and composition",
+     "Engaging pacing for short-form content"
+    ],
+    "titles": [
+     "The Grand Egyptian Museum: What You Need to Know",
+     "Inside the World's Largest Archaeological Museum",
+     "Kemet: Exploring the Grand Egyptian Museum's Opening"
+    ],
+    "descriptions": [
+     "After two decades of anticipation, the Grand Egyptian Museum is finally beginning its trial operations. Join us as we look at the scale of this massive tribute to Ancient Egypt.\n\n#AncientEgypt #GEM #Archaeology #Shorts",
+     "Discover the massive Grand Egyptian Museum located near the Giza Pyramids. We discuss its significance to the study of the Kemet civilization and its current opening status.\n\n#AncientEgypt #Cairo #History #Shorts"
+    ],
+    "tags": [
+     "Ancient Egypt",
+     "Grand Egyptian Museum",
+     "GEM",
+     "Giza",
+     "Archaeology",
+     "Kemet",
+     "Egyptian History",
+     "Museum",
+     "Travel Egypt",
+     "Egyptology",
+     "History",
+     "Educational"
+    ],
+    "thumb_times": [
+     1.0,
+     11.0,
+     19.0
+    ],
+    "ai_visuals": true,
+    "policy_notes": [
+     "Must include 'Altered content' disclosure in YouTube studio settings due to AI-generated visuals."
+    ]
+   },
+   "created": 1791114803.5184612,
+   "stage": "uploaded",
+   "ai": true,
+   "title": "Inside the World's Largest Archaeological Museum",
+   "desc": 1,
+   "thumb": 1,
+   "video_id": "IibhtMxXssI"
   }
  },
  "props": {
@@ -411,10 +549,40 @@
     }
    ],
    "created": 1791112398.1205564
+  },
+  "p14": {
+   "type": "subgen",
+   "video_id": "Hc2sQbRKwRw",
+   "created": 1791114888.0449748
+  },
+  "p15": {
+   "type": "plgen",
+   "video_id": "Hc2sQbRKwRw",
+   "created": 1791114888.0449767
+  },
+  "p16": {
+   "type": "xgen",
+   "video_id": "Hc2sQbRKwRw",
+   "created": 1791114888.0449777
+  },
+  "p17": {
+   "type": "subgen",
+   "video_id": "IibhtMxXssI",
+   "created": 1791114895.2082667
+  },
+  "p18": {
+   "type": "plgen",
+   "video_id": "IibhtMxXssI",
+   "created": 1791114895.2082684
+  },
+  "p19": {
+   "type": "xgen",
+   "video_id": "IibhtMxXssI",
+   "created": 1791114895.2082691
   }
  },
  "seen": [],
- "n": 13,
+ "n": 20,
  "mem": {
   "lessons": [],
   "picks": [
@@ -422,7 +590,9 @@
    "What Does Kemet Mean? The Real Name of Egypt",
    "Why Did Ancient Egyptians Call Their Land Kemet?",
    "Did They Really Wear Fat Cones? An Ancient Egyptian Mystery",
-   "Ancient Egypt's Bizarre Pregnancy Test"
+   "Ancient Egypt's Bizarre Pregnancy Test",
+   "A Newly Discovered Tomb in Luxor: What Was Inside?",
+   "Inside the World's Largest Archaeological Museum"
   ],
   "skips": [
    "Did Ancient Egyptians Wear Melting Fat Cones?",
@@ -431,7 +601,11 @@
    "The Truth About The Mysterious Cones in Egyptian Art",
    "Ancient Egypt: The Real Purpose of Head Cones",
    "How Did Ancient Egyptians Test for Pregnancy?",
-   "The Barley Pregnancy Test of Ancient Kemet"
+   "The Barley Pregnancy Test of Ancient Kemet",
+   "The Hidden Tomb of Paser: Ancient Egyptian Burial Rituals",
+   "Secrets of a 3,000-Year-Old Egyptian Tomb",
+   "The Grand Egyptian Museum: What You Need to Know",
+   "Kemet: Exploring the Grand Egyptian Museum's Opening"
   ],
   "videos": {
    "ilMueZ9RnQw": {
@@ -448,6 +622,20 @@
     "summary": "This is a concise and engaging historical fact presented in a visually aesthetic format. The narration is clear and directly addresses the topic, making it a perfect quick-hit educational video.",
     "checked": false,
     "public_at": 1791087431.0651689
+   },
+   "Hc2sQbRKwRw": {
+    "uploaded": 1791114888.0449646,
+    "title": "A Newly Discovered Tomb in Luxor: What Was Inside?",
+    "file_id": "BAACAgQAAxkBAAOkasI8DXuPkAfyHuG3s-AG0E-sG-8AAmYeAAJ5RBFSnTb8k8SNbG49BA",
+    "summary": "The video presents an interesting discovery, but the claim that this tomb was discovered in 2026 is factually impossible as the date is in the future. The voiceover and visuals are engaging, but the inaccuracies in the narrative undermine the credibility of the channel.",
+    "checked": false
+   },
+   "IibhtMxXssI": {
+    "uploaded": 1791114895.208257,
+    "title": "Inside the World's Largest Archaeological Museum",
+    "file_id": "BAACAgQAAxkBAAOlasI8DQtBlD6GnCzYqyTvA9IBxTMAAmceAAJ5RBFS70qDqPOkvqY9BA",
+    "summary": "The video has high production value with excellent visuals, but it includes a significant factual error regarding the opening status of the Grand Egyptian Museum. The narration claims the museum is 'fully open', which is misleading as only limited trial openings have occurred and the grand opening has been repeatedly delayed.",
+    "checked": false
    }
   },
   "exps": [
@@ -480,7 +668,7 @@
    }
   ],
   "last_plan": "2026-40",
-  "last_check": 1791112346.4146142,
+  "last_check": 1791114776.3919168,
   "links": [],
   "cadence_days": 3,
   "last_nudge": 0,
