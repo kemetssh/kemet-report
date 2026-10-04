@@ -1,5 +1,5 @@
 {
- "offset": 277935961,
+ "offset": 277935966,
  "jobs": {
   "55": {
    "id": "55",
@@ -579,12 +579,62 @@
    "type": "xgen",
    "video_id": "IibhtMxXssI",
    "created": 1791114895.2082691
+  },
+  "p21": {
+   "type": "ideas",
+   "ideas": [
+    {
+     "title": "The Grand Egyptian Museum is Finally Open: A First Look",
+     "hook": "After two decades of anticipation, the doors to the world\u2019s largest archaeological museum have finally swung open."
+    },
+    {
+     "title": "Unlocking the Secrets of an Ancient Egyptian Industrial Hub",
+     "hook": "Buried beneath the desert sands, archaeologists have unearthed a perfectly preserved manufacturing center from the Ptolemaic period."
+    },
+    {
+     "title": "The Hidden Ailments of the Pharaohs Revealed",
+     "hook": "We\u2019ve spent centuries admiring their golden masks, but new medical scans are revealing the surprising illnesses that plagued Egypt's elite."
+    },
+    {
+     "title": "The Lost Colors of Esna: A Restored Masterpiece",
+     "hook": "For centuries, the vibrant paintings on the ceiling of the Temple of Esna were hidden under layers of soot and grime, until now."
+    }
+   ],
+   "created": 1791118822.6583166
+  },
+  "p22": {
+   "type": "claims",
+   "claims": [
+    "The Great Pyramids were built by enslaved people.",
+    "Ancient Egyptians possessed advanced, lost electrical technology.",
+    "The Sphinx was constructed thousands of years before the Old Kingdom.",
+    "King Tutankhamun died from a lethal curse triggered by opening his tomb.",
+    "Cleopatra VII was of purely ethnic Ancient Egyptian ancestry.",
+    "The pyramids at Giza served as functional power plants."
+   ],
+   "created": 1791118918.8230555
+  },
+  "p23": {
+   "type": "audit",
+   "claim": "The Great Pyramids were built by enslaved people.",
+   "verdict": "FALSE",
+   "sources": [],
+   "created": 1791118987.3607748
   }
  },
  "seen": [],
- "n": 20,
+ "n": 23,
  "mem": {
-  "lessons": [],
+  "lessons": [
+   "Adopt the style of your rejected titles, which prioritize mystery and specific outcomes over generic descriptions.",
+   "Comply with YouTube's AI disclosure policy to protect your channel from potential shadow-banning or policy strikes.",
+   "Prioritize titles that pose a specific, high-stakes question rather than stating the subject matter.",
+   "Ensure all AI-generated content is clearly disclosed in the description or via YouTube's mandatory labeling tool to preserve channel health.",
+   "Prioritize high-stakes, mystery-driven titles over generic subject-based descriptions.",
+   "Perform rigorous fact-checking on all chronological claims to maintain channel authority.",
+   "Use high-stakes, question-based titles that promise a mystery rather than just describing the location.",
+   "Verify all status claims against official sources before publishing to preserve channel credibility."
+  ],
   "picks": [
    "Anubis: The Jackal God of the Afterlife",
    "What Does Kemet Mean? The Real Name of Egypt",
@@ -613,14 +663,14 @@
     "title": "Did They Really Wear Fat Cones? An Ancient Egyptian Mystery",
     "file_id": "BAACAgQAAxkBAANqasF6EXNN-mX4yFR0XjSuh2cryt4AAr4eAAJ5RAlSHubkQgeeyLw9BA",
     "summary": "The video features high-quality AI-generated visuals that pair well with the intriguing historical topic. However, the lack of disclosure about the AI generation violates YouTube's policy and the voiceover could benefit from more dynamic narration.",
-    "checked": false
+    "checked": true
    },
    "0BJioTOLM24": {
     "uploaded": 1791081773.335678,
     "title": "Ancient Egypt's Bizarre Pregnancy Test",
     "file_id": "BAACAgQAAxkBAAOEasG83NudqHcvfslzLwnazngi-ocAAvsdAAJ5RBFSI5YF6vPXsBY9BA",
     "summary": "This is a concise and engaging historical fact presented in a visually aesthetic format. The narration is clear and directly addresses the topic, making it a perfect quick-hit educational video.",
-    "checked": false,
+    "checked": true,
     "public_at": 1791087431.0651689
    },
    "Hc2sQbRKwRw": {
@@ -628,14 +678,16 @@
     "title": "A Newly Discovered Tomb in Luxor: What Was Inside?",
     "file_id": "BAACAgQAAxkBAAOkasI8DXuPkAfyHuG3s-AG0E-sG-8AAmYeAAJ5RBFSnTb8k8SNbG49BA",
     "summary": "The video presents an interesting discovery, but the claim that this tomb was discovered in 2026 is factually impossible as the date is in the future. The voiceover and visuals are engaging, but the inaccuracies in the narrative undermine the credibility of the channel.",
-    "checked": false
+    "checked": true,
+    "public_at": 1791118770.843922
    },
    "IibhtMxXssI": {
     "uploaded": 1791114895.208257,
     "title": "Inside the World's Largest Archaeological Museum",
     "file_id": "BAACAgQAAxkBAAOlasI8DQtBlD6GnCzYqyTvA9IBxTMAAmceAAJ5RBFS70qDqPOkvqY9BA",
     "summary": "The video has high production value with excellent visuals, but it includes a significant factual error regarding the opening status of the Grand Egyptian Museum. The narration claims the museum is 'fully open', which is misleading as only limited trial openings have occurred and the grand opening has been repeatedly delayed.",
-    "checked": false
+    "checked": true,
+    "public_at": 1791118770.9717298
    }
   },
   "exps": [
@@ -668,10 +720,18 @@
    }
   ],
   "last_plan": "2026-40",
-  "last_check": 1791114776.3919168,
+  "last_check": 1791118769.9910736,
   "links": [],
   "cadence_days": 3,
   "last_nudge": 0,
-  "last_news": ""
+  "last_news": "",
+  "audits": [
+   {
+    "claim": "The Great Pyramids were built by enslaved people.",
+    "verdict": "FALSE",
+    "score": 5,
+    "ts": 1791118987.3607693
+   }
+  ]
  }
 }
