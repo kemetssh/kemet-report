@@ -1,4 +1,4 @@
-name: Kemet bot
+ name: Kemet bot
 on:
   schedule:
     - cron: "*/5 * * * *"
@@ -36,6 +36,8 @@ jobs:
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                    WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
           RUN_SECONDS: ${{ github.event.repository.visibility == 'public' && '270' || '0' }}
         run: python bot.py
       - name: Save state
