@@ -1,5 +1,5 @@
 {
- "offset": 277935966,
+ "offset": 277935975,
  "jobs": {
   "55": {
    "id": "55",
@@ -392,6 +392,68 @@
    "desc": 1,
    "thumb": 1,
    "video_id": "IibhtMxXssI"
+  },
+  "216": {
+   "id": "216",
+   "file_id": "BAACAgQAAxkBAAPYasJRsDjFHOgi_n5z956upSX-yy0AAnceAAJ5RBFSLrZc8CKq0uY9BA",
+   "name": "IMG_8259.MP4",
+   "dur": 24.4,
+   "w": 720,
+   "h": 1280,
+   "review": {
+    "verdict": "ready",
+    "score": 9,
+    "summary": "This video is a well-paced, high-quality exploration of a common historical myth. The editing is clean, the narration is professional, and the historical content is accurate.",
+    "issues": [],
+    "strengths": [
+     "High-quality visuals",
+     "Engaging and concise delivery",
+     "Debunks a common misconception with historical evidence"
+    ],
+    "titles": [
+     "Were the Pyramids Built by Slaves? The Truth",
+     "Slaves or Skilled Workers? The Truth About Pyramid Builders",
+     "The Great Pyramid Myth Debunked: Who Really Built It?"
+    ],
+    "descriptions": [
+     "Historians have long debated who built the Great Pyramids. We look at the archaeological evidence found at Giza that tells a different story than popular mythology. #AncientEgypt #History #Shorts",
+     "Did enslaved people really build the Great Pyramids? Let's dive into the archaeological record and uncover how these workers were actually treated. #AncientEgypt #Pyramids #Archaeology #Shorts"
+    ],
+    "tags": [
+     "Ancient Egypt",
+     "Great Pyramids",
+     "Giza",
+     "Archaeology",
+     "Historical Myths",
+     "History",
+     "Slave labor myth",
+     "Egyptian history",
+     "Kemet",
+     "Worker village Giza"
+    ],
+    "thumb_times": [
+     1.0,
+     12.0,
+     22.0
+    ],
+    "ai_visuals": true,
+    "policy_notes": [
+     "Must disclose AI-generated content in YouTube's 'Altered content' settings"
+    ],
+    "claims": [
+     "The claim that the pyramids were built by enslaved people was popularized by the Greek historian Herodotus.",
+     "Archaeological evidence from the worker's village at Giza suggests the laborers were not slaves.",
+     "Workers at Giza received high-quality food, including beef and sheep.",
+     "Workers at the Giza site received medical care."
+    ]
+   },
+   "created": 1791120614.4038832,
+   "stage": "done",
+   "ai": true,
+   "title": "Were the Pyramids Built by Slaves? The Truth",
+   "desc": 1,
+   "thumb": 0,
+   "video_id": "eOcE4NrhPGs"
   }
  },
  "props": {
@@ -620,10 +682,37 @@
    "verdict": "FALSE",
    "sources": [],
    "created": 1791118987.3607748
+  },
+  "p24": {
+   "type": "claims",
+   "claims": [
+    "The Sphinx was significantly older than the Old Kingdom dynasties.",
+    "Cleopatra VII was of purely Egyptian ethnic descent.",
+    "Ancient Egyptians possessed advanced, lost electricity-generating technology.",
+    "King Tutankhamun died from a ritualized royal curse.",
+    "The interior of the Great Pyramid contains secret, undiscovered chambers.",
+    "Ancient Egyptians intentionally left unfinished projects to show humility."
+   ],
+   "created": 1791120615.9535503
+  },
+  "p25": {
+   "type": "subgen",
+   "video_id": "eOcE4NrhPGs",
+   "created": 1791120767.8520534
+  },
+  "p26": {
+   "type": "plgen",
+   "video_id": "eOcE4NrhPGs",
+   "created": 1791120767.852055
+  },
+  "p27": {
+   "type": "xgen",
+   "video_id": "eOcE4NrhPGs",
+   "created": 1791120767.8520558
   }
  },
  "seen": [],
- "n": 23,
+ "n": 27,
  "mem": {
   "lessons": [
    "Adopt the style of your rejected titles, which prioritize mystery and specific outcomes over generic descriptions.",
@@ -642,7 +731,8 @@
    "Did They Really Wear Fat Cones? An Ancient Egyptian Mystery",
    "Ancient Egypt's Bizarre Pregnancy Test",
    "A Newly Discovered Tomb in Luxor: What Was Inside?",
-   "Inside the World's Largest Archaeological Museum"
+   "Inside the World's Largest Archaeological Museum",
+   "Were the Pyramids Built by Slaves? The Truth"
   ],
   "skips": [
    "Did Ancient Egyptians Wear Melting Fat Cones?",
@@ -655,7 +745,9 @@
    "The Hidden Tomb of Paser: Ancient Egyptian Burial Rituals",
    "Secrets of a 3,000-Year-Old Egyptian Tomb",
    "The Grand Egyptian Museum: What You Need to Know",
-   "Kemet: Exploring the Grand Egyptian Museum's Opening"
+   "Kemet: Exploring the Grand Egyptian Museum's Opening",
+   "Slaves or Skilled Workers? The Truth About Pyramid Builders",
+   "The Great Pyramid Myth Debunked: Who Really Built It?"
   ],
   "videos": {
    "ilMueZ9RnQw": {
@@ -688,6 +780,13 @@
     "summary": "The video has high production value with excellent visuals, but it includes a significant factual error regarding the opening status of the Grand Egyptian Museum. The narration claims the museum is 'fully open', which is misleading as only limited trial openings have occurred and the grand opening has been repeatedly delayed.",
     "checked": true,
     "public_at": 1791118770.9717298
+   },
+   "eOcE4NrhPGs": {
+    "uploaded": 1791120767.8520427,
+    "title": "Were the Pyramids Built by Slaves? The Truth",
+    "file_id": "BAACAgQAAxkBAAPYasJRsDjFHOgi_n5z956upSX-yy0AAnceAAJ5RBFSLrZc8CKq0uY9BA",
+    "summary": "This video is a well-paced, high-quality exploration of a common historical myth. The editing is clean, the narration is professional, and the historical content is accurate.",
+    "checked": false
    }
   },
   "exps": [
@@ -720,7 +819,7 @@
    }
   ],
   "last_plan": "2026-40",
-  "last_check": 1791118769.9910736,
+  "last_check": 1791120600.5670373,
   "links": [],
   "cadence_days": 3,
   "last_nudge": 0,
