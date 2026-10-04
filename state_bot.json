@@ -1,5 +1,5 @@
 {
- "offset": 277935942,
+ "offset": 277935944,
  "jobs": {
   "55": {
    "id": "55",
@@ -389,10 +389,32 @@
    "playlist_id": "",
    "new_title": "Life on the Nile",
    "created": 1791087442.1702201
+  },
+  "p13": {
+   "type": "ideas",
+   "ideas": [
+    {
+     "title": "Walking Through the Grand Egyptian Museum: The First Look",
+     "hook": "After two decades of anticipation, the doors to the world's largest archaeological museum have finally swung open."
+    },
+    {
+     "title": "The Hidden Colors of Luxor: A New Tomb Unveiled",
+     "hook": "Beneath the shifting sands of the Theban Necropolis, archaeologists have uncovered colors as vivid as the day they were painted millennia ago."
+    },
+    {
+     "title": "The Ancient Egyptian Navy: Secrets of the Red Sea Trade",
+     "hook": "Long before the age of modern navigation, Egyptian ships were traversing the Red Sea to secure the treasures of distant lands."
+    },
+    {
+     "title": "Restoring the Sphinx: Preserving the Icon of Giza",
+     "hook": "Standing guard for over 4,000 years, the Great Sphinx is undergoing a delicate preservation effort to protect its ancient stonework."
+    }
+   ],
+   "created": 1791112398.1205564
   }
  },
  "seen": [],
- "n": 12,
+ "n": 13,
  "mem": {
   "lessons": [],
   "picks": [
@@ -458,7 +480,7 @@
    }
   ],
   "last_plan": "2026-40",
-  "last_check": 1791108572.0189402,
+  "last_check": 1791112346.4146142,
   "links": [],
   "cadence_days": 3,
   "last_nudge": 0,
