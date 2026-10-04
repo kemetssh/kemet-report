@@ -1,5 +1,5 @@
 {
- "offset": 277935975,
+ "offset": 277935976,
  "jobs": {
   "55": {
    "id": "55",
@@ -709,10 +709,22 @@
    "type": "xgen",
    "video_id": "eOcE4NrhPGs",
    "created": 1791120767.8520558
+  },
+  "p28": {
+   "type": "claims",
+   "claims": [
+    "The Sphinx was significantly eroded by heavy rainfall thousands of years ago.",
+    "Ancient Egyptians utilized advanced acoustic levitation to move massive stones.",
+    "Cleopatra VII was ethnically of Greek descent rather than Egyptian.",
+    "The pyramids were designed to function as massive power plants for electricity.",
+    "King Tutankhamun died as a direct result of a supernatural curse.",
+    "Ancient Egyptians achieved long-distance maritime trade with the Americas."
+   ],
+   "created": 1791121552.0331075
   }
  },
  "seen": [],
- "n": 27,
+ "n": 28,
  "mem": {
   "lessons": [
    "Adopt the style of your rejected titles, which prioritize mystery and specific outcomes over generic descriptions.",
