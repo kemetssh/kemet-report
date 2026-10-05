@@ -1,5 +1,5 @@
 {
- "offset": 277936023,
+ "offset": 277936025,
  "jobs": {
   "55": {
    "id": "55",
@@ -924,10 +924,29 @@
    "type": "xgen",
    "video_id": "1P3m0SSyKV4",
    "created": 1791181576.9182737
+  },
+  "p35": {
+   "type": "claims",
+   "claims": [
+    "King Tutankhamun died from a deliberate, violent assassination.",
+    "The Great Sphinx was built thousands of years earlier than the Fourth Dynasty.",
+    "Cleopatra VII was ethnically Egyptian.",
+    "The alignment of the Giza pyramids mirrors the stars in Orion's Belt.",
+    "Ancient Egyptians successfully navigated to the Americas.",
+    "Pharaoh Akhenaten suffered from Marfan syndrome."
+   ],
+   "created": 1791186677.8305247
+  },
+  "p36": {
+   "type": "audit",
+   "claim": "King Tutankhamun died from a deliberate, violent assassination.",
+   "verdict": "FALSE",
+   "sources": [],
+   "created": 1791186796.3853233
   }
  },
  "seen": [],
- "n": 34,
+ "n": 36,
  "mem": {
   "lessons": [
    "Adopt the style of your rejected titles, which prioritize mystery and specific outcomes over generic descriptions.",
@@ -1066,6 +1085,12 @@
     "verdict": "FALSE",
     "score": 0,
     "ts": 1791162730.3299887
+   },
+   {
+    "claim": "King Tutankhamun died from a deliberate, violent assassination.",
+    "verdict": "FALSE",
+    "score": 5,
+    "ts": 1791186796.3853178
    }
   ]
  }
