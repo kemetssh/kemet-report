@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from pathlib import Path
 
 import requests
@@ -33,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10"
+BOT_VERSION = "v10.1"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2119,7 +2120,12 @@ def main():
             except Exception as e:
                 print("error:", clean(e))
                 try:
-                    send("⚠️ Something failed: " + clean(e)[:300] + "\nNothing was published. Try again.")
+                    fr = traceback.extract_tb(e.__traceback__)[-1]
+                    where = f" (in {fr.name}, line {fr.lineno}: {(fr.line or '').strip()[:70]})"
+                except Exception:
+                    where = ""
+                try:
+                    send("⚠️ Something failed: " + clean(str(e) + where)[:400] + "\nNothing was published. Try again.")
                 except Exception:
                     pass
             save_state(st)
