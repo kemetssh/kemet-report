@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.1"
+BOT_VERSION = "v10.2"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1276,16 +1276,23 @@ def cmd_progress(st):
     hours = shorts = gained28 = None
     try:
         hours = an_query(tok, "estimatedMinutesWatched", 365)[0] / 60
+    except Exception as e:
+        lines.append(f"(Watch hours are missing: {clean(e)[:80]})")
+    try:
         shorts = an_query(tok, "views", 90, "creatorContentType==SHORTS")[0]
+    except Exception as e:
+        lines.append(f"(Shorts views are missing: {clean(e)[:80]})")
+    try:
         gained28 = an_query(tok, "subscribersGained", 28)[0]
     except Exception as e:
-        lines.append(f"(Some numbers are missing: {clean(e)[:80]})")
+        lines.append(f"(Subscriber pace is missing: {clean(e)[:80]})")
     for label, need_subs, need_hours, need_shorts in (("First level", 500, 3000, 3_000_000),
                                                       ("Full level", 1000, 4000, 10_000_000)):
         lines.append(f"{label}")
         lines.append(f"Subscribers {subs}/{need_subs} {bar(subs, need_subs)}")
         if hours is not None:
             lines.append(f"Watch hours (12 months) {hours:.0f}/{need_hours} {bar(hours, need_hours)}")
+        if shorts is not None:
             lines.append(f"  or Shorts views (90 days) {shorts}/{need_shorts:,} {bar(shorts, need_shorts)}")
         lines.append("")
     if gained28 is not None and gained28 > 0:
