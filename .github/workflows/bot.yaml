@@ -27,6 +27,11 @@ jobs:
       - run: pip install requests
       - name: Make sure ffmpeg exists
         run: command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
+      - name: Get the newest bot notes
+        run: |
+          # a queued run is checked out at the moment it was queued, so fetch the latest notes saved by the run before it
+          git fetch -q origin main
+          git checkout -q origin/main -- state_bot.json || true
       - name: Run bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -50,6 +55,7 @@ jobs:
             git commit -q -m "bot state"
             for i in 1 2 3 4 5; do
               git fetch -q origin main
+              # if both sides changed the notes, this run's notes win
               git rebase -q -X theirs origin/main || git rebase --abort
               git push -q && break
               sleep $((i * 3))
