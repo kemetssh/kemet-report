@@ -1,5 +1,5 @@
 {
- "offset": 277936067,
+ "offset": 277936069,
  "jobs": {
   "55": {
    "id": "55",
@@ -729,7 +729,7 @@
     ]
    },
    "created": 1791212903.5257134,
-   "stage": "desc",
+   "stage": "confirm",
    "ai": true,
    "evidence": {
     "claim": "The curse of the pharaohs caused the premature deaths of those who opened Tutankhamun's tomb.",
@@ -737,7 +737,9 @@
     "sources": []
    },
    "ev_on": true,
-   "title": "Were Millions of Kittens Sacrificed in Ancient Egypt?"
+   "title": "Were Millions of Kittens Sacrificed in Ancient Egypt?",
+   "desc": 1,
+   "thumb": 0
   }
  },
  "props": {
@@ -1338,7 +1340,7 @@
    }
   ],
   "last_plan": "2026-40",
-  "last_check": 1791213693.7353058,
+  "last_check": 1791215641.6458602,
   "links": [],
   "cadence_days": 3,
   "last_nudge": 0,
