@@ -1,5 +1,5 @@
 {
- "offset": 277936069,
+ "offset": 277936072,
  "jobs": {
   "55": {
    "id": "55",
@@ -729,7 +729,7 @@
     ]
    },
    "created": 1791212903.5257134,
-   "stage": "confirm",
+   "stage": "done",
    "ai": true,
    "evidence": {
     "claim": "The curse of the pharaohs caused the premature deaths of those who opened Tutankhamun's tomb.",
@@ -739,7 +739,8 @@
    "ev_on": true,
    "title": "Were Millions of Kittens Sacrificed in Ancient Egypt?",
    "desc": 1,
-   "thumb": 0
+   "thumb": 0,
+   "video_id": "omiTEvMq2Cw"
   }
  },
  "props": {
@@ -1171,10 +1172,25 @@
    "created": 1791194108.6671689,
    "views": 47,
    "published": "2026-09-29T11:43:34Z"
+  },
+  "p48": {
+   "type": "subgen",
+   "video_id": "omiTEvMq2Cw",
+   "created": 1791217203.1414275
+  },
+  "p49": {
+   "type": "plgen",
+   "video_id": "omiTEvMq2Cw",
+   "created": 1791217203.1414294
+  },
+  "p50": {
+   "type": "xgen",
+   "video_id": "omiTEvMq2Cw",
+   "created": 1791217203.1414306
   }
  },
  "seen": [],
- "n": 47,
+ "n": 50,
  "mem": {
   "lessons": [
    "Adopt the style of your rejected titles, which prioritize mystery and specific outcomes over generic descriptions.",
@@ -1281,6 +1297,13 @@
     "summary": "The video effectively addresses a popular historical myth with a concise, research-backed explanation. It maintains the channel's high-stakes tone while delivering accurate and engaging content.",
     "checked": false,
     "public_at": 1791189765.3946354
+   },
+   "omiTEvMq2Cw": {
+    "uploaded": 1791217203.1414206,
+    "title": "Were Millions of Kittens Sacrificed in Ancient Egypt?",
+    "file_id": "BAACAgQAAxkBAAIBuGrDu5MJ8HnM7RCIzErax_2vkWOgAAKFHAACnTYhUjGen0ddniBPPQQ",
+    "summary": "The video effectively uses an intriguing and somber tone to shed light on the controversial history of animal mummification in Ancient Egypt. The pacing is tight, and the AI-generated imagery matches the historical narrative well.",
+    "checked": false
    }
   },
   "exps": [
@@ -1376,11 +1399,6 @@
     "score": 5,
     "ts": 1791188141.4708784
    }
-  ],
-  "pending_audit": {
-   "claim": "The curse of the pharaohs caused the premature deaths of those who opened Tutankhamun's tomb.",
-   "verdict": "CONTRADICTED",
-   "sources": []
-  }
+  ]
  }
 }
