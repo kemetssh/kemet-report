@@ -1,5 +1,5 @@
 {
- "offset": 277936031,
+ "offset": 277936036,
  "jobs": {
   "55": {
    "id": "55",
@@ -592,6 +592,78 @@
    "desc": 1,
    "thumb": 2,
    "video_id": "1P3m0SSyKV4"
+  },
+  "362": {
+   "id": "362",
+   "file_id": "BAACAgQAAxkBAAIBamrDXwwo96xCJb026ejbB1NAO1MoAALdGwACnTYhUmchOWn-YznPPQQ",
+   "name": "IMG_8322.MP4",
+   "dur": 22.4,
+   "w": 720,
+   "h": 1280,
+   "review": {
+    "verdict": "ready",
+    "score": 9,
+    "summary": "The video effectively addresses a popular historical myth with a concise, research-backed explanation. It maintains the channel's high-stakes tone while delivering accurate and engaging content.",
+    "issues": [],
+    "strengths": [
+     "Compelling hook that addresses a well-known historical legend.",
+     "Concise and informative pacing suitable for short-form content.",
+     "High-quality visuals that align with the channel's aesthetic."
+    ],
+    "titles": [
+     "Did King Tut's Tomb Really Kill Those Who Opened It?",
+     "The Curse of King Tut: Myth or Historical Fact?",
+     "Did A Deadly Curse Haunt Howard Carter?"
+    ],
+    "descriptions": [
+     "Did a deadly curse claim the lives of those who entered Tutankhamun's tomb? We examine the scientific evidence behind the legend of the pharaoh's curse. #AncientEgypt #Shorts",
+     "Many believe a curse killed those who opened King Tut's tomb in 1923. Does history support this claim? Let's look at the scientific findings. #AncientEgypt #Shorts"
+    ],
+    "tags": [
+     "Ancient Egypt",
+     "King Tut",
+     "Tutankhamun",
+     "Tutankhamun's Curse",
+     "Archaeology",
+     "History Facts",
+     "Howard Carter",
+     "Historical Myths",
+     "Ancient History",
+     "Egyptology",
+     "Kemet",
+     "Mystery"
+    ],
+    "thumb_times": [
+     0.2,
+     11.0,
+     20.0
+    ],
+    "ai_visuals": true,
+    "policy_notes": [
+     "AI disclosure required for synthetic imagery."
+    ],
+    "claims": [
+     "Lord Carnarvon died in 1923.",
+     "The death of Lord Carnarvon helped create the legend of a curse on Tutankhamun's tomb.",
+     "A study published in the British Medical Journal examined people present at the tomb's opening.",
+     "The study found no significant difference in lifespan for those present at the opening of the tomb.",
+     "Howard Carter led the discovery of Tutankhamun's tomb.",
+     "Howard Carter entered the burial chamber."
+    ]
+   },
+   "created": 1791188806.3822577,
+   "stage": "uploaded",
+   "ai": true,
+   "evidence": {
+    "claim": "The curse of the pharaohs caused the premature deaths of those who opened Tutankhamun's tomb.",
+    "verdict": "CONTRADICTED",
+    "sources": []
+   },
+   "ev_on": true,
+   "title": "Did A Deadly Curse Haunt Howard Carter?",
+   "desc": 0,
+   "thumb": 2,
+   "video_id": "JaGxWm1c-gE"
   }
  },
  "props": {
@@ -981,10 +1053,25 @@
    "verdict": "CONTRADICTED",
    "sources": [],
    "created": 1791188141.470883
+  },
+  "p41": {
+   "type": "subgen",
+   "video_id": "JaGxWm1c-gE",
+   "created": 1791189033.0145319
+  },
+  "p42": {
+   "type": "plgen",
+   "video_id": "JaGxWm1c-gE",
+   "created": 1791189033.014534
+  },
+  "p43": {
+   "type": "xgen",
+   "video_id": "JaGxWm1c-gE",
+   "created": 1791189033.0145352
   }
  },
  "seen": [],
- "n": 40,
+ "n": 43,
  "mem": {
   "lessons": [
    "Adopt the style of your rejected titles, which prioritize mystery and specific outcomes over generic descriptions.",
@@ -1006,7 +1093,8 @@
    "Inside the World's Largest Archaeological Museum",
    "Were the Pyramids Built by Slaves? The Truth",
    "Did Ancient Egyptians Have Electricity? The Truth",
-   "Beyond Beauty: Was Ancient Egyptian Kohl Actually Medicine?"
+   "Beyond Beauty: Was Ancient Egyptian Kohl Actually Medicine?",
+   "Did A Deadly Curse Haunt Howard Carter?"
   ],
   "skips": [
    "Did Ancient Egyptians Wear Melting Fat Cones?",
@@ -1025,7 +1113,9 @@
    "The Dendera Light: Ancient Bulb or Myth?",
    "Debunking the Electricity of Ancient Egypt",
    "Why Did Ancient Egyptians Use Lead Makeup? The Secret Benefit",
-   "The Surprising Health Secret Behind Ancient Egyptian Eyeliner"
+   "The Surprising Health Secret Behind Ancient Egyptian Eyeliner",
+   "Did King Tut's Tomb Really Kill Those Who Opened It?",
+   "The Curse of King Tut: Myth or Historical Fact?"
   ],
   "videos": {
    "ilMueZ9RnQw": {
@@ -1074,6 +1164,13 @@
     "summary": "The video offers an interesting, concise fact about ancient Egyptian eye makeup with decent visuals. However, it requires a disclosure regarding the AI-generated imagery and a slight refinement to the audio editing.",
     "checked": false,
     "public_at": 1791183634.8181005
+   },
+   "JaGxWm1c-gE": {
+    "uploaded": 1791189033.0145252,
+    "title": "Did A Deadly Curse Haunt Howard Carter?",
+    "file_id": "BAACAgQAAxkBAAIBamrDXwwo96xCJb026ejbB1NAO1MoAALdGwACnTYhUmchOWn-YznPPQQ",
+    "summary": "The video effectively addresses a popular historical myth with a concise, research-backed explanation. It maintains the channel's high-stakes tone while delivering accurate and engaging content.",
+    "checked": false
    }
   },
   "exps": [
