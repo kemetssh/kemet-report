@@ -1,5 +1,5 @@
 {
- "offset": 277936012,
+ "offset": 277936021,
  "jobs": {
   "55": {
    "id": "55",
@@ -518,6 +518,80 @@
    "title": "Did Ancient Egyptians Have Electricity? The Truth",
    "desc": 1,
    "thumb": 2
+  },
+  "325": {
+   "id": "325",
+   "file_id": "BAACAgQAAxkBAAIBRWrDQd8j527g2OnuR7vVElc_DUHaAAKvGwACnTYhUi6VX8c0nTGZPQQ",
+   "name": "IMG_8299.MP4",
+   "dur": 22.4,
+   "w": 720,
+   "h": 1280,
+   "review": {
+    "verdict": "fix first",
+    "score": 6,
+    "summary": "The video offers an interesting, concise fact about ancient Egyptian eye makeup with decent visuals. However, it requires a disclosure regarding the AI-generated imagery and a slight refinement to the audio editing.",
+    "issues": [
+     {
+      "at": "00:00",
+      "problem": "No disclosure of AI-generated visuals.",
+      "fix": "Add a disclosure label or statement in the description about the use of AI-generated content."
+     },
+     {
+      "at": "00:00",
+      "problem": "Audible 'pop' or mouth noise at the start.",
+      "fix": "Edit the audio track to remove or reduce the sharp intake of breath/pop at the beginning."
+     }
+    ],
+    "strengths": [
+     "Concise and educational content",
+     "High-quality visual aesthetic",
+     "Clear, engaging narration"
+    ],
+    "titles": [
+     "Why Did Ancient Egyptians Use Lead Makeup? The Secret Benefit",
+     "Beyond Beauty: Was Ancient Egyptian Kohl Actually Medicine?",
+     "The Surprising Health Secret Behind Ancient Egyptian Eyeliner"
+    ],
+    "descriptions": [
+     "While often seen as a symbol of beauty, Ancient Egyptian kohl eyeliner served a much more practical, medical purpose. Discover the chemistry behind this ancient cosmetic secret.\n\n#AncientEgypt #HistoryFacts #Shorts",
+     "Did Ancient Egyptians know they were using medicine on their eyes? Find out how their iconic makeup protected them from infection in the desert.\n\n#AncientEgypt #Archaeology #Shorts"
+    ],
+    "tags": [
+     "Ancient Egypt",
+     "Kemet",
+     "History",
+     "Kohl",
+     "Egyptian Makeup",
+     "Archaeology",
+     "Ancient Technology",
+     "Fact Check",
+     "Queen Nefertiti",
+     "History Facts",
+     "Education",
+     "Ancient Civilizations"
+    ],
+    "thumb_times": [
+     2.0,
+     10.0,
+     18.0
+    ],
+    "ai_visuals": true,
+    "policy_notes": [
+     "Content uses synthetic media; failure to disclose this in YouTube's interface will lead to policy violations."
+    ],
+    "claims": [
+     "Ancient Egyptians produced special lead compounds for their kohl eyeliner.",
+     "Modern research shows these lead compounds stimulated the skin to produce nitric oxide.",
+     "Nitric oxide helps the body fight bacteria."
+    ]
+   },
+   "created": 1791181345.0942035,
+   "stage": "uploaded",
+   "ai": true,
+   "title": "Beyond Beauty: Was Ancient Egyptian Kohl Actually Medicine?",
+   "desc": 1,
+   "thumb": 2,
+   "video_id": "1P3m0SSyKV4"
   }
  },
  "props": {
@@ -835,10 +909,25 @@
    "verdict": "FALSE",
    "sources": [],
    "created": 1791162730.329993
+  },
+  "p32": {
+   "type": "subgen",
+   "video_id": "1P3m0SSyKV4",
+   "created": 1791181576.9182708
+  },
+  "p33": {
+   "type": "plgen",
+   "video_id": "1P3m0SSyKV4",
+   "created": 1791181576.9182727
+  },
+  "p34": {
+   "type": "xgen",
+   "video_id": "1P3m0SSyKV4",
+   "created": 1791181576.9182737
   }
  },
  "seen": [],
- "n": 31,
+ "n": 34,
  "mem": {
   "lessons": [
    "Adopt the style of your rejected titles, which prioritize mystery and specific outcomes over generic descriptions.",
@@ -859,7 +948,8 @@
    "A Newly Discovered Tomb in Luxor: What Was Inside?",
    "Inside the World's Largest Archaeological Museum",
    "Were the Pyramids Built by Slaves? The Truth",
-   "Did Ancient Egyptians Have Electricity? The Truth"
+   "Did Ancient Egyptians Have Electricity? The Truth",
+   "Beyond Beauty: Was Ancient Egyptian Kohl Actually Medicine?"
   ],
   "skips": [
    "Did Ancient Egyptians Wear Melting Fat Cones?",
@@ -876,7 +966,9 @@
    "Slaves or Skilled Workers? The Truth About Pyramid Builders",
    "The Great Pyramid Myth Debunked: Who Really Built It?",
    "The Dendera Light: Ancient Bulb or Myth?",
-   "Debunking the Electricity of Ancient Egypt"
+   "Debunking the Electricity of Ancient Egypt",
+   "Why Did Ancient Egyptians Use Lead Makeup? The Secret Benefit",
+   "The Surprising Health Secret Behind Ancient Egyptian Eyeliner"
   ],
   "videos": {
    "ilMueZ9RnQw": {
@@ -917,6 +1009,13 @@
     "summary": "This video is a well-paced, high-quality exploration of a common historical myth. The editing is clean, the narration is professional, and the historical content is accurate.",
     "checked": false,
     "public_at": 1791160329.0749323
+   },
+   "1P3m0SSyKV4": {
+    "uploaded": 1791181576.9182608,
+    "title": "Beyond Beauty: Was Ancient Egyptian Kohl Actually Medicine?",
+    "file_id": "BAACAgQAAxkBAAIBRWrDQd8j527g2OnuR7vVElc_DUHaAAKvGwACnTYhUi6VX8c0nTGZPQQ",
+    "summary": "The video offers an interesting, concise fact about ancient Egyptian eye makeup with decent visuals. However, it requires a disclosure regarding the AI-generated imagery and a slight refinement to the audio editing.",
+    "checked": false
    }
   },
   "exps": [
@@ -949,7 +1048,7 @@
    }
   ],
   "last_plan": "2026-40",
-  "last_check": 1791179456.2392743,
+  "last_check": 1791181329.906942,
   "links": [],
   "cadence_days": 3,
   "last_nudge": 0,
