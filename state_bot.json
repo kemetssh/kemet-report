@@ -1303,7 +1303,8 @@
     "title": "Were Millions of Kittens Sacrificed in Ancient Egypt?",
     "file_id": "BAACAgQAAxkBAAIBuGrDu5MJ8HnM7RCIzErax_2vkWOgAAKFHAACnTYhUjGen0ddniBPPQQ",
     "summary": "The video effectively uses an intriguing and somber tone to shed light on the controversial history of animal mummification in Ancient Egypt. The pacing is tight, and the AI-generated imagery matches the historical narrative well.",
-    "checked": false
+    "checked": false,
+    "public_at": 1791217534.9427073
    }
   },
   "exps": [
@@ -1363,7 +1364,7 @@
    }
   ],
   "last_plan": "2026-40",
-  "last_check": 1791215641.6458602,
+  "last_check": 1791217534.1822221,
   "links": [],
   "cadence_days": 3,
   "last_nudge": 0,
