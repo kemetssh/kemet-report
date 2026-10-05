@@ -1,5 +1,5 @@
 {
- "offset": 277936037,
+ "offset": 277936043,
  "jobs": {
   "55": {
    "id": "55",
@@ -1068,10 +1068,37 @@
    "type": "xgen",
    "video_id": "JaGxWm1c-gE",
    "created": 1791189033.0145352
+  },
+  "p44": {
+   "type": "title",
+   "video_id": "IibhtMxXssI",
+   "old": "Inside the World's Largest Archaeological Museum",
+   "new": "Inside the World's Largest Museum: What's Really Inside?",
+   "created": 1791194108.4008837,
+   "views": 11,
+   "published": "2026-10-04T11:55:14Z"
+  },
+  "p45": {
+   "type": "title",
+   "video_id": "BWGaFPFJKLs",
+   "old": "Why Anubis Weighed Your Heart: The Final Judgment",
+   "new": "Would You Pass Anubis's Heart-Weighing Test?",
+   "created": 1791194108.5420098,
+   "views": 27,
+   "published": "2026-10-01T09:39:19Z"
+  },
+  "p46": {
+   "type": "title",
+   "video_id": "UI6nMq8_uaU",
+   "old": "Anubis: The Jackal God of the Afterlife",
+   "new": "Was Anubis A Protector or A Judge? The Truth",
+   "created": 1791194108.6671689,
+   "views": 47,
+   "published": "2026-09-29T11:43:34Z"
   }
  },
  "seen": [],
- "n": 43,
+ "n": 47,
  "mem": {
   "lessons": [
    "Adopt the style of your rejected titles, which prioritize mystery and specific outcomes over generic descriptions.",
@@ -1094,7 +1121,10 @@
    "Were the Pyramids Built by Slaves? The Truth",
    "Did Ancient Egyptians Have Electricity? The Truth",
    "Beyond Beauty: Was Ancient Egyptian Kohl Actually Medicine?",
-   "Did A Deadly Curse Haunt Howard Carter?"
+   "Did A Deadly Curse Haunt Howard Carter?",
+   "Inside the World's Largest Museum: What's Really Inside?",
+   "Would You Pass Anubis's Heart-Weighing Test?",
+   "Was Anubis A Protector or A Judge? The Truth"
   ],
   "skips": [
    "Did Ancient Egyptians Wear Melting Fat Cones?",
@@ -1201,10 +1231,37 @@
     "start_ts": 1791063058.9505901,
     "before_rate": 27.400738623164663,
     "done": false
+   },
+   {
+    "video_id": "IibhtMxXssI",
+    "old": "Inside the World's Largest Archaeological Museum",
+    "new": "Inside the World's Largest Museum: What's Really Inside?",
+    "start_views": 11,
+    "start_ts": 1791194164.1636279,
+    "before_rate": 11.0,
+    "done": false
+   },
+   {
+    "video_id": "BWGaFPFJKLs",
+    "old": "Why Anubis Weighed Your Heart: The Final Judgment",
+    "new": "Would You Pass Anubis's Heart-Weighing Test?",
+    "start_views": 27,
+    "start_ts": 1791194165.5888731,
+    "before_rate": 6.730397156089443,
+    "done": false
+   },
+   {
+    "video_id": "UI6nMq8_uaU",
+    "old": "Anubis: The Jackal God of the Afterlife",
+    "new": "Was Anubis A Protector or A Judge? The Truth",
+    "start_views": 47,
+    "start_ts": 1791194166.4600537,
+    "before_rate": 7.931986496582154,
+    "done": false
    }
   ],
   "last_plan": "2026-40",
-  "last_check": 1791192128.4073758,
+  "last_check": 1791194102.8307104,
   "links": [],
   "cadence_days": 3,
   "last_nudge": 0,
