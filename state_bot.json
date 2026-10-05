@@ -1170,7 +1170,8 @@
     "title": "Did A Deadly Curse Haunt Howard Carter?",
     "file_id": "BAACAgQAAxkBAAIBamrDXwwo96xCJb026ejbB1NAO1MoAALdGwACnTYhUmchOWn-YznPPQQ",
     "summary": "The video effectively addresses a popular historical myth with a concise, research-backed explanation. It maintains the channel's high-stakes tone while delivering accurate and engaging content.",
-    "checked": false
+    "checked": false,
+    "public_at": 1791189765.3946354
    }
   },
   "exps": [
@@ -1203,7 +1204,7 @@
    }
   ],
   "last_plan": "2026-40",
-  "last_check": 1791187705.8739648,
+  "last_check": 1791189764.7259476,
   "links": [],
   "cadence_days": 3,
   "last_nudge": 0,
