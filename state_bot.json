@@ -1,5 +1,5 @@
 {
- "offset": 277936028,
+ "offset": 277936030,
  "jobs": {
   "55": {
    "id": "55",
@@ -962,10 +962,29 @@
    "verdict": "DISPUTED",
    "sources": [],
    "created": 1791187834.2217307
+  },
+  "p39": {
+   "type": "claims",
+   "claims": [
+    "The Great Sphinx's erosion patterns indicate it is thousands of years older than 2500 BC.",
+    "Ancient Egyptians had contact with pre-Columbian civilizations in the Americas.",
+    "The placement of the Giza pyramids perfectly aligns with the constellation of Orion.",
+    "Queen Cleopatra VII was of purely Greek Macedonian ancestry.",
+    "The Egyptian pyramids were constructed using sophisticated ramp systems.",
+    "The curse of the pharaohs caused the premature deaths of those who opened Tutankhamun's tomb."
+   ],
+   "created": 1791188021.2853708
+  },
+  "p40": {
+   "type": "audit",
+   "claim": "The curse of the pharaohs caused the premature deaths of those who opened Tutankhamun's tomb.",
+   "verdict": "CONTRADICTED",
+   "sources": [],
+   "created": 1791188141.470883
   }
  },
  "seen": [],
- "n": 38,
+ "n": 40,
  "mem": {
   "lessons": [
    "Adopt the style of your rejected titles, which prioritize mystery and specific outcomes over generic descriptions.",
@@ -1116,6 +1135,12 @@
     "verdict": "DISPUTED",
     "score": 40,
     "ts": 1791187834.2217262
+   },
+   {
+    "claim": "The curse of the pharaohs caused the premature deaths of those who opened Tutankhamun's tomb.",
+    "verdict": "CONTRADICTED",
+    "score": 5,
+    "ts": 1791188141.4708784
    }
   ]
  }
