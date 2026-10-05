@@ -1,5 +1,5 @@
 {
- "offset": 277935976,
+ "offset": 277935983,
  "jobs": {
   "55": {
    "id": "55",
@@ -721,10 +721,41 @@
     "Ancient Egyptians achieved long-distance maritime trade with the Americas."
    ],
    "created": 1791121552.0331075
+  },
+  "p29": {
+   "type": "ideas",
+   "ideas": [
+    {
+     "title": "The Pharaoh's Secret Weapon: Why Did They Hate Garlic?",
+     "hook": "Workers building the Great Pyramid went on strike\u2014not for better pay, but because their garlic rations were cut.",
+     "why": "Uses a specific, counter-intuitive historical detail to hook viewers."
+    },
+    {
+     "title": "Ancient Egypt's Beauty Hack: Why Did They Wear Green Eyeshadow?",
+     "hook": "It wasn't just for style; that iconic green paint was actually saving them from a deadly infection.",
+     "why": "Focuses on a high-stakes mystery regarding daily survival and ritual."
+    },
+    {
+     "title": "The Missing Pyramid: Where Did The Bent Pyramid's Gold Go?",
+     "hook": "Sneak inside the most mysterious tomb in Kemet, where the architecture failed and the treasure vanished.",
+     "why": "Promises a mystery surrounding a specific site and a missing outcome."
+    },
+    {
+     "title": "Why Was The Scorpion King's Tomb Cursed?",
+     "hook": "Archaeologists uncovered a tomb predating the Pharaohs, and the strange artifacts inside defy every historical record.",
+     "why": "Piques curiosity with a 'cursed/mystery' angle that appeals to the core audience."
+    },
+    {
+     "title": "The Ancient Egyptian Toothpaste: Was It Actually Made of Ash?",
+     "hook": "You think your dental routine is rough? Ancient Egyptians cleaned their teeth with something that would shock you today.",
+     "why": "Uses a 'shocking' daily life mystery to create high engagement."
+    }
+   ],
+   "created": 1791161586.3746715
   }
  },
  "seen": [],
- "n": 28,
+ "n": 29,
  "mem": {
   "lessons": [
    "Adopt the style of your rejected titles, which prioritize mystery and specific outcomes over generic descriptions.",
