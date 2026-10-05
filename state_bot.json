@@ -1,5 +1,5 @@
 {
- "offset": 277936026,
+ "offset": 277936028,
  "jobs": {
   "55": {
    "id": "55",
@@ -943,10 +943,29 @@
    "verdict": "FALSE",
    "sources": [],
    "created": 1791186796.3853233
+  },
+  "p37": {
+   "type": "claims",
+   "claims": [
+    "The Great Sphinx was constructed over 10,000 years ago.",
+    "Cleopatra VII was of purely Egyptian ancestry.",
+    "The pyramids were aligned with the constellation Orion.",
+    "Ancient Egyptians successfully achieved transoceanic travel to the Americas.",
+    "The pharaoh Akhenaten suffered from severe physical deformities.",
+    "Hieroglyphs contain depictions of modern mechanical technology."
+   ],
+   "created": 1791187725.7594764
+  },
+  "p38": {
+   "type": "audit",
+   "claim": "King Tutankhamun was murdered",
+   "verdict": "DISPUTED",
+   "sources": [],
+   "created": 1791187834.2217307
   }
  },
  "seen": [],
- "n": 36,
+ "n": 38,
  "mem": {
   "lessons": [
    "Adopt the style of your rejected titles, which prioritize mystery and specific outcomes over generic descriptions.",
@@ -1068,7 +1087,7 @@
    }
   ],
   "last_plan": "2026-40",
-  "last_check": 1791185885.3358943,
+  "last_check": 1791187705.8739648,
   "links": [],
   "cadence_days": 3,
   "last_nudge": 0,
@@ -1091,6 +1110,12 @@
     "verdict": "FALSE",
     "score": 5,
     "ts": 1791186796.3853178
+   },
+   {
+    "claim": "King Tutankhamun was murdered",
+    "verdict": "DISPUTED",
+    "score": 40,
+    "ts": 1791187834.2217262
    }
   ]
  }
