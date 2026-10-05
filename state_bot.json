@@ -1,5 +1,5 @@
 {
- "offset": 277936075,
+ "offset": 277936077,
  "jobs": {
   "55": {
    "id": "55",
@@ -1187,10 +1187,41 @@
    "type": "xgen",
    "video_id": "omiTEvMq2Cw",
    "created": 1791217203.1414306
+  },
+  "p51": {
+   "type": "ideas",
+   "ideas": [
+    {
+     "title": "Did Moses Actually Face Pharaoh Seti? The Truth",
+     "hook": "Cinema shows a prince of Egypt defying a Pharaoh, but do the royal records of the 19th Dynasty even mention a Moses?",
+     "why": "Targets the high-performing crossover between biblical narratives and historical Pharaohs seen in the 'The Word Today' data."
+    },
+    {
+     "title": "Did AI Really Find a Hidden Machine in the Pyramids?",
+     "hook": "Viral videos claim artificial intelligence has 'stunned' archaeologists, but the actual data reveals a different secret.",
+     "why": "Addresses the 'AI Reanalyzed' trend by providing a skeptical, evidence-based audit for a curious audience."
+    },
+    {
+     "title": "Could You Survive the Actual 12 Hours of Night?",
+     "hook": "Pop culture turns the Duat into an action movie, but the ancient 'Amduat' describes a much more terrifying reality.",
+     "why": "Leverages the interest in Egyptian mythology and trials (like Anubis's test) seen in the high-viewership 'Elia Black' shorts."
+    },
+    {
+     "title": "Are the Pyramid Texts Older Than the Vedas? The Truth",
+     "hook": "A popular theory links the wisdom of Egypt to the ancient texts of India, but does the timeline actually support a connection?",
+     "why": "Exploits the high engagement found in cross-cultural comparisons between Egyptian and Indian spiritual history."
+    },
+    {
+     "title": "What Did the Greeks Really Find Inside the Great Pyramid?",
+     "hook": "Thousands of years ago, the first 'tourists' entered the Giza plateau\u2014and their accounts of what they saw are baffling.",
+     "why": "Uses the 'Mystery Nobody Has Solved' pattern by focusing on historical eyewitness accounts that contradict modern assumptions."
+    }
+   ],
+   "created": 1791240870.8673944
   }
  },
  "seen": [],
- "n": 50,
+ "n": 51,
  "mem": {
   "lessons": [
    "Adopt the style of your rejected titles, which prioritize mystery and specific outcomes over generic descriptions.",
@@ -1364,7 +1395,7 @@
    }
   ],
   "last_plan": "2026-40",
-  "last_check": 1791238689.5427423,
+  "last_check": 1791240654.0800855,
   "links": [],
   "cadence_days": 3,
   "last_nudge": 0,
@@ -1400,6 +1431,20 @@
     "score": 5,
     "ts": 1791188141.4708784
    }
-  ]
+  ],
+  "scout": {
+   "ts": 1791240870.8673477,
+   "patterns": [
+    "Intersection of Ancient Egypt and modern pop culture or other ancient religions (Marvel, Kratos, Sanatan Dharm).",
+    "High-stakes claims involving modern technology like AI 'reanalyzing' or 'stunning' researchers regarding the pyramids.",
+    "Specific mythological judgment or power-scaling themes, particularly focusing on gods like Khonshu or Anubis.",
+    "Cinematic or 'full movie' style packaging for longer historical deep-dives."
+   ],
+   "gaps": [
+    "Auditing the 'AI findings' that go viral; viewers seem fascinated by modern tech but lack a channel that checks if those findings are peer-reviewed.",
+    "Fact-checking the 'Moses vs. Pharaoh' cinematic trope against actual archaeological records of the 19th Dynasty.",
+    "A grounded look at the 'God of War' style power scaling of deities based on actual liturgical texts rather than video game logic."
+   ]
+  }
  }
 }
