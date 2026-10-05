@@ -1,5 +1,5 @@
 {
- "offset": 277936064,
+ "offset": 277936067,
  "jobs": {
   "55": {
    "id": "55",
@@ -664,6 +664,80 @@
    "desc": 0,
    "thumb": 2,
    "video_id": "JaGxWm1c-gE"
+  },
+  "443": {
+   "id": "443",
+   "file_id": "BAACAgQAAxkBAAIBuGrDu5MJ8HnM7RCIzErax_2vkWOgAAKFHAACnTYhUjGen0ddniBPPQQ",
+   "name": "IMG_8333.MP4",
+   "dur": 22.4,
+   "w": 720,
+   "h": 1280,
+   "review": {
+    "verdict": "ready",
+    "score": 8,
+    "summary": "The video effectively uses an intriguing and somber tone to shed light on the controversial history of animal mummification in Ancient Egypt. The pacing is tight, and the AI-generated imagery matches the historical narrative well.",
+    "issues": [
+     {
+      "at": "00:00",
+      "problem": "The AI disclaimer is missing from the description.",
+      "fix": "Add a clear statement to the video description disclosing the use of AI-generated visuals to comply with YouTube's transparency policy."
+     }
+    ],
+    "strengths": [
+     "Strong, captivating hook",
+     "High-quality, immersive AI visuals",
+     "Engaging and well-paced voiceover"
+    ],
+    "titles": [
+     "The Dark Secret Behind Egyptian Cat Mummies",
+     "Were Millions of Kittens Sacrificed in Ancient Egypt?",
+     "The Truth About Animal Mummies You Never Knew"
+    ],
+    "descriptions": [
+     "Beyond the reverence for cats, discover the darker reality of ancient feline mummification. Millions of these animals were bred specifically for ritual offerings, revealing a complex and often brutal side of ancient life.\n\n#AncientEgypt #History #CatMummies #Mystery #Archaeology #Shorts",
+     "You think cat mummies were cherished companions? The truth is far more unsettling. We investigate the mass breeding and sacrifice of kittens in ancient Kemet to satisfy the goddess Bastet.\n\n#AncientEgypt #HistoryFacts #Archaeology #Bastet #Mystery #Shorts"
+    ],
+    "tags": [
+     "Ancient Egypt",
+     "Cat Mummies",
+     "Bastet",
+     "History",
+     "Ancient History",
+     "Archaeology",
+     "Egyptology",
+     "Sacrificial Rituals",
+     "Ancient Kemet",
+     "Historical Mystery",
+     "Documentary",
+     "Shorts"
+    ],
+    "thumb_times": [
+     1.0,
+     12.0,
+     20.0
+    ],
+    "ai_visuals": true,
+    "policy_notes": [
+     "Requires AI disclosure in video description to comply with YouTube's transparency requirements."
+    ],
+    "claims": [
+     "Millions of cat mummies were buried beneath the sands near Bubastis.",
+     "Many mummified cats were young kittens.",
+     "X-rays show that many of the mummified kittens had their necks deliberately broken.",
+     "These animals were raised specifically to be offered to the goddess Bastet.",
+     "Pilgrims would purchase these mummified animals for offerings."
+    ]
+   },
+   "created": 1791212903.5257134,
+   "stage": "desc",
+   "ai": true,
+   "evidence": {
+    "claim": "The curse of the pharaohs caused the premature deaths of those who opened Tutankhamun's tomb.",
+    "verdict": "CONTRADICTED",
+    "sources": []
+   },
+   "ev_on": true,
+   "title": "Were Millions of Kittens Sacrificed in Ancient Egypt?"
   }
  },
  "props": {
@@ -1124,7 +1198,8 @@
    "Did A Deadly Curse Haunt Howard Carter?",
    "Inside the World's Largest Museum: What's Really Inside?",
    "Would You Pass Anubis's Heart-Weighing Test?",
-   "Was Anubis A Protector or A Judge? The Truth"
+   "Was Anubis A Protector or A Judge? The Truth",
+   "Were Millions of Kittens Sacrificed in Ancient Egypt?"
   ],
   "skips": [
    "Did Ancient Egyptians Wear Melting Fat Cones?",
@@ -1145,7 +1220,9 @@
    "Why Did Ancient Egyptians Use Lead Makeup? The Secret Benefit",
    "The Surprising Health Secret Behind Ancient Egyptian Eyeliner",
    "Did King Tut's Tomb Really Kill Those Who Opened It?",
-   "The Curse of King Tut: Myth or Historical Fact?"
+   "The Curse of King Tut: Myth or Historical Fact?",
+   "The Dark Secret Behind Egyptian Cat Mummies",
+   "The Truth About Animal Mummies You Never Knew"
   ],
   "videos": {
    "ilMueZ9RnQw": {
