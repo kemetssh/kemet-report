@@ -5,6 +5,7 @@ Flow: video -> review + fact check -> pick title -> pick description ->
 pick thumbnail -> upload (private) -> optional "try to make public".
 Nothing is uploaded or published without a tap from you.
 """
+import base64
 import json
 import os
 import re
@@ -31,6 +32,8 @@ TGAPI = f"{TG_BASE}/bot{TG_TOKEN}"
 TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
+GH_API = os.getenv("GH_API", "https://api.github.com")
+BOT_VERSION = "v10"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1692,7 +1695,7 @@ def cmd_links(st, raw):
 
 # ---------------- health, pause, free-text brain ----------------
 def cmd_health(st):
-    lines = ["🩺 Health check"]
+    lines = ["🩺 Health check", f"Bot version {BOT_VERSION}"]
     tok = {}
 
     def chk(name, fn):
@@ -1844,10 +1847,61 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/report - daily channel report now\n/status - videos waiting for you\n/help")
 
 
+# ---------------- update the bot itself from Telegram ----------------
+def cmd_update(msg):
+    """Send a new bot.py file to the bot: it checks it, then saves it to GitHub. Only your own chat can do this."""
+    doc = msg.get("document") or {}
+    repo, tok = os.getenv("GITHUB_REPOSITORY"), os.getenv("GITHUB_TOKEN")
+    if not repo or not tok:
+        return send("I cannot update myself here (no GitHub access in this run).")
+    if (doc.get("file_size") or 0) > 3_000_000:
+        return send("That file is too big to be bot.py.")
+    send("Checking the new file...")
+    dest = ROOT / "_incoming_bot.py"
+    tg_download(doc["file_id"], dest)
+    try:
+        code = dest.read_text(encoding="utf-8")
+    finally:
+        dest.unlink(missing_ok=True)
+    try:
+        compile(code, "bot.py", "exec")
+    except SyntaxError as e:
+        return send(f"Not installed. The file has a typing error on line {e.lineno}. The old bot is untouched.")
+    need = ("def main(", "def on_message(", "def on_callback(", "def cmd_update(", "BOT_VERSION")
+    if len(code) < 30000 or any(n not in code for n in need):
+        return send("Not installed. That does not look like the full Kemet bot.py (or it is missing the update feature). The old bot is untouched.")
+    m = re.search(r'BOT_VERSION\s*=\s*"([^"]+)"', code)
+    newv = m.group(1) if m else "?"
+    hdr = {"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json"}
+    url = f"{GH_API}/repos/{repo}/contents/bot.py"
+    branch = os.getenv("GITHUB_REF_NAME", "main")
+    cur = S.get(url, headers=hdr, params={"ref": branch}, timeout=60)
+    if cur.status_code != 200:
+        return send(f"Not installed. GitHub said HTTP {cur.status_code} when I looked at bot.py. The old bot is untouched.")
+    cur = cur.json()
+    old_text = ROOT.joinpath("bot.py").read_text(encoding="utf-8") if ROOT.joinpath("bot.py").exists() else ""
+    if old_text:  # keep one backup so a bad update can be undone by hand
+        bu = S.get(f"{GH_API}/repos/{repo}/contents/bot_prev.py", headers=hdr, params={"ref": branch}, timeout=60)
+        body = {"message": "backup of previous bot.py", "branch": branch,
+                "content": base64.b64encode(old_text.encode("utf-8")).decode()}
+        if bu.status_code == 200:
+            body["sha"] = bu.json()["sha"]
+        S.put(f"{GH_API}/repos/{repo}/contents/bot_prev.py", headers=hdr, json=body, timeout=60)
+    r = S.put(url, headers=hdr, timeout=60, json={
+        "message": f"update bot.py to {newv} (from Telegram)", "branch": branch, "sha": cur["sha"],
+        "content": base64.b64encode(code.encode("utf-8")).decode()})
+    if r.status_code not in (200, 201):
+        return send(f"Not installed. GitHub refused the save (HTTP {r.status_code}). The old bot is untouched.")
+    send(f"✅ Installed bot version {newv} (was {BOT_VERSION}). It starts working on the next run, in about 5 minutes. "
+         "Send /health then to check. A copy of the old file is saved as bot_prev.py in your repo.")
+
+
 def on_message(msg, st):
     if str(msg.get("chat", {}).get("id")) != CHAT:
         return
     doc = msg.get("document") or {}
+    if str(doc.get("file_name", "")).lower().endswith(".py"):
+        return cmd_update(msg)
     if msg.get("video") or str(doc.get("mime_type", "")).startswith("video/"):
         return start_job(msg, st)
     if msg.get("voice") or msg.get("audio"):
