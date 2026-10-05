@@ -1,5 +1,5 @@
 {
- "offset": 277936080,
+ "offset": 277936083,
  "jobs": {
   "55": {
    "id": "55",
@@ -741,6 +741,146 @@
    "desc": 1,
    "thumb": 0,
    "video_id": "omiTEvMq2Cw"
+  },
+  "481": {
+   "id": "481",
+   "file_id": "BAACAgQAAxkBAAIB4WrEMqnmVGgEJO4ZQoMsfB6hnA_MAAKTHQACnTYhUl6GrrMnx4OQPQQ",
+   "name": "IMG_8341.MP4",
+   "dur": 31.9,
+   "w": 720,
+   "h": 1280,
+   "review": {
+    "verdict": "fix first",
+    "score": 6,
+    "summary": "The video uses high-quality AI visuals and a clear voiceover to debunk speculative claims about Ancient Egyptian technology. However, it requires a mandatory AI-generated content disclosure in the video description to comply with YouTube's policy.",
+    "issues": [
+     {
+      "at": "00:00",
+      "problem": "No mandatory disclosure that the content is AI-generated.",
+      "fix": "Add 'This content was created with the help of AI' to the video description."
+     },
+     {
+      "at": "00:05",
+      "problem": "Historical claim regarding the 'corridor' is vague.",
+      "fix": "Clarify which pyramid and specific corridor is being referred to for historical accuracy."
+     }
+    ],
+    "strengths": [
+     "Clear and professional voiceover",
+     "High-quality, visually appealing AI art",
+     "Balanced, evidence-based approach to debunking myths"
+    ],
+    "titles": [
+     "Did Ancient Egyptians Use Advanced Machines? An AI Analysis",
+     "The Truth Behind the Pyramid's Hidden Chambers",
+     "Are The Pyramids Really Machines? An Investigation"
+    ],
+    "descriptions": [
+     "Using the latest AI to re-examine the structural design of the Great Pyramid, we uncover the reality behind popular myths. Do the internal shafts reveal advanced technology, or simple engineering?\n\n#AncientEgypt #History #Shorts",
+     "Can modern AI technology solve the mysteries of Giza? We take a close look at the pyramid's internal architecture to separate engineering reality from speculative fiction.\n\n#AncientEgypt #Pyramids #Shorts"
+    ],
+    "tags": [
+     "Ancient Egypt",
+     "Great Pyramid",
+     "Giza",
+     "Archaeology",
+     "AI History",
+     "Engineering",
+     "Historical Myths",
+     "Ancient Technology",
+     "Egyptology",
+     "History Facts",
+     "Ancient Civilization",
+     "Mystery"
+    ],
+    "thumb_times": [
+     0.2,
+     6.0,
+     19.0
+    ],
+    "ai_visuals": true,
+    "policy_notes": [
+     "Requires AI-generated content label as per YouTube guidelines."
+    ],
+    "claims": [
+     "AI can help refine our understanding of the internal structure of the pyramids.",
+     "The internal architecture of the pyramid consists of stone, corridors, and voids.",
+     "There is no archaeological evidence of hidden machines or advanced electrical devices in the pyramids."
+    ]
+   },
+   "created": 1791243001.0027385,
+   "stage": "title",
+   "ai": true
+  },
+  "482": {
+   "id": "482",
+   "file_id": "BAACAgQAAxkBAAIB4mrEMqlUzQRAPPMtR6lFApSzcn70AAKUHQACnTYhUsTv-viNFKAdPQQ",
+   "name": "IMG_8340.MP4",
+   "dur": 31.9,
+   "w": 720,
+   "h": 1280,
+   "review": {
+    "verdict": "fix first",
+    "score": 6,
+    "summary": "The video effectively utilizes a mysterious hook to explore modern archaeology, but its reliance on AI-generated imagery without disclosure poses a policy risk. The content is engaging, yet the scientific claims about muography require more precise contextualization to avoid sounding like sensationalist clickbait.",
+    "issues": [
+     {
+      "at": "00:00",
+      "problem": "AI-generated video content is not labeled per YouTube's mandatory AI disclosure policy.",
+      "fix": "Use YouTube's Creator Studio 'Altered Content' label to declare the use of synthetic imagery."
+     },
+     {
+      "at": "00:24",
+      "problem": "The transition to the 'ancient' scene feels disconnected from the scientific explanation.",
+      "fix": "Use a graphic overlay to bridge the scientific explanation (muography) with the visual representation."
+     }
+    ],
+    "strengths": [
+     "Compelling, high-stakes hook.",
+     "Concise and well-paced delivery.",
+     "Visual aesthetic fits the channel's 'mystery' theme."
+    ],
+    "titles": [
+     "Did AI Find a Secret Room in the Great Pyramid?",
+     "Muography: The Modern Way We Are Mapping the Pyramids",
+     "Hidden Chambers of Giza: What Did AI Actually Find?"
+    ],
+    "descriptions": [
+     "Can modern technology finally reveal the secrets hidden inside the Great Pyramid of Giza? We look at how muography is changing Egyptology. #AncientEgypt #Shorts #Archaeology",
+     "Scientists are using cosmic rays to see through the stone of the Pyramids. Is there a hidden machine inside? Here is what the science says. #AncientEgypt #Shorts #History"
+    ],
+    "tags": [
+     "Ancient Egypt",
+     "Great Pyramid",
+     "Giza",
+     "Muography",
+     "Archaeology",
+     "AI",
+     "History",
+     "Hidden chambers",
+     "Ancient technology",
+     "Egyptology",
+     "Mystery",
+     "Pyramid of Khufu"
+    ],
+    "thumb_times": [
+     0.2,
+     13.0,
+     26.0
+    ],
+    "ai_visuals": true,
+    "policy_notes": [
+     "Must disclose AI-generated content in video settings to comply with YouTube policy."
+    ],
+    "claims": [
+     "Researchers use muography to map empty spaces inside the Great Pyramid of Giza.",
+     "Cosmic rays are used in muography to pass through the stone of the pyramid.",
+     "Artificial intelligence is used to analyze data captured by muography detectors."
+    ]
+   },
+   "created": 1791243022.7606897,
+   "stage": "title",
+   "ai": true
   }
  },
  "props": {
@@ -1395,7 +1535,7 @@
    }
   ],
   "last_plan": "2026-40",
-  "last_check": 1791240654.0800855,
+  "last_check": 1791242960.891296,
   "links": [],
   "cadence_days": 3,
   "last_nudge": 0,
