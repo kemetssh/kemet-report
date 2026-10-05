@@ -1254,7 +1254,9 @@ def an_query(tok, metrics, days, filters=None):
     if r.status_code != 200:
         raise RuntimeError(f"Analytics HTTP {r.status_code}")
     rows = r.json().get("rows") or []
-    return rows[0] if rows else [0] * len(metrics.split(","))
+    n = len(metrics.split(","))
+    row = rows[0] if rows else [0] * n
+    return [v if isinstance(v, (int, float)) else 0 for v in row]  # YouTube can send null for a metric
 
 
 def bar(x, total, width=10):
