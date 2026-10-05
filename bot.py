@@ -930,8 +930,15 @@ Return JSON only: {{"claims": ["one claim as a short plain sentence, max 90 char
 AUDIT_PROMPT = """You host "Kemet Audited", a YouTube series that audits claims about Ancient Egypt like a quality auditor. Use web search.
 CLAIM: {claim}
 Rules: rely on archaeology, inscriptions, peer-reviewed work and museum or university sources. Separate what is directly evidenced from what is only inferred. Never invent sources, quotes or numbers. If evidence is thin, say so.
-Do not overclaim: scholars often disagree on details (for example whether workers were paid in goods, were rotating state labour, or included some captives), so use careful words like 'most likely', 'the evidence suggests', and name what is still debated. Always fill 'unsure' with at least the main open question unless the claim is simple fact. Prefer 'FALSE' only when evidence clearly contradicts the claim; otherwise use UNPROVEN or DISPUTED.
-Return JSON only: {{"verdict": "PROVEN" or "LIKELY" or "DISPUTED" or "UNPROVEN" or "FALSE",
+Do not overclaim: scholars often disagree on details, so use careful words like 'most likely', 'the evidence suggests', and name what is still debated. Always fill 'unsure' with at least the main open question unless the claim is simple fact.
+Verdict scale (pick the most cautious one the evidence allows):
+SUPPORTED = strong direct evidence that it is true.
+MOSTLY SUPPORTED = good evidence, minor open details.
+DISPUTED = serious scholars disagree, evidence points both ways.
+UNSUPPORTED = no good evidence for it, but it is not disproven (typical for claims about causes, motives, intentions, or secrets nobody can observe).
+CONTRADICTED = solid direct evidence shows it is wrong.
+Never use CONTRADICTED for a claim about why or how something happened unless the evidence directly rules it out. Never write the words 'debunked', 'disproven' or 'officially' in the script unless the verdict is CONTRADICTED. In the script, say what the evidence shows and what it does not, in plain calm words.
+Return JSON only: {{"verdict": "SUPPORTED" or "MOSTLY SUPPORTED" or "DISPUTED" or "UNSUPPORTED" or "CONTRADICTED",
  "score": integer 0-100 (how strongly the evidence supports the claim),
  "evidence_for": ["max 3 short points"],
  "evidence_against": ["max 3 short points"],
@@ -944,7 +951,18 @@ FACT_PROMPT = """Use web search. Fact-check these claims taken from a short Anci
 Claims: {claims}
 Return JSON only: {{"results": [{{"claim": "...", "status": "solid" or "shaky" or "wrong", "note": "short reason", "fix": "how to say it correctly, or empty"}}]}}"""
 
-VERDICT_ICON = {"PROVEN": "✅", "LIKELY": "🟢", "DISPUTED": "🟡", "UNPROVEN": "🟠", "FALSE": "❌"}
+VERDICT_ICON = {"SUPPORTED": "✅", "MOSTLY SUPPORTED": "🟢", "DISPUTED": "🟡", "UNSUPPORTED": "🟠", "CONTRADICTED": "❌"}
+VERDICT_OLD = {"PROVEN": "SUPPORTED", "TRUE": "SUPPORTED", "LIKELY": "MOSTLY SUPPORTED", "UNPROVEN": "UNSUPPORTED", "FALSE": "CONTRADICTED"}
+
+
+def soften(script, verdict):
+    # safety net: only a CONTRADICTED verdict may use strong words
+    if verdict == "CONTRADICTED":
+        return script
+    for w, r in (("officially debunked", "not supported by the evidence"), ("debunked", "not supported by the evidence"),
+                 ("disproven", "not supported by the evidence"), ("officially", "")):
+        script = re.sub(w, r, script, flags=re.I)
+    return re.sub(r"  +", " ", script)
 
 
 def parse_obj(text):
@@ -987,7 +1005,9 @@ def run_audit(claim, st):
     a = parse_obj(text)
     if not a.get("verdict"):
         return send("I could not finish that audit. Try rewording the claim, or try again in a minute.")
-    verdict = str(a["verdict"]).upper()
+    verdict = str(a["verdict"]).upper().strip()
+    verdict = VERDICT_OLD.get(verdict, verdict)
+    a["script"] = soften(str(a.get("script", "")), verdict)
     srcs = dedupe_sources(sources)
     bullets = lambda k: "\n".join("• " + str(x) for x in (a.get(k) or [])[:3]) or "• none found"
     msg = (f"🔎 KEMET AUDITED\nClaim: {claim}\n\n{VERDICT_ICON.get(verdict, '•')} Verdict: {verdict}  |  Evidence score: {a.get('score', '?')}/100\n"
