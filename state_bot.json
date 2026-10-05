@@ -1,5 +1,5 @@
 {
- "offset": 277936030,
+ "offset": 277936031,
  "jobs": {
   "55": {
    "id": "55",
@@ -1142,6 +1142,11 @@
     "score": 5,
     "ts": 1791188141.4708784
    }
-  ]
+  ],
+  "pending_audit": {
+   "claim": "The curse of the pharaohs caused the premature deaths of those who opened Tutankhamun's tomb.",
+   "verdict": "CONTRADICTED",
+   "sources": []
+  }
  }
 }
