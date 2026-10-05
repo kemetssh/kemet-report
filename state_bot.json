@@ -1,5 +1,5 @@
 {
- "offset": 277935988,
+ "offset": 277936009,
  "jobs": {
   "55": {
    "id": "55",
@@ -454,6 +454,70 @@
    "desc": 1,
    "thumb": 0,
    "video_id": "eOcE4NrhPGs"
+  },
+  "300": {
+   "id": "300",
+   "file_id": "BAACAgQAAxkBAAIBDGrC-1mVp7ihn9niu9eZ3-TB_hO0AALFJAACnTYZUieN7OvHVwtzPQQ",
+   "name": "IMG_8298.MP4",
+   "dur": 23.4,
+   "w": 720,
+   "h": 1280,
+   "review": {
+    "verdict": "ready",
+    "score": 8,
+    "summary": "The video effectively addresses a common fringe theory about Ancient Egypt with historical facts. The voiceover and pacing are engaging and well-suited for short-form content.",
+    "issues": [],
+    "strengths": [
+     "Clear and concise debunking of a popular pseudoscientific myth",
+     "High-quality visuals that support the narrative",
+     "Strong, inquisitive hook"
+    ],
+    "titles": [
+     "Did Ancient Egyptians Have Electricity? The Truth",
+     "The Dendera Light: Ancient Bulb or Myth?",
+     "Debunking the Electricity of Ancient Egypt"
+    ],
+    "descriptions": [
+     "Many claim the Dendera Light is evidence of ancient electricity. We look at the archaeological reality behind this famous temple relief. #AncientEgypt #Shorts",
+     "Was electricity known to the ancient Egyptians? A look at the famous temple relief of Hathor at Dendera and what it actually represents. #AncientEgypt #Shorts"
+    ],
+    "tags": [
+     "Dendera Light",
+     "Ancient Egypt",
+     "History",
+     "Archaeology",
+     "Hathor Temple",
+     "Ancient Technology",
+     "Egyptology",
+     "Myths Debunked",
+     "Kemet",
+     "Ancient History",
+     "Historical Mysteries",
+     "Shorts"
+    ],
+    "thumb_times": [
+     1.0,
+     12.0,
+     20.0
+    ],
+    "ai_visuals": true,
+    "policy_notes": [
+     "YouTube AI disclosure label required"
+    ],
+    "claims": [
+     "Some people point to a relief in the Temple of Hathor at Dendera as evidence of ancient electricity.",
+     "Egyptologists identify the scene as the sun god emerging from a lotus flower.",
+     "No batteries have ever been found in ancient Egypt.",
+     "No wires have ever been found in ancient Egypt.",
+     "No electrical devices have ever been found in ancient Egypt."
+    ]
+   },
+   "created": 1791163749.458167,
+   "stage": "confirm",
+   "ai": true,
+   "title": "Did Ancient Egyptians Have Electricity? The Truth",
+   "desc": 1,
+   "thumb": 2
   }
  },
  "props": {
@@ -794,7 +858,8 @@
    "Ancient Egypt's Bizarre Pregnancy Test",
    "A Newly Discovered Tomb in Luxor: What Was Inside?",
    "Inside the World's Largest Archaeological Museum",
-   "Were the Pyramids Built by Slaves? The Truth"
+   "Were the Pyramids Built by Slaves? The Truth",
+   "Did Ancient Egyptians Have Electricity? The Truth"
   ],
   "skips": [
    "Did Ancient Egyptians Wear Melting Fat Cones?",
@@ -809,7 +874,9 @@
    "The Grand Egyptian Museum: What You Need to Know",
    "Kemet: Exploring the Grand Egyptian Museum's Opening",
    "Slaves or Skilled Workers? The Truth About Pyramid Builders",
-   "The Great Pyramid Myth Debunked: Who Really Built It?"
+   "The Great Pyramid Myth Debunked: Who Really Built It?",
+   "The Dendera Light: Ancient Bulb or Myth?",
+   "Debunking the Electricity of Ancient Egypt"
   ],
   "videos": {
    "ilMueZ9RnQw": {
