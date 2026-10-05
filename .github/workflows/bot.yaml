@@ -1,4 +1,4 @@
- name: Kemet bot
+name: Kemet bot
 on:
   schedule:
     - cron: "*/5 * * * *"
@@ -36,7 +36,7 @@ jobs:
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                    WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
           WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
           RUN_SECONDS: ${{ github.event.repository.visibility == 'public' && '270' || '0' }}
         run: python bot.py
@@ -47,3 +47,15 @@ jobs:
           git config user.email "bot@users.noreply.github.com"
           git add state_bot.json || true
           git diff --staged --quiet || (git commit -q -m "bot state" && git pull --rebase -q && git push -q)
+      - name: Tell me in Telegram if the bot crashed
+        if: failure()
+        env:
+          TG: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # at most about twice an hour, so a long outage cannot spam you
+          if [ "$(date -u +%M)" -lt 10 ]; then
+            curl -s -m 15 -X POST "https://api.telegram.org/bot${TG}/sendMessage" \
+              -d chat_id="${CHAT}" \
+              --data-urlencode "text=⚠️ The Kemet bot crashed on GitHub. Open the repo → Actions → Kemet bot and send me a screenshot of the red step." > /dev/null || true
+          fi
