@@ -1,5 +1,5 @@
 {
- "offset": 277936088,
+ "offset": 277936095,
  "jobs": {
   "55": {
    "id": "55",
@@ -945,8 +945,84 @@
     ]
    },
    "created": 1791268796.5633748,
-   "stage": "title",
-   "ai": true
+   "stage": "done",
+   "ai": true,
+   "title": "Beyond the Stone: Did AI Uncover a Hidden Pyramid Secret?",
+   "desc": 1,
+   "thumb": 0,
+   "video_id": "jXQQidQW3z4"
+  },
+  "502": {
+   "id": "502",
+   "file_id": "BAACAgQAAxkBAAIB4mrEMqlUzQRAPPMtR6lFApSzcn70AAKUHQACnTYhUsTv-viNFKAdPQQ",
+   "name": "IMG_8340.MP4",
+   "dur": 31.9,
+   "w": 720,
+   "h": 1280,
+   "review": {
+    "verdict": "fix first",
+    "score": 6,
+    "summary": "The video uses an intriguing premise about AI and muon tomography to discuss the Great Pyramid, but the narrative lacks scientific grounding regarding the nature of those findings. The transition from historical inquiry to an ambiguous conclusion feels abrupt and undermines the educational value.",
+    "issues": [
+     {
+      "at": "00:07",
+      "problem": "The narrator claims viral videos suggest AI 'stunned' the world, but fails to distinguish between peer-reviewed muon imaging and sensationalist social media claims.",
+      "fix": "Clearly differentiate between the ScanPyramids project's scientific findings and speculative AI rumors to maintain credibility."
+     },
+     {
+      "at": "00:26",
+      "problem": "The visual of a man in pharaonic attire standing on a balcony at night is historically inaccurate and misrepresents the era.",
+      "fix": "Use architectural drawings or diagrams of the pyramid internals instead of anachronistic historical reenactments."
+     }
+    ],
+    "strengths": [
+     "High-quality, evocative AI-generated imagery.",
+     "Engaging, clear voiceover narration.",
+     "Well-structured, fast-paced rhythm perfect for short-form content."
+    ],
+    "titles": [
+     "Muon Tomography: Did AI Reveal a Secret Chamber in the Great Pyramid?",
+     "Inside the Great Pyramid: What Are Scientists Really Finding?",
+     "Decoding the Great Pyramid: The Truth About Hidden Chambers"
+    ],
+    "descriptions": [
+     "Are there hidden secrets inside the Great Pyramid? We explore how muon tomography and data analysis are changing our understanding of Ancient Egyptian architecture. \n\n#AncientEgypt #GreatPyramid #Shorts",
+     "Did AI discover something new inside the Great Pyramid? Learn how modern physics is helping researchers scan the ancient structure without moving a single stone. \n\n#Archaeology #AncientEgypt #Shorts"
+    ],
+    "tags": [
+     "Ancient Egypt",
+     "Great Pyramid of Giza",
+     "Muon Tomography",
+     "Archaeology",
+     "Ancient History",
+     "AI",
+     "Giza",
+     "Egyptology",
+     "ScanPyramids",
+     "Hidden Chambers",
+     "History",
+     "Science"
+    ],
+    "thumb_times": [
+     2.0,
+     14.0,
+     27.0
+    ],
+    "ai_visuals": true,
+    "policy_notes": [
+     "Requires disclosure of 'Altered Content' under YouTube's AI labeling policy."
+    ],
+    "claims": [
+     "Muon tomography is used to image the interior of the Great Pyramid.",
+     "Cosmic rays pass through the pyramid and are measured by detectors.",
+     "Detectors map the empty spaces inside the stone based on muon density.",
+     "Artificial intelligence is used to analyze the data collected by muon detectors."
+    ]
+   },
+   "created": 1791269390.7692149,
+   "stage": "desc",
+   "ai": true,
+   "title": "Muon Tomography: Did AI Reveal a Secret Chamber in the Great Pyramid?"
   }
  },
  "props": {
@@ -1424,10 +1500,25 @@
     }
    ],
    "created": 1791240870.8673944
+  },
+  "p52": {
+   "type": "subgen",
+   "video_id": "jXQQidQW3z4",
+   "created": 1791269516.9328349
+  },
+  "p53": {
+   "type": "plgen",
+   "video_id": "jXQQidQW3z4",
+   "created": 1791269516.932837
+  },
+  "p54": {
+   "type": "xgen",
+   "video_id": "jXQQidQW3z4",
+   "created": 1791269516.932838
   }
  },
  "seen": [],
- "n": 51,
+ "n": 54,
  "mem": {
   "lessons": [
    "Adopt the style of your rejected titles, which prioritize mystery and specific outcomes over generic descriptions.",
@@ -1454,7 +1545,9 @@
    "Inside the World's Largest Museum: What's Really Inside?",
    "Would You Pass Anubis's Heart-Weighing Test?",
    "Was Anubis A Protector or A Judge? The Truth",
-   "Were Millions of Kittens Sacrificed in Ancient Egypt?"
+   "Were Millions of Kittens Sacrificed in Ancient Egypt?",
+   "Beyond the Stone: Did AI Uncover a Hidden Pyramid Secret?",
+   "Muon Tomography: Did AI Reveal a Secret Chamber in the Great Pyramid?"
   ],
   "skips": [
    "Did Ancient Egyptians Wear Melting Fat Cones?",
@@ -1477,7 +1570,11 @@
    "Did King Tut's Tomb Really Kill Those Who Opened It?",
    "The Curse of King Tut: Myth or Historical Fact?",
    "The Dark Secret Behind Egyptian Cat Mummies",
-   "The Truth About Animal Mummies You Never Knew"
+   "The Truth About Animal Mummies You Never Knew",
+   "Did AI Just Reveal a Secret Chamber in the Great Pyramid?",
+   "The Great Pyramid's Hidden Mystery: What Did AI Just Discover?",
+   "Inside the Great Pyramid: What Are Scientists Really Finding?",
+   "Decoding the Great Pyramid: The Truth About Hidden Chambers"
   ],
   "videos": {
    "ilMueZ9RnQw": {
@@ -1542,6 +1639,13 @@
     "summary": "The video effectively uses an intriguing and somber tone to shed light on the controversial history of animal mummification in Ancient Egypt. The pacing is tight, and the AI-generated imagery matches the historical narrative well.",
     "checked": false,
     "public_at": 1791217534.9427073
+   },
+   "jXQQidQW3z4": {
+    "uploaded": 1791269516.9328244,
+    "title": "Beyond the Stone: Did AI Uncover a Hidden Pyramid Secret?",
+    "file_id": "BAACAgQAAxkBAAIB4mrEMqlUzQRAPPMtR6lFApSzcn70AAKUHQACnTYhUsTv-viNFKAdPQQ",
+    "summary": "The video effectively uses a high-stakes, mystery-driven narrative style that matches the channel's target audience. The pacing is quick and engaging, though it relies heavily on speculative AI-generated imagery.",
+    "checked": false
    }
   },
   "exps": [
