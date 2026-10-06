@@ -1,5 +1,5 @@
 {
- "offset": 277936099,
+ "offset": 277936101,
  "jobs": {
   "55": {
    "id": "55",
@@ -1085,11 +1085,12 @@
     ]
    },
    "created": 1791269675.7339096,
-   "stage": "confirm",
+   "stage": "done",
    "ai": true,
    "title": "Did AI Finally Reveal Secrets Inside the Great Pyramid?",
    "desc": 1,
-   "thumb": 0
+   "thumb": 0,
+   "video_id": "iaLQj_mkAzE"
   }
  },
  "props": {
@@ -1582,10 +1583,25 @@
    "type": "xgen",
    "video_id": "jXQQidQW3z4",
    "created": 1791269516.932838
+  },
+  "p55": {
+   "type": "subgen",
+   "video_id": "iaLQj_mkAzE",
+   "created": 1791269980.7980824
+  },
+  "p56": {
+   "type": "plgen",
+   "video_id": "iaLQj_mkAzE",
+   "created": 1791269980.7980845
+  },
+  "p57": {
+   "type": "xgen",
+   "video_id": "iaLQj_mkAzE",
+   "created": 1791269980.7980857
   }
  },
  "seen": [],
- "n": 54,
+ "n": 57,
  "mem": {
   "lessons": [
    "Adopt the style of your rejected titles, which prioritize mystery and specific outcomes over generic descriptions.",
@@ -1717,6 +1733,13 @@
     "summary": "The video effectively uses a high-stakes, mystery-driven narrative style that matches the channel's target audience. The pacing is quick and engaging, though it relies heavily on speculative AI-generated imagery.",
     "checked": false,
     "public_at": 1791269661.019693
+   },
+   "iaLQj_mkAzE": {
+    "uploaded": 1791269980.7980723,
+    "title": "Did AI Finally Reveal Secrets Inside the Great Pyramid?",
+    "file_id": "BAACAgQAAxkBAAIB4WrEMqnmVGgEJO4ZQoMsfB6hnA_MAAKTHQACnTYhUl6GrrMnx4OQPQQ",
+    "summary": "The video offers a concise and professional narration accompanied by visually striking AI-generated imagery. It maintains a balanced perspective on the use of AI in archaeology while keeping the audience engaged through a mystery-driven approach.",
+    "checked": false
    }
   },
   "exps": [
