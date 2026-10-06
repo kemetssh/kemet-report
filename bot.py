@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.6.1"
+BOT_VERSION = "v10.6.2"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -762,8 +762,9 @@ def cmd_funnel(st):
     send("Looking for the best long video to send your Shorts viewers to...")
     tok = yt_token()
     vs = vids_with_length(tok)
-    shorts = [v for v in vs if 0 < v["secs"] <= 60]
-    longs = [v for v in vs if v["secs"] > 60]
+    # Shorts can be up to 3 minutes now, so only videos over 3 minutes count as long
+    shorts = [v for v in vs if 0 < v["secs"] <= 180]
+    longs = [v for v in vs if v["secs"] > 180]
     if not shorts:
         return send("I found no Shorts on the channel yet.")
     if not longs:
