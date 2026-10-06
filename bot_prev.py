@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.2"
+BOT_VERSION = "v10.3"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -108,6 +108,9 @@ def learned():
         parts.append("Titles the owner CHOSE (his taste):\n" + "\n".join("- " + x for x in m["picks"][-8:]))
     if m["skips"]:
         parts.append("Titles the owner REJECTED:\n" + "\n".join("- " + x for x in m["skips"][-8:]))
+    sc = m.get("scout")
+    if sc and sc.get("patterns"):
+        parts.append("Market scan of other channels (small sample, hints only):\n" + "\n".join("- " + x for x in sc["patterns"][:4]))
     return "\n".join(parts) or "No history yet."
 
 
@@ -907,6 +910,104 @@ def cmd_idea(st):
         f"{n + 1}. {i['title']}\nOpening: {i.get('hook', '')}\nWhy: {i.get('why', '')}" for n, i in enumerate(ideas))
     send(body + "\n\nTap one and I will write a fact-checked script.",
          [[btn(f"Script {n + 1}", pid, "is", n) for n in range(len(ideas))]])
+
+
+# ---------------- Scout: learn from other Ancient Egypt channels ----------------
+SCOUT_QUERIES = ["ancient egypt documentary", "egyptian pharaoh history", "ancient egypt mystery explained", "egyptian mythology gods"]
+
+SCOUT_PROMPT = """You advise the owner of the YouTube channel "Kemet | Ancient Egypt": short, calm, cinematic videos, and a series called Kemet Audited that tests viral claims against evidence. He records his own voice and never fakes facts.
+{memory}
+Below is public data about recent Ancient Egypt videos that got many views compared with the size of their channel (views_per_sub is high when a video beat its own channel's size):
+{rows}
+Study them. Return JSON only:
+{{"patterns": ["3 to 4 short, concrete patterns about topics, title shapes, or length that seem to work"],
+ "gaps": ["2 or 3 angles that viewers clearly want but where a careful evidence-first channel could do better"],
+ "ideas": [{{"title": "honest, curious title under 70 characters, never a copy of a title above",
+ "hook": "first spoken sentence", "why": "one sentence: which pattern or gap it uses"}}]}}
+Give exactly 5 ideas. Never copy a title. Never promise anything the evidence cannot support. Say "seems" when the data is thin: this is a small sample."""
+
+
+def iso_seconds(d):
+    m = re.fullmatch(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", d or "")
+    if not m:
+        return 0
+    h, mi, se = (int(x or 0) for x in m.groups())
+    return h * 3600 + mi * 60 + se
+
+
+def scout_market(tok):
+    own = yt_get("channels", tok, part="id", mine="true")["items"][0]["id"]
+    after = time.strftime("%Y-%m-%dT00:00:00Z", time.gmtime(time.time() - 120 * 86400))
+    ids = []
+    for q in SCOUT_QUERIES:
+        try:
+            res = yt_get("search", tok, part="snippet", q=q, type="video", order="viewCount",
+                         publishedAfter=after, maxResults=10, relevanceLanguage="en")
+        except Exception as e:
+            if not ids:
+                raise
+            break
+        for it in res.get("items", []):
+            vid = (it.get("id") or {}).get("videoId")
+            if vid and vid not in ids:
+                ids.append(vid)
+    if not ids:
+        return []
+    vids = []
+    for i in range(0, len(ids), 50):
+        vids += yt_get("videos", tok, part="snippet,statistics,contentDetails", id=",".join(ids[i:i + 50]))["items"]
+    chans = sorted({v["snippet"]["channelId"] for v in vids if v["snippet"]["channelId"] != own})
+    subs = {}
+    for i in range(0, len(chans), 50):
+        for c in yt_get("channels", tok, part="statistics", id=",".join(chans[i:i + 50]))["items"]:
+            st_ = c.get("statistics", {})
+            subs[c["id"]] = None if st_.get("hiddenSubscriberCount") else int(st_.get("subscriberCount", 0))
+    rows = []
+    for v in vids:
+        ch = v["snippet"]["channelId"]
+        if ch == own or ch not in subs:
+            continue
+        views = int(v.get("statistics", {}).get("viewCount", 0))
+        n = subs[ch]
+        age = max((time.time() - iso_ts(v["snippet"].get("publishedAt", ""))) / 86400, 1) if v["snippet"].get("publishedAt") else 60
+        rows.append({"id": v["id"], "title": v["snippet"]["title"][:90], "channel": v["snippet"]["channelTitle"],
+                     "views": views, "subs": n, "age_days": int(age),
+                     "minutes": round(iso_seconds(v.get("contentDetails", {}).get("duration")) / 60, 1),
+                     "views_per_sub": round(views / max(n or 0, 1000), 2)})
+    rows = [r for r in rows if r["views"] >= 1000]
+    rows.sort(key=lambda r: r["views_per_sub"], reverse=True)
+    return rows[:12]
+
+
+def cmd_scout(st):
+    send("Scouting what is working on other Ancient Egypt channels (about a minute)...")
+    try:
+        rows = scout_market(yt_token())
+    except Exception as e:
+        return send(f"I could not scan YouTube right now ({clean(e)[:90]}). It may be today's search limit. Try again tomorrow.")
+    if len(rows) < 3:
+        return send("I did not find enough recent videos to learn from. Try again later.")
+    out = gemini([{"text": SCOUT_PROMPT.format(memory=learned(), rows=json.dumps(
+        [{k: r[k] for k in ("title", "channel", "views", "subs", "age_days", "minutes", "views_per_sub")} for r in rows]))}])
+    ideas = [i for i in out.get("ideas", []) if i.get("title")][:5]
+    pats = [str(p) for p in out.get("patterns", [])][:4]
+    gaps = [str(g) for g in out.get("gaps", [])][:3]
+    if not ideas:
+        return send("I scanned the channels but could not turn it into ideas. Try again later.")
+    m = mem()
+    m["scout"] = {"ts": time.time(), "patterns": pats, "gaps": gaps}
+    top = "\n".join(f"• {r['title']}\n  {r['channel']} · {r['views']:,} views · {r['subs'] if r['subs'] is not None else '?'} subs · "
+                    f"{r['age_days']} days · https://youtu.be/{r['id']}" for r in rows[:5])
+    msg = ("🔭 Scout report (small sample, so read it as hints, not proof)\n\nVideos that beat their channel's size:\n" + top
+           + "\n\nWhat seems to work:\n" + "\n".join("• " + p for p in pats)
+           + "\n\nGaps you could own:\n" + "\n".join("• " + g for g in gaps)
+           + "\n\nIdeas for you:\n\n" + "\n\n".join(
+               f"{n + 1}. {i['title']}\nOpening: {i.get('hook', '')}\nWhy: {i.get('why', '')}" for n, i in enumerate(ideas))
+           + "\n\nTap one and I will write a fact-checked script.")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "ideas", "ideas": ideas, "created": time.time()}
+    send(msg[:4000], [[btn(f"Script {n + 1}", pid, "is", n) for n in range(len(ideas))]])
+
 
 
 def write_script(idea):
@@ -1841,6 +1942,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/series - add your latest video to a playlist\n"
         "/progress - how close you are to earning on YouTube\n"
         "/retention - where viewers leave your latest video, and why\n"
+        "/scout - what works on other Egypt channels, and ideas\n"
         "/news - fresh Egypt news to turn into videos\n"
         "/audit - Kemet Audited: test a myth against evidence (or /audit your claim)\n"
         "/longform - plan long videos (they earn more)\n"
@@ -1946,6 +2048,8 @@ def on_message(msg, st):
         cmd_retention(st)
     elif text == "/news":
         cmd_news(st)
+    elif text == "/scout":
+        cmd_scout(st)
     elif text.startswith("/audit"):
         cmd_audit(st, raw)
     elif text == "/longform":
@@ -2085,6 +2189,7 @@ def main():
             {"command": "progress", "description": "Progress toward earning"},
             {"command": "retention", "description": "Where viewers leave your video"},
             {"command": "audit", "description": "Kemet Audited: check a claim vs evidence"},
+            {"command": "scout", "description": "What works on other Egypt channels"},
             {"command": "news", "description": "Egypt news to make videos about"},
             {"command": "longform", "description": "Plan long videos"},
             {"command": "batch", "description": "4 scripts to film today"},
