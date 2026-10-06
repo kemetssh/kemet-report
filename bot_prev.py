@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.5"
+BOT_VERSION = "v10.6"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -550,7 +550,15 @@ def do_upload(job):
     ST["props"][pid_pl] = {"type": "plgen", "video_id": vid, "created": time.time()}
     pid_x = new_pid(ST)
     ST["props"][pid_x] = {"type": "xgen", "video_id": vid, "created": time.time()}
-    send(f"✅ Uploaded. {thumb_note}{label_note}Status: {status.upper()}\nhttps://youtu.be/{vid}\n\n{NOTICE}",
+    kit = mem().get("last_kit") or {}
+    pid_c = None
+    kit_note = ""
+    if kit.get("pinned") and time.time() - kit.get("ts", 0) < 14 * 86400:
+        pid_c = new_pid(ST)
+        ST["props"][pid_c] = {"type": "pin", "video_id": vid, "text": kit["pinned"], "created": time.time()}
+        kit_note = "\n\n📌 Pinned comment ready: " + kit["pinned"]
+    send(f"✅ Uploaded. {thumb_note}{label_note}Status: {status.upper()}\nhttps://youtu.be/{vid}{kit_note}\n\n{NOTICE}",
+         ([[btn("📌 Post my comment (then pin it)", pid_c, "pc")]] if pid_c else []) +
          [[btn("Try to make it public", job["id"], "p")],
           [btn("Add subtitles (English + Arabic)", pid, "sg")],
           [btn("Add to a playlist", pid_pl, "pg")],
@@ -697,6 +705,80 @@ def set_title(video_id, title):
     r.raise_for_status()
 
 
+def post_top_comment(video_id, text):
+    tok = yt_token()
+    r = S.post(f"{YT}/youtube/v3/commentThreads?part=snippet", headers={"Authorization": f"Bearer {tok}"},
+               json={"snippet": {"videoId": video_id, "topLevelComment": {"snippet": {"textOriginal": text[:500]}}}}, timeout=60)
+    r.raise_for_status()
+
+
+def set_description_append(video_id, line):
+    tok = yt_token()
+    sn = yt_get("videos", tok, part="snippet", id=video_id)["items"][0]["snippet"]
+    desc = sn.get("description", "")
+    if line in desc:
+        return
+    body = {"title": sn["title"], "description": (line + "\n\n" + desc)[:4900],
+            "categoryId": sn.get("categoryId", "27"), "tags": sn.get("tags", [])}
+    if sn.get("defaultLanguage"):
+        body["defaultLanguage"] = sn["defaultLanguage"]
+    r = S.put(f"{YT}/youtube/v3/videos?part=snippet", headers={"Authorization": f"Bearer {tok}"},
+              json={"id": video_id, "snippet": body}, timeout=60)
+    r.raise_for_status()
+
+
+def vids_with_length(tok, n=25):
+    vids, _ = my_videos(tok, n)
+    ids = [v["id"] for v in vids]
+    secs = {}
+    if ids:
+        for it in yt_get("videos", tok, part="contentDetails", id=",".join(ids)).get("items", []):
+            secs[it.get("id")] = iso_seconds((it.get("contentDetails") or {}).get("duration"))
+    out = []
+    for v in vids:
+        out.append({"id": v["id"], "title": v["snippet"]["title"], "secs": secs.get(v["id"], 0),
+                    "views": int(v.get("statistics", {}).get("viewCount", 0))})
+    return out
+
+
+FUNNEL_PROMPT = """You connect Shorts to long videos for the history channel "Kemet | Ancient Egypt". Shorts bring views; long videos bring subscribers and watch time. Connect them.
+Latest Short: {short}
+His long videos (id, title, views): {longs}
+Pick the ONE long video most related to the Short (same person, place, god or theme). If none is clearly related, set long_id to "".
+Return JSON only: {{"long_id": "id or empty", "reason": "one short line",
+ "say": "one spoken closing sentence for the Short that points to the long video, no clickbait",
+ "desc_line": "one line for the Short's description, starting with 'Full story:' (the link is added after)",
+ "pinned": "pinned comment for the Short, 1-2 sentences, mentions the full story"}}"""
+
+
+def cmd_funnel(st):
+    send("Looking for the best long video to send your Shorts viewers to...")
+    tok = yt_token()
+    vs = vids_with_length(tok)
+    shorts = [v for v in vs if 0 < v["secs"] <= 60]
+    longs = [v for v in vs if v["secs"] > 60]
+    if not shorts:
+        return send("I found no Shorts on the channel yet.")
+    if not longs:
+        return send("You have no long video yet, so there is nowhere to send Shorts viewers. Long videos are where "
+                    "subscribers and money come from. /longform plans one; each Short can then point to it.")
+    short = shorts[0]
+    out = gemini([{"text": FUNNEL_PROMPT.format(short=short["title"], longs=json.dumps(
+        [{"id": v["id"], "title": v["title"], "views": v["views"]} for v in longs[:10]]))}])
+    lv = next((v for v in longs if v["id"] == out.get("long_id")), None)
+    if not lv:
+        return send(f"None of your long videos matches \"{short['title']}\" closely, so I will not force a link. "
+                    "Make a long video on the same topic: /longform. Then each Short can lead to it.")
+    link = f"https://youtu.be/{lv['id']}"
+    desc_line = (str(out.get("desc_line", "Full story:")).strip().rstrip(":") + ": " + link)[:200]
+    pinned = (str(out.get("pinned", "")).strip() + " " + link)[:500]
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "funnel", "video_id": short["id"], "desc_line": desc_line, "pinned": pinned, "created": time.time()}
+    send(f"🔀 Funnel for your Short:\n{short['title']}\n\n→ send viewers to: {lv['title']}\n{link}\nWhy: {out.get('reason', '')}\n\n"
+         f"Say at the end of the Short: {out.get('say', '')}\nDescription line: {desc_line}\nPinned comment: {pinned}",
+         [[btn("Add link to the Short's description", pid, "fd")], [btn("📌 Post the comment (then pin it)", pid, "pc")]])
+
+
 def cmd_comments(st):
     send("Checking new comments...")
     tok = yt_token()
@@ -824,6 +906,15 @@ def on_prop(jid, act, st):
         return apply_playlist(prop, jid, st)
     if act == "is" and kind == "ideas":
         return write_script(prop["ideas"][int(st.get("_val", "0"))])
+    if act == "pc" and kind in ("pin", "funnel"):
+        post_top_comment(prop["video_id"], prop["text"] if kind == "pin" else prop["pinned"])
+        st["props"].pop(jid, None)
+        return send("✅ Comment posted. To pin it: open the video in the YouTube app, press and hold your comment, tap Pin. "
+                    "(YouTube does not let me pin by code.)")
+    if act == "fd" and kind == "funnel":
+        set_description_append(prop["video_id"], prop["desc_line"])
+        return send("✅ Link added to the description of your Short.",
+                    [[btn("📌 Post the comment too (then pin it)", jid, "pc")]])
     send("That button is out of date.")
 
 
@@ -1127,6 +1218,45 @@ def cmd_asked(st):
          "people who get an answer come back.", [[btn(f"Script {n + 1}", pid, "is", n) for n in range(len(items))]])
 
 
+KIT_PROMPT = """You are the packaging coach for the YouTube history channel "Kemet | Ancient Egypt": calm, cinematic, evidence-first. The owner records his own voice and never fakes facts, so nothing may be a lie or fake outrage.
+Video topic: {title}
+Script (may be partial): {script}
+What you know about the channel (use it):
+{memory}
+Return JSON only:
+{{"thumbs": [{{"words": "3-4 BIG words, no more", "image": "one single focal image he can film or find, plain description", "why": "one short line"}}],
+ "hooks": [{{"style": "question" or "shocking true fact" or "mid-scene", "line": "first spoken sentence, under 15 words"}}],
+ "best_hook": "which style to try first and why, one line (use the channel's lessons if any)",
+ "comment_ask": "one specific, easy question for the end of the video that viewers love to answer, e.g. a choice between two options",
+ "pinned": "the pinned comment: 1-2 sentences that repeat the question and give people a reason to answer",
+ "subscribe": "one reason to subscribe tied to THIS topic, e.g. what comes next in a series; never just 'please subscribe'"}}
+Give exactly 3 thumbs and exactly 3 hooks (one of each style). Everything must stay honest."""
+
+
+def make_kit(title, script_text=""):
+    out = gemini([{"text": KIT_PROMPT.format(title=title, script=script_text[:1500], memory=learned())}])
+    thumbs = [t for t in out.get("thumbs", []) if t.get("words")][:3]
+    hooks = [h for h in out.get("hooks", []) if h.get("line")][:3]
+    if not thumbs and not hooks:
+        return None
+    kit = {"title": title, "ask": str(out.get("comment_ask", "")).strip(), "pinned": str(out.get("pinned", "")).strip()[:500],
+           "sub": str(out.get("subscribe", "")).strip(), "ts": time.time()}
+    mem()["last_kit"] = kit
+    msg = "📦 Packaging kit: " + title + "\n\n🖼 Thumbnail ideas (big words + one image):\n"
+    msg += "\n".join(f"{n + 1}. \"{t['words']}\" over {t.get('image', '')}\n   {t.get('why', '')}" for n, t in enumerate(thumbs))
+    msg += "\n\n🎣 First 3 seconds, three ways:\n" + "\n".join(f"• {h.get('style', '')}: {h['line']}" for h in hooks)
+    if out.get("best_hook"):
+        msg += "\nTry first: " + str(out["best_hook"])
+    if kit["ask"]:
+        msg += "\n\n💬 End the video by asking: " + kit["ask"]
+    if kit["pinned"]:
+        msg += "\nPinned comment: " + kit["pinned"]
+    if kit["sub"]:
+        msg += "\n\n🔔 Reason to subscribe: " + kit["sub"]
+    send(msg[:4000])
+    return kit
+
+
 def write_script(idea):
     send(f"Writing and fact-checking: {idea['title']} ...")
     text, sources = gemini_text(SCRIPT_PROMPT.format(title=idea["title"], hook=idea.get("hook", "")), search=True)
@@ -1140,6 +1270,10 @@ def write_script(idea):
         msg += "\n\nSources I checked:\n" + "\n".join(lines[:5])
     msg += "\n\nRecord it in your own voice, then send me the video. (AI can still be wrong: glance at the sources.)"
     send(msg)
+    try:
+        make_kit(idea["title"], text)
+    except Exception as e:
+        print("kit:", clean(e))
 
 
 
@@ -1241,6 +1375,8 @@ def run_audit(claim, st):
     msg += "\n\n🎬 Script (record it in your own voice):\n" + str(a.get("script", ""))[:1500]
     if srcs:
         msg += "\n\nSources:\n" + "\n".join(f"• {t}: {u}" for t, u in srcs[:5])
+    msg += (f"\n\n🏷 Series title: Kemet Audited: {claim[:60].rstrip('.?')}? Score {a.get('score', '?')}/100"
+            "\nKeep the same card, same title shape and the same weekday: a recognisable format is what makes people subscribe.")
     msg += "\n\nAI can still be wrong: open the sources before you film."
     au = mem().setdefault("audits", [])
     au.append({"claim": claim, "verdict": verdict, "score": a.get("score"), "ts": time.time()})
@@ -1387,15 +1523,41 @@ def run_results(force=False):
     tok = yt_token()
     vids, _ = my_videos(tok, 20)
     shown = False
+    by = {v["id"]: v for v in vids}
     for vid, rec in pending.items():
         if yt_privacy(vid, tok) == "public" and not rec.get("public_at"):
-            rec["public_at"] = time.time()
+            pub = iso_ts(by.get(vid, {}).get("snippet", {}).get("publishedAt", "")) if vid in by else None
+            rec["public_at"] = pub or time.time()
+            if pub is None or time.time() - pub < 3 * 3600:
+                try:
+                    first_hour(vid, rec)
+                except Exception as e:
+                    print("first hour:", clean(e))
         if not force and (not rec.get("public_at") or time.time() - rec["public_at"] < 48 * 3600):
             continue
         video_results(vid, rec, tok, vids)
         rec["checked"] = True
         shown = True
     return shown
+
+
+def first_hour(vid, rec):
+    kit = mem().get("last_kit") or {}
+    pid = None
+    txt = ("🚀 Your video just went live: https://youtu.be/" + vid + "\n\nThe first hour decides how far YouTube pushes it. Do these now:\n"
+           "1. Pin a question comment (below).\n2. Reply to every comment fast: I will draft the replies, you tap.\n"
+           "3. Share it once with people who like Egypt history, where it fits (not spam).")
+    rows = []
+    if kit.get("pinned"):
+        pid = new_pid(ST)
+        ST["props"][pid] = {"type": "pin", "video_id": vid, "text": kit["pinned"], "created": time.time()}
+        txt += "\n\n📌 " + kit["pinned"]
+        rows = [[btn("📌 Post my comment (then pin it)", pid, "pc")]]
+    send(txt, rows or None)
+    try:
+        cmd_comments(ST)
+    except Exception as e:
+        print("first hour comments:", clean(e))
 
 
 def run_exps(st):
@@ -1482,6 +1644,93 @@ def weekly_review(st):
          + "\n\nSmall numbers mean these are hints, not proof. /lessons shows everything I know.")
 
 
+TZ_OFFSET = {"EG": 3, "SA": 3, "AE": 4, "KW": 3, "QA": 3, "IQ": 3, "JO": 3, "MA": 1, "DZ": 1, "TN": 1, "LY": 2, "SD": 2,
+             "GB": 1, "IE": 1, "FR": 2, "DE": 2, "IT": 2, "ES": 2, "NL": 2, "PL": 2, "TR": 3, "RU": 3, "IN": 5.5, "PK": 5,
+             "US": -5, "CA": -5, "BR": -3, "MX": -6, "AU": 10, "PH": 8, "ID": 7, "NG": 1, "ZA": 2}
+
+
+def an_dim(tok, metrics, dim, days, extra=None):
+    params = {"ids": "channel==MINE", "metrics": metrics, "dimensions": dim,
+              "startDate": time.strftime("%Y-%m-%d", time.gmtime(time.time() - days * 86400)),
+              "endDate": time.strftime("%Y-%m-%d", time.gmtime())}
+    params.update(extra or {})
+    r = S.get(f"{YTA}/v2/reports", params=params, headers={"Authorization": f"Bearer {tok}"}, timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"Analytics HTTP {r.status_code}")
+    return r.json().get("rows") or []
+
+
+def cmd_besttime(st):
+    tok = yt_token()
+    lines = ["🕒 Best time to post (honest version)", ""]
+    try:
+        rows = an_dim(tok, "views", "day", 56)
+    except Exception as e:
+        rows = []
+        lines.append("Daily views are not available right now (" + clean(e)[:50] + ").")
+    import calendar
+    wd = {}
+    for d, v in rows:
+        try:
+            w = calendar.timegm(time.strptime(d, "%Y-%m-%d")) // 86400 % 7   # 0 = Thursday
+        except Exception:
+            continue
+        wd.setdefault(w, []).append(v)
+    names = ["Thursday", "Friday", "Saturday", "Sunday", "Monday", "Tuesday", "Wednesday"]
+    if len(rows) >= 21 and len(wd) == 7:
+        avg = sorted(((sum(v) / len(v), names[w]) for w, v in wd.items()), reverse=True)
+        lines.append("Days when your channel gets most views: " + ", ".join(f"{n} ({a:.0f}/day)" for a, n in avg[:3]))
+        lines.append("Days with the fewest: " + ", ".join(n for _, n in avg[-2:]))
+        lines.append("(Views on a day also depend on what you posted, so treat this as a hint.)")
+    else:
+        lines.append(f"I only have {len(rows)} days of data, too few to find your best weekday. I will not guess.")
+    try:
+        crows = an_dim(tok, "views", "country", 28, {"sort": "-views", "maxResults": 6})
+    except Exception:
+        crows = []
+    known = [(c, v) for c, v in crows if c in TZ_OFFSET]
+    if known:
+        tot = sum(v for _, v in known) or 1
+        lines += ["", "Where your views come from: " + ", ".join(f"{c} {v / tot:.0%}" for c, v in known[:5])]
+        # people watch most in the evening, about 19:00 local: convert each country's evening to Cairo time
+        ang = sum(((19 - TZ_OFFSET[c] + 3) % 24) * v for c, v in known) / tot
+        lines.append(f"Their evenings (19:00 local) fall around {ang:.0f}:00 Cairo time, so publish about 1-2 hours before: "
+                     f"{(ang - 2) % 24:.0f}:00 to {(ang - 1) % 24:.0f}:00 Cairo.")
+    else:
+        lines.append("\nI have no country data yet, so I cannot suggest a clock time.")
+    lines.append("\nYouTube does not give creators hour-by-hour data through the API. In the app, Studio → Analytics → Audience "
+                 "shows 'When your viewers are on YouTube': check it once and tell me, and I will remember it.")
+    send("\n".join(lines)[:4000])
+
+
+def cmd_thumbtest(st):
+    vids = mem()["videos"]
+    cand = [(v, r) for v, r in vids.items() if r.get("file_id")]
+    if not cand:
+        return send("Upload a video through me first, then I can pull 3 thumbnail options from it.")
+    vid, rec = max(cand, key=lambda kv: kv[1]["uploaded"])
+    send("Pulling 3 thumbnail options from your latest video...")
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "v.mp4"
+        tg_download(rec["file_id"], p)
+        dur, _, _ = probe(p)
+        n = 0
+        for i, frac in enumerate((0.12, 0.45, 0.75)):
+            out = Path(d) / f"tt{i}.jpg"
+            if frame(p, max(dur * frac, 0.2), out):
+                send_photo(out, f"Option {i + 1}")
+                n += 1
+    if not n:
+        return send("I could not read frames from that video.")
+    send("🧪 Testing thumbnails the right way:\n"
+         "1. Save the options you like (press and hold, Save).\n"
+         "2. YouTube app or Studio → your video → Edit → thumbnail. If your channel has \"Test & compare\", add up to 3 "
+         "thumbnails; YouTube splits viewers fairly and tells you the winner. Not every channel or app version has it yet.\n"
+         "3. If you do not see it, change the thumbnail only after the video is 2+ weeks old, never several at once.\n"
+         "Tip: add 3-4 big words over the image (see the packaging kit that comes with every script).\n"
+         "https://youtu.be/" + vid)
+
+
 def do_plan(st):
     tok = yt_token()
     vids, _ = my_videos(tok, 15)
@@ -1522,6 +1771,13 @@ def housekeeping(st):
             cmd_news(st)
         except Exception as e:
             print("news:", clean(e))
+    if g.tm_wday == 0 and g.tm_hour >= 7 and m.get("last_audit_week") != week:
+        m["last_audit_week"] = week
+        try:
+            send("📅 Monday is Kemet Audited day. A weekly format with the same look builds a returning audience. Pick this week's claim:")
+            cmd_audit(st)
+        except Exception as e:
+            print("audited monday:", clean(e))
     if g.tm_wday == 6 and g.tm_hour >= 16 and m.get("last_review") != week:
         m["last_review"] = week
         try:
@@ -1826,7 +2082,7 @@ def maybe_nudge(st, tok):
     pid = new_pid(st)
     st["props"][pid] = {"type": "nudge", "created": time.time()}
     send(f"⏰ It has been {gap:.0f} days since your last video (your goal: every {m['cadence_days']}). "
-         "Channels grow on rhythm. Film one short one today, even a simple one.\\n"
+         "Channels grow on rhythm. Film one short one today, even a simple one.\n"
          "Tip: /batch gives you 4 ready scripts to film in one sitting.",
          [[btn("💡 Give me ideas", pid, "ci")]])
 
@@ -2033,7 +2289,7 @@ Choose the action. Actions: idea (wants video ideas), script (gave a topic to wr
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
-asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), lessons (what you have learned), health (is everything working),
+funnel (link a Short to a long video), besttime (when to post), thumbtest (thumbnail options), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), lessons (what you have learned), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -2051,6 +2307,12 @@ def run_action(action, topic, st, text=""):
         return cmd_idea(st)
     if action == "script":
         return write_script({"title": topic or text, "hook": ""})
+    if action == "funnel":
+        return cmd_funnel(st)
+    if action == "besttime":
+        return cmd_besttime(st)
+    if action == "thumbtest":
+        return cmd_thumbtest(st)
     if action == "asked":
         return cmd_asked(st)
     if action == "review":
@@ -2145,6 +2407,9 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/scout - what works on other Egypt channels, and ideas\n"
         "/asked - turn viewer questions into videos (You Asked, Kemet Answered)\n"
         "/review - weekly self-review now (also runs by itself on Sundays)\n"
+        "/funnel - point your Shorts viewers to a long video\n"
+        "/besttime - when to post, from your own data\n"
+        "/thumbtest - 3 thumbnail options and how to test them\n"
         "/news - fresh Egypt news to turn into videos\n"
         "/audit - Kemet Audited: test a myth against evidence (or /audit your claim)\n"
         "/longform - plan long videos (they earn more)\n"
@@ -2254,6 +2519,12 @@ def on_message(msg, st):
         cmd_scout(st)
     elif text == "/asked":
         cmd_asked(st)
+    elif text == "/funnel":
+        cmd_funnel(st)
+    elif text == "/besttime":
+        cmd_besttime(st)
+    elif text == "/thumbtest":
+        cmd_thumbtest(st)
     elif text == "/review":
         weekly_review(st)
     elif text.startswith("/audit"):
@@ -2302,7 +2573,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "pa", "ls", "ci", "ad", "am", "as"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -2411,6 +2682,9 @@ def main():
             {"command": "scout", "description": "What works on other Egypt channels"},
             {"command": "asked", "description": "Viewer questions into video ideas"},
             {"command": "review", "description": "Weekly self-review"},
+            {"command": "funnel", "description": "Send Shorts viewers to a long video"},
+            {"command": "besttime", "description": "When to post"},
+            {"command": "thumbtest", "description": "Thumbnail options and test"},
             {"command": "news", "description": "Egypt news to make videos about"},
             {"command": "longform", "description": "Plan long videos"},
             {"command": "batch", "description": "4 scripts to film today"},
