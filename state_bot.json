@@ -1,5 +1,5 @@
 {
- "offset": 277936083,
+ "offset": 277936088,
  "jobs": {
   "55": {
    "id": "55",
@@ -879,6 +879,72 @@
     ]
    },
    "created": 1791243022.7606897,
+   "stage": "title",
+   "ai": true
+  },
+  "494": {
+   "id": "494",
+   "file_id": "BAACAgQAAxkBAAIB4mrEMqlUzQRAPPMtR6lFApSzcn70AAKUHQACnTYhUsTv-viNFKAdPQQ",
+   "name": "IMG_8340.MP4",
+   "dur": 31.9,
+   "w": 720,
+   "h": 1280,
+   "review": {
+    "verdict": "ready",
+    "score": 8,
+    "summary": "The video effectively uses a high-stakes, mystery-driven narrative style that matches the channel's target audience. The pacing is quick and engaging, though it relies heavily on speculative AI-generated imagery.",
+    "issues": [
+     {
+      "at": "00:03",
+      "problem": "The AI imagery is not explicitly labeled as AI-generated in the video itself or the metadata.",
+      "fix": "Add a clear 'AI-generated imagery' overlay or include it in the video description to comply with YouTube policy."
+     }
+    ],
+    "strengths": [
+     "Strong, curiosity-inducing hook",
+     "Engaging voiceover and professional pacing",
+     "High-quality visuals that maintain a consistent aesthetic"
+    ],
+    "titles": [
+     "Did AI Just Reveal a Secret Chamber in the Great Pyramid?",
+     "The Great Pyramid's Hidden Mystery: What Did AI Just Discover?",
+     "Beyond the Stone: Did AI Uncover a Hidden Pyramid Secret?"
+    ],
+    "descriptions": [
+     "Did scientists finally use artificial intelligence to peer inside the Great Pyramid of Giza? We explore the truth about Muon tomography and what it actually revealed. #AncientEgypt #Shorts #History",
+     "Viral claims say AI found a hidden machine in the pyramids. Let's separate the scientific fact from the internet fiction regarding this breakthrough. #AncientEgypt #Mystery #History"
+    ],
+    "tags": [
+     "Ancient Egypt",
+     "Great Pyramid of Giza",
+     "Muon Tomography",
+     "History",
+     "AI",
+     "Archaeology",
+     "Hidden Technology",
+     "Ancient Technology",
+     "Giza",
+     "Mystery",
+     "Archaeological Discovery",
+     "Shorts"
+    ],
+    "thumb_times": [
+     1.0,
+     13.0,
+     25.0
+    ],
+    "ai_visuals": true,
+    "policy_notes": [
+     "Must include AI-generated content disclosure in video description to avoid potential penalties."
+    ],
+    "claims": [
+     "Researchers have used a technique called muon tomography to study the pyramids.",
+     "Cosmic rays constantly pass through the Great Pyramid of Giza.",
+     "Detectors can map empty spaces inside the pyramid using muon tomography data.",
+     "Artificial intelligence has been used to analyze muon tomography data."
+    ]
+   },
+   "created": 1791268796.5633748,
    "stage": "title",
    "ai": true
   }
