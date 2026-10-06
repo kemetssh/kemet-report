@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.6"
+BOT_VERSION = "v10.6.1"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -709,7 +709,14 @@ def post_top_comment(video_id, text):
     tok = yt_token()
     r = S.post(f"{YT}/youtube/v3/commentThreads?part=snippet", headers={"Authorization": f"Bearer {tok}"},
                json={"snippet": {"videoId": video_id, "topLevelComment": {"snippet": {"textOriginal": text[:500]}}}}, timeout=60)
-    r.raise_for_status()
+    if not r.ok:
+        why = ""
+        try:
+            e = r.json().get("error", {})
+            why = (e.get("errors") or [{}])[0].get("reason", "") or e.get("message", "")
+        except Exception:
+            pass
+        raise RuntimeError(f"HTTP {r.status_code}, reason: {why or 'unknown'}")
 
 
 def set_description_append(video_id, line):
