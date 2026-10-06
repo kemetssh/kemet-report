@@ -770,8 +770,9 @@ def cmd_funnel(st):
         return send(f"None of your long videos matches \"{short['title']}\" closely, so I will not force a link. "
                     "Make a long video on the same topic: /longform. Then each Short can lead to it.")
     link = f"https://youtu.be/{lv['id']}"
-    desc_line = (str(out.get("desc_line", "Full story:")).strip().rstrip(":") + ": " + link)[:200]
-    pinned = (str(out.get("pinned", "")).strip() + " " + link)[:500]
+    nolink = lambda t: re.sub(r"https?://\S+", "", str(t)).replace(" :", ":").strip()
+    desc_line = (nolink(out.get("desc_line", "Full story:")).rstrip(":").strip() + ": " + link)[:200]
+    pinned = (nolink(out.get("pinned", "")) + " " + link)[:500]
     pid = new_pid(st)
     st["props"][pid] = {"type": "funnel", "video_id": short["id"], "desc_line": desc_line, "pinned": pinned, "created": time.time()}
     send(f"🔀 Funnel for your Short:\n{short['title']}\n\n→ send viewers to: {lv['title']}\n{link}\nWhy: {out.get('reason', '')}\n\n"
@@ -907,7 +908,13 @@ def on_prop(jid, act, st):
     if act == "is" and kind == "ideas":
         return write_script(prop["ideas"][int(st.get("_val", "0"))])
     if act == "pc" and kind in ("pin", "funnel"):
-        post_top_comment(prop["video_id"], prop["text"] if kind == "pin" else prop["pinned"])
+        text = prop["text"] if kind == "pin" else prop["pinned"]
+        try:
+            post_top_comment(prop["video_id"], text)
+        except Exception as e:
+            return send("YouTube refused to let me post the comment (" + clean(e)[:60] + "). This usually means the video is still "
+                        "private or comments are off for it. Post it yourself in the YouTube app, then press and hold it and tap Pin.\n\n"
+                        "Copy this text:\n" + text)
         st["props"].pop(jid, None)
         return send("✅ Comment posted. To pin it: open the video in the YouTube app, press and hold your comment, tap Pin. "
                     "(YouTube does not let me pin by code.)")
