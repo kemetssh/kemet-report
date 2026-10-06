@@ -1,5 +1,5 @@
 {
- "offset": 277936095,
+ "offset": 277936099,
  "jobs": {
   "55": {
    "id": "55",
@@ -1023,6 +1023,73 @@
    "stage": "desc",
    "ai": true,
    "title": "Muon Tomography: Did AI Reveal a Secret Chamber in the Great Pyramid?"
+  },
+  "517": {
+   "id": "517",
+   "file_id": "BAACAgQAAxkBAAIB4WrEMqnmVGgEJO4ZQoMsfB6hnA_MAAKTHQACnTYhUl6GrrMnx4OQPQQ",
+   "name": "IMG_8341.MP4",
+   "dur": 31.9,
+   "w": 720,
+   "h": 1280,
+   "review": {
+    "verdict": "ready",
+    "score": 8,
+    "summary": "The video offers a concise and professional narration accompanied by visually striking AI-generated imagery. It maintains a balanced perspective on the use of AI in archaeology while keeping the audience engaged through a mystery-driven approach.",
+    "issues": [
+     {
+      "at": "00:00",
+      "problem": "YouTube requires clear disclosure of AI-generated content in the description or via the platform's label.",
+      "fix": "Ensure the mandatory YouTube AI labeling tool is used for this video."
+     }
+    ],
+    "strengths": [
+     "High-quality, consistent aesthetic.",
+     "Clear, well-paced narration.",
+     "Balanced, objective historical commentary."
+    ],
+    "titles": [
+     "Did AI Finally Reveal Secrets Inside the Great Pyramid?",
+     "Beyond the Stone: What Did AI Uncover in the Great Pyramid?",
+     "Is the Great Pyramid's Hidden Architecture Now Revealed?"
+    ],
+    "descriptions": [
+     "Recent advancements in AI are helping researchers analyze the internal architecture of the Great Pyramid with unprecedented detail. Does this technology solve the mysteries of the past, or create new ones? #AncientEgypt #GreatPyramid #Archaeology #Shorts",
+     "We're using AI to re-examine the internal structure of the Great Pyramid. While modern tech offers new insights, the stones themselves still hold the final word. What does the evidence actually show? #AncientEgypt #History #AI #Shorts"
+    ],
+    "tags": [
+     "Ancient Egypt",
+     "Great Pyramid",
+     "Archaeology",
+     "AI in History",
+     "Giza",
+     "Pyramid Secrets",
+     "Ancient Technology",
+     "Egyptology",
+     "History Mysteries",
+     "Kemet",
+     "Ancient Engineering",
+     "Shorts"
+    ],
+    "thumb_times": [
+     0.2,
+     7.0,
+     20.0
+    ],
+    "ai_visuals": true,
+    "policy_notes": [],
+    "claims": [
+     "AI technology has helped refine the shape of known cavities within the Great Pyramid.",
+     "A corridor above the main entrance of the Great Pyramid was identified years ago.",
+     "AI is providing greater clarity regarding the internal architecture of the Great Pyramid.",
+     "Evidence regarding the pyramid's construction points to stone, corridors, and voids rather than hidden machines."
+    ]
+   },
+   "created": 1791269675.7339096,
+   "stage": "confirm",
+   "ai": true,
+   "title": "Did AI Finally Reveal Secrets Inside the Great Pyramid?",
+   "desc": 1,
+   "thumb": 0
   }
  },
  "props": {
@@ -1547,7 +1614,8 @@
    "Was Anubis A Protector or A Judge? The Truth",
    "Were Millions of Kittens Sacrificed in Ancient Egypt?",
    "Beyond the Stone: Did AI Uncover a Hidden Pyramid Secret?",
-   "Muon Tomography: Did AI Reveal a Secret Chamber in the Great Pyramid?"
+   "Muon Tomography: Did AI Reveal a Secret Chamber in the Great Pyramid?",
+   "Did AI Finally Reveal Secrets Inside the Great Pyramid?"
   ],
   "skips": [
    "Did Ancient Egyptians Wear Melting Fat Cones?",
@@ -1574,7 +1642,9 @@
    "Did AI Just Reveal a Secret Chamber in the Great Pyramid?",
    "The Great Pyramid's Hidden Mystery: What Did AI Just Discover?",
    "Inside the Great Pyramid: What Are Scientists Really Finding?",
-   "Decoding the Great Pyramid: The Truth About Hidden Chambers"
+   "Decoding the Great Pyramid: The Truth About Hidden Chambers",
+   "Beyond the Stone: What Did AI Uncover in the Great Pyramid?",
+   "Is the Great Pyramid's Hidden Architecture Now Revealed?"
   ],
   "videos": {
    "ilMueZ9RnQw": {
@@ -1645,7 +1715,8 @@
     "title": "Beyond the Stone: Did AI Uncover a Hidden Pyramid Secret?",
     "file_id": "BAACAgQAAxkBAAIB4mrEMqlUzQRAPPMtR6lFApSzcn70AAKUHQACnTYhUsTv-viNFKAdPQQ",
     "summary": "The video effectively uses a high-stakes, mystery-driven narrative style that matches the channel's target audience. The pacing is quick and engaging, though it relies heavily on speculative AI-generated imagery.",
-    "checked": false
+    "checked": false,
+    "public_at": 1791269661.019693
    }
   },
   "exps": [
@@ -1705,7 +1776,7 @@
    }
   ],
   "last_plan": "2026-40",
-  "last_check": 1791267728.6775184,
+  "last_check": 1791269660.2459736,
   "links": [],
   "cadence_days": 3,
   "last_nudge": 0,
