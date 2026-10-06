@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.3"
+BOT_VERSION = "v10.4"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -64,22 +64,59 @@ def clean(text):
 
 
 # ---------------- state ----------------
+# The notes file lives in a public repo, so it is stored scrambled (AES-256) with a key only you have
+# (the WORKER_SECRET secret). Without the key it is unreadable.
+STATE_MARK = "KEMET-ENC1:"
+_last_plain = None
+
+
+def _state_key():
+    return os.getenv("STATE_KEY") or os.getenv("WORKER_SECRET") or ""
+
+
+def _crypt(data, decrypt):
+    cmd = ["openssl", "enc", "-aes-256-cbc", "-pbkdf2", "-iter", "100000", "-a", "-A", "-pass", "env:KEMET_STATE_KEY"]
+    if decrypt:
+        cmd.insert(2, "-d")
+    else:
+        cmd.insert(2, "-salt")
+    r = subprocess.run(cmd, input=data.encode(), capture_output=True, env=dict(os.environ, KEMET_STATE_KEY=_state_key()))
+    if r.returncode != 0:
+        raise RuntimeError("could not " + ("open" if decrypt else "scramble") + " the notes file (wrong key?)")
+    return r.stdout.decode()
+
+
 def load_state():
+    global _last_plain
     if STATE_FILE.exists():
+        raw = STATE_FILE.read_text().strip()
+        if raw.startswith(STATE_MARK):
+            if not _state_key():
+                raise RuntimeError("the notes file is scrambled but the key is missing")
+            plain = _crypt(raw[len(STATE_MARK):], True)   # a wrong key stops the run instead of wiping the notes
+            _last_plain = plain
+            return json.loads(plain)
         try:
-            return json.loads(STATE_FILE.read_text())
+            return json.loads(raw)       # older, readable notes: they get scrambled on the next save
         except Exception:
             pass
     return {"offset": 0, "jobs": {}, "props": {}, "seen": [], "n": 0}
 
 
 def save_state(st):
+    global _last_plain
     now = time.time()
     st["jobs"] = {k: v for k, v in st["jobs"].items() if now - v.get("created", now) < 7 * 86400}
     st["props"] = {k: v for k, v in st.get("props", {}).items() if now - v.get("created", now) < 7 * 86400}
     st["seen"] = list(st.get("seen", []))[-2000:]
     st.pop("_val", None)
-    STATE_FILE.write_text(json.dumps(st, indent=1))
+    plain = json.dumps(st, indent=1)
+    if _state_key():
+        if plain != _last_plain:          # only rewrite when something changed, so GitHub sees no pointless edits
+            STATE_FILE.write_text(STATE_MARK + _crypt(plain, False))
+            _last_plain = plain
+    else:
+        STATE_FILE.write_text(plain)
 
 
 # ---------------- the bot's memory (what it learns about you and the channel) ----------------
