@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.4"
+BOT_VERSION = "v10.5"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -634,9 +634,17 @@ def cmd_titles(st):
     vids, _ = my_videos(tok)
     if not vids:
         return send("I could not find any videos on the channel yet.")
+    if [e for e in mem()["exps"] if not e["done"]]:
+        return send("A title test is already running, so I will not start another. "
+                    "I only test one at a time and I will report when it ends.")
     data = [{"id": v["id"], "title": v["snippet"]["title"],
              "description": v["snippet"].get("description", "")[:200],
-             "views": int(v.get("statistics", {}).get("viewCount", 0))} for v in vids]
+             "views": int(v.get("statistics", {}).get("viewCount", 0))} for v in vids
+            if not (iso_ts(v["snippet"].get("publishedAt", "")) and
+                    (time.time() - iso_ts(v["snippet"].get("publishedAt", ""))) / 86400 < EXP_MIN_AGE_DAYS)]
+    if not data:
+        return send(f"All your videos are under {EXP_MIN_AGE_DAYS} days old. I leave fresh videos alone: "
+                    "their views are still settling. Ask again later.")
     out = gemini([{"text": "What you know about the owner's taste:\n" + learned() + "\n\n" + TITLES_PROMPT + json.dumps(data)}])
     byid = {v["id"]: v for v in vids}
     shown = 0
@@ -644,6 +652,8 @@ def cmd_titles(st):
         v = byid.get(p.get("video_id"))
         new = (p.get("new_title") or "").strip()[:100]
         if not v or not new or new == v["snippet"]["title"]:
+            continue
+        if exp_blocker(v["id"], v["snippet"].get("publishedAt", "")):
             continue
         pid = new_pid(st)
         st["props"][pid] = {"type": "title", "video_id": v["id"], "old": v["snippet"]["title"],
@@ -656,6 +666,23 @@ def cmd_titles(st):
         shown += 1
     if not shown:
         send("Your titles look fine. Nothing to change right now.")
+
+
+EXP_MIN_AGE_DAYS = 14      # never test titles on fresh videos
+EXP_REVERT_BELOW = 0.6     # if views per day fall below 60% of before, put the old title back
+
+
+def exp_blocker(video_id, published):
+    """Why a title test must NOT start now (None = fine)."""
+    open_ = [e for e in mem()["exps"] if not e["done"]]
+    if open_:
+        return ("One title test is already running (" + open_[0]["new"][:60] + "). "
+                "I only run one at a time so I can tell what caused any change. I will report in a few days.")
+    pub = iso_ts(published or "")
+    if pub and (time.time() - pub) / 86400 < EXP_MIN_AGE_DAYS:
+        return (f"This video is under {EXP_MIN_AGE_DAYS} days old. Its views are still settling, so a title test "
+                "would tell us nothing, and a title change can hurt a fresh video. Try again later.")
+    return None
 
 
 def set_title(video_id, title):
@@ -742,6 +769,9 @@ def on_prop(jid, act, st):
         st["props"].pop(jid, None)
         return send("Skipped.")
     if act == "ta" and kind == "title":
+        why = exp_blocker(prop["video_id"], prop.get("published", ""))
+        if why:
+            return send("✋ Not now.\n" + why, [[btn("Skip this idea", jid, "ts")]])
         set_title(prop["video_id"], prop["new"])
         remember("picks", prop["new"])
         pub = iso_ts(prop.get("published", ""))
@@ -1047,6 +1077,56 @@ def cmd_scout(st):
 
 
 
+ASKED_PROMPT = """You help the owner of the YouTube channel "Kemet | Ancient Egypt" make a series called "You Asked, Kemet Answered": each video answers one REAL question from a viewer.
+Below are real viewer comments, each with the video it was left on:
+{comments}
+Pick up to 3 comments that contain a genuine question or curiosity (not praise, not spam, not rude). Prefer questions several people might share.
+Return JSON only:
+{{"items": [{{"question": "the question, cleaned up, in one sentence", "asker": "author name from the comment",
+ "title": "honest, curious title under 70 characters, starting with the question or a clear promise",
+ "hook": "first spoken sentence, names the question",
+ "outline": ["4 short beats for a 45-60 second answer"],
+ "careful": "what must be fact-checked first, or empty"}}]}}
+Never invent a question that is not in the comments. If none qualifies return {{"items": []}}."""
+
+
+def cmd_asked(st):
+    send("Reading your viewers' comments for real questions...")
+    tok = yt_token()
+    vids, chid = my_videos(tok, 10)
+    rows = []
+    for v in vids:
+        try:
+            threads = yt_get("commentThreads", tok, part="snippet", videoId=v["id"],
+                             maxResults=30, order="relevance")["items"]
+        except Exception:
+            continue
+        for t in threads:
+            top = t["snippet"]["topLevelComment"]["snippet"]
+            if top.get("authorChannelId", {}).get("value") == chid:
+                continue
+            text = (top.get("textOriginal") or "").strip()
+            if len(text) >= 12:
+                rows.append({"video": v["snippet"]["title"][:60], "author": top.get("authorDisplayName", "")[:30],
+                             "comment": text[:300]})
+    if not rows:
+        return send("I found no viewer comments yet. When people comment, I will turn their questions into videos.")
+    out = gemini([{"text": ASKED_PROMPT.format(comments=json.dumps(rows[:60]))}])
+    items = [i for i in out.get("items", []) if i.get("title") and i.get("question")][:3]
+    if not items:
+        return send("No real questions in the comments yet. I will try again when there are more.")
+    ideas = [{"title": i["title"], "hook": i.get("hook", ""),
+              "why": "A viewer asked: " + i["question"]} for i in items]
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "ideas", "ideas": ideas, "created": time.time()}
+    body = "💬 You Asked, Kemet Answered\n\n" + "\n\n".join(
+        f"{n + 1}. {i['title']}\n{i.get('asker', 'A viewer')} asked: {i['question']}\nOpening: {i.get('hook', '')}\n"
+        "Outline:\n" + "\n".join(f"   - {b}" for b in (i.get("outline") or [])[:5])
+        + (f"\nCheck first: {i['careful']}" if i.get("careful") else "") for n, i in enumerate(items))
+    send(body[:3900] + "\n\nTap one and I will write a fact-checked script. Reply to the viewer when it is out: "
+         "people who get an answer come back.", [[btn(f"Script {n + 1}", pid, "is", n) for n in range(len(items))]])
+
+
 def write_script(idea):
     send(f"Writing and fact-checking: {idea['title']} ...")
     text, sources = gemini_text(SCRIPT_PROMPT.format(title=idea["title"], hook=idea.get("hook", "")), search=True)
@@ -1183,15 +1263,27 @@ def evidence_block(job):
     return "\n\n" + "\n".join(lines)
 
 
-def factcheck_job(job):
-    claims = job["review"].get("claims") or []
+def factcheck_job(job, gate=False):
+    """Check the claims in the video (and, as a gate, the chosen title and description).
+    Returns the list of flagged results, or None if the check could not run."""
+    claims = list(job["review"].get("claims") or [])[:6 if gate else 8]
+    if gate:
+        if job.get("title"):
+            claims.append("Title: " + job["title"])
+        try:
+            claims.append("Description: " + job["review"]["descriptions"][job["desc"]][:300])
+        except Exception:
+            pass
     if not claims:
-        return send("I did not hear specific factual claims in this video, so there is nothing to check.")
-    send("🔎 Checking every claim in your video against sources (about a minute)...")
-    text, sources = gemini_text(FACT_PROMPT.format(claims=json.dumps(claims[:8])), search=True)
+        send("I did not hear specific factual claims in this video, so there is nothing to check.")
+        return []
+    send("🔎 Checking the claims, title and description against sources before upload (about a minute)..."
+         if gate else "🔎 Checking every claim in your video against sources (about a minute)...")
+    text, sources = gemini_text(FACT_PROMPT.format(claims=json.dumps(claims[:9])), search=True)
     res = [r for r in parse_obj(text).get("results", []) if r.get("claim")]
     if not res:
-        return send("I could not complete the fact-check. Try again in a minute.")
+        send("I could not complete the fact-check. Try again in a minute.")
+        return None
     icon = {"solid": "✅", "shaky": "⚠️", "wrong": "❌"}
     lines = []
     for r in res[:8]:
@@ -1202,6 +1294,8 @@ def factcheck_job(job):
         lines.append(line)
     srcs = dedupe_sources(sources)
     bad = [r for r in res if str(r.get("status", "")).lower() in ("shaky", "wrong")]
+    job["gate_key"] = [job.get("title"), job.get("desc")]
+    job["gate_bad"] = len(bad)
     msg = "🔎 Fact-check of your video\n\n" + "\n\n".join(lines)
     if srcs:
         msg += "\n\nSources:\n" + "\n".join(f"• {t}: {u}" for t, u in srcs[:5])
@@ -1213,7 +1307,11 @@ def factcheck_job(job):
     remember_fact = [r["claim"] for r in bad][:2]
     for c in remember_fact:
         remember("lessons", "Double-check this kind of claim before filming: " + c[:100])
-    send(msg[:4000])
+    if gate and bad:
+        send(msg[:3900], [[btn("⬆️ Upload private anyway", job["id"], "ug")], [btn("Cancel", job["id"], "x")]])
+    else:
+        send(msg[:4000])
+    return bad
 
 
 # ---------------- results, experiments, weekly plan ----------------
@@ -1320,6 +1418,16 @@ def run_exps(st):
         worse = after < before * 0.85
         verdict = ("faster than before" if better else "slower than before" if worse else "about the same")
         e["done"] = True
+        if before > 0 and after < before * EXP_REVERT_BELOW:
+            try:
+                set_title(e["video_id"], e["old"])
+                remember("skips", e["new"])
+                remember("lessons", "A title change made views fall fast; the old title was restored: " + e["new"][:70])
+                send(f"↩️ Title test failed, so I put your old title back.\nTried: {e['new']}\nBack to: {e['old']}\n"
+                     f"Views per day: {before:.1f} before, {after:.1f} after the change.")
+                continue
+            except Exception as ex:
+                print("auto revert:", clean(ex))
         pid = new_pid(st)
         st["props"][pid] = {"type": "exp", "video_id": e["video_id"], "old": e["old"], "new": e["new"],
                             "created": time.time()}
@@ -1327,6 +1435,51 @@ def run_exps(st):
              f"Views per day before: {before:.1f}\nViews per day since the change: {after:.1f}\n"
              f"→ {verdict}.\nThis is a hint, not proof: views fade as a video ages, so weigh it yourself.",
              [[btn("👍 Keep new", pid, "ek"), btn("↩️ Revert to old", pid, "er")]])
+
+
+WEEKLY_PROMPT = """You are the honest analyst of the YouTube history channel "Kemet | Ancient Egypt" (small channel, he records his own voice).
+This is the weekly review. Be concrete and sceptical: with few videos, say what is only a hint.
+Last 7 days analytics: {an}
+Videos (title, views, age in days, views per day): {videos}
+Title tests: {exps}
+Recent viewer comments: {comments}
+Lessons already known: {known}
+Return JSON only:
+{{"summary": "3 short sentences: what happened this week, honestly",
+ "lessons": ["2 or 3 NEW short rules for future videos, each tied to something in the data above; no repeats of known lessons"],
+ "next": "one concrete thing to do this week"}}"""
+
+
+def weekly_review(st):
+    tok = yt_token()
+    vids, _ = my_videos(tok, 12)
+    rows = []
+    for v in vids:
+        pub = iso_ts(v["snippet"].get("publishedAt", ""))
+        age = max(round((time.time() - pub) / 86400, 1), 0.5) if pub else None
+        views = int(v.get("statistics", {}).get("viewCount", 0))
+        rows.append({"title": v["snippet"]["title"], "views": views, "age_days": age,
+                     "per_day": round(views / age, 1) if age else None})
+    an = {}
+    try:
+        r = an_query(tok, "views,estimatedMinutesWatched,averageViewDuration,subscribersGained", 7)
+        an = dict(zip(("views", "minutes_watched", "avg_view_seconds", "subs_gained"), r))
+    except Exception as e:
+        an = {"note": "analytics not available (" + clean(e)[:60] + ")"}
+    m = mem()
+    exps = [{"new": e["new"], "old": e["old"], "done": e["done"]} for e in m["exps"][-5:]]
+    out = gemini([{"text": WEEKLY_PROMPT.format(an=json.dumps(an), videos=json.dumps(rows[:10]), exps=json.dumps(exps),
+                                               comments=json.dumps(recent_comments(tok, vids, 15)),
+                                               known=json.dumps(m["lessons"][-10:]))}])
+    lessons = [str(x).strip()[:160] for x in out.get("lessons", []) if str(x).strip()][:3]
+    if not out.get("summary") or not lessons:
+        return send("I could not finish the weekly review. Try /review again later.")
+    for l in lessons:
+        remember("lessons", l)
+    send("🪞 Weekly review\n\n" + str(out["summary"]) + "\n\nWhat I learned (saved, I will use it in future ideas and plans):\n"
+         + "\n".join("• " + l for l in lessons)
+         + ("\n\nThis week: " + str(out["next"]) if out.get("next") else "")
+         + "\n\nSmall numbers mean these are hints, not proof. /lessons shows everything I know.")
 
 
 def do_plan(st):
@@ -1369,6 +1522,12 @@ def housekeeping(st):
             cmd_news(st)
         except Exception as e:
             print("news:", clean(e))
+    if g.tm_wday == 6 and g.tm_hour >= 16 and m.get("last_review") != week:
+        m["last_review"] = week
+        try:
+            weekly_review(st)
+        except Exception as e:
+            print("review:", clean(e))
     if g.tm_wday == 6 and g.tm_hour >= 7 and m["last_plan"] != week:
         m["last_plan"] = week
         try:
@@ -1874,7 +2033,7 @@ Choose the action. Actions: idea (wants video ideas), script (gave a topic to wr
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
-longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), lessons (what you have learned), health (is everything working),
+asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), lessons (what you have learned), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -1892,6 +2051,10 @@ def run_action(action, topic, st, text=""):
         return cmd_idea(st)
     if action == "script":
         return write_script({"title": topic or text, "hook": ""})
+    if action == "asked":
+        return cmd_asked(st)
+    if action == "review":
+        return weekly_review(st)
     if action == "titles":
         return cmd_titles(st)
     if action == "comments":
@@ -1980,6 +2143,8 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/progress - how close you are to earning on YouTube\n"
         "/retention - where viewers leave your latest video, and why\n"
         "/scout - what works on other Egypt channels, and ideas\n"
+        "/asked - turn viewer questions into videos (You Asked, Kemet Answered)\n"
+        "/review - weekly self-review now (also runs by itself on Sundays)\n"
         "/news - fresh Egypt news to turn into videos\n"
         "/audit - Kemet Audited: test a myth against evidence (or /audit your claim)\n"
         "/longform - plan long videos (they earn more)\n"
@@ -2087,6 +2252,10 @@ def on_message(msg, st):
         cmd_news(st)
     elif text == "/scout":
         cmd_scout(st)
+    elif text == "/asked":
+        cmd_asked(st)
+    elif text == "/review":
+        weekly_review(st)
     elif text.startswith("/audit"):
         cmd_audit(st, raw)
     elif text == "/longform":
@@ -2176,6 +2345,19 @@ def on_callback(cb, st):
         job["ai"] = not job.get("ai")
         return ask_confirm(job)
     if act == "u" and stage == "confirm":
+        if job.get("gate_key") == [job.get("title"), job.get("desc")] and not job.get("gate_bad"):
+            return do_upload(job)          # already checked and clean
+        job["stage"] = "checking"
+        bad = factcheck_job(job, gate=True)
+        job["stage"] = "confirm"
+        if bad is None:
+            return send("I could not check the facts just now. Tap again to retry, or upload anyway "
+                        "(it is private, so nothing is public).",
+                        [[btn("⬆️ Upload private anyway", jid, "ug")], [btn("Cancel", jid, "x")]])
+        if bad:
+            return      # factcheck_job showed the flagged lines with its own buttons
+        return do_upload(job)
+    if act == "ug" and stage == "confirm":
         return do_upload(job)
     if act == "p" and stage == "uploaded":
         return do_publish(job)
@@ -2227,6 +2409,8 @@ def main():
             {"command": "retention", "description": "Where viewers leave your video"},
             {"command": "audit", "description": "Kemet Audited: check a claim vs evidence"},
             {"command": "scout", "description": "What works on other Egypt channels"},
+            {"command": "asked", "description": "Viewer questions into video ideas"},
+            {"command": "review", "description": "Weekly self-review"},
             {"command": "news", "description": "Egypt news to make videos about"},
             {"command": "longform", "description": "Plan long videos"},
             {"command": "batch", "description": "4 scripts to film today"},
