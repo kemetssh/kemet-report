@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.6.3"
+BOT_VERSION = "v10.7.1"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -481,15 +481,237 @@ def ask_confirm(job):
          + [[btn("Cancel", jid, "x")]])
 
 
-def start_job(msg, st):
+# ---------------- big videos: fetched through your own Telegram account, shrunk here ----------------
+BIG_LIMIT = 19.5 * 1024 * 1024
+BIG_TARGET = 18.5 * 1024 * 1024
+
+
+def telethon_mods():
+    try:
+        import telethon  # noqa
+    except ImportError:
+        cmd = [sys.executable, "-m", "pip", "install", "--quiet", "telethon"]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+        if r.returncode:
+            r = subprocess.run(cmd + ["--break-system-packages"], capture_output=True, text=True, timeout=240)
+            if r.returncode:
+                raise RuntimeError("could not install the Telegram library: " + r.stderr[-120:])
+        import importlib
+        importlib.invalidate_caches()
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+    from telethon import errors
+    return TelegramClient, StringSession, errors
+
+
+def big_cfg():
+    return mem().get("big") or {}
+
+
+def big_ready():
+    c = big_cfg()
+    return bool(c.get("session") and c.get("api_id") and c.get("api_hash"))
+
+
+def forget_message(msg):
+    try:
+        tg("deleteMessage", chat_id=CHAT, message_id=msg["message_id"])
+    except Exception:
+        pass
+
+
+BIG_SETUP_HELP = (
+    "📦 Big-video mode (videos over 20 MB)\n\n"
+    "Telegram bots can only receive 20 MB, so I read your big video through YOUR Telegram account instead, "
+    "shrink it here, and continue as usual. One-time setup, about 10 minutes, on your iPhone:\n\n"
+    "1. Safari → my.telegram.org → type your phone number with +20, then the code Telegram sends you in the app.\n"
+    "2. Tap API development tools → Create application. App title: Kemet. Short name: kemetbot. Platform: Other. Create.\n"
+    "   (If it says ERROR, wait a minute and try again.)\n"
+    "3. Copy the api_id (numbers) and api_hash (letters and numbers).\n"
+    "4. Send me one message like this, with your own values:\n"
+    "/bigsetup 1234567 0123456789abcdef0123456789abcdef +201001234567\n\n"
+    "I delete that message right away and keep the details encrypted. Telegram then sends a login code to your Telegram app: "
+    "send it to me as /bigcode 1 2 3 4 5 (with spaces between the digits, or Telegram cancels it).\n"
+    "To switch it off and sign out: /bigoff")
+
+
+def cmd_bigsetup(msg, st, raw):
+    parts = raw.split()
+    if len(parts) < 4:
+        return send(BIG_SETUP_HELP)
+    forget_message(msg)
+    api_id, api_hash, phone = parts[1], parts[2], parts[3]
+    if not api_id.isdigit() or not re.fullmatch(r"[0-9a-fA-F]{32}", api_hash) or not re.fullmatch(r"\+?\d{8,15}", phone):
+        return send("Something looks wrong in that message (api_id must be numbers, api_hash 32 letters and numbers, "
+                    "phone like +201001234567). I deleted it. Send it again.")
+    phone = phone if phone.startswith("+") else "+" + phone
+    send("Contacting Telegram to send you a login code...")
+    TelegramClient, StringSession, errors = telethon_mods()
+    import asyncio
+
+    async def go():
+        c = TelegramClient(StringSession(), int(api_id), api_hash)
+        await c.connect()
+        try:
+            sent = await c.send_code_request(phone)
+            return c.session.save(), sent.phone_code_hash
+        finally:
+            await c.disconnect()
+    try:
+        sess, h = asyncio.run(go())
+    except Exception as e:
+        return send("Telegram did not accept that: " + clean(e)[:120] + "\nCheck the api_id, api_hash and phone, then send /bigsetup again.")
+    mem()["big"] = {"api_id": api_id, "api_hash": api_hash, "phone": phone, "pending": {"session": sess, "hash": h}}
+    send("✅ Details saved (and the message deleted). Telegram just sent a login code to your Telegram app "
+         "(look for the chat named Telegram).\nSend it to me like this, with spaces:\n/bigcode 1 2 3 4 5")
+
+
+def cmd_bigcode(msg, st, raw, password=None):
+    forget_message(msg)
+    cfg = big_cfg()
+    pend = cfg.get("pending")
+    if not pend:
+        return send("There is no login waiting. Start with /bigsetup.")
+    TelegramClient, StringSession, errors = telethon_mods()
+    import asyncio
+    code = re.sub(r"\D", "", raw.split(None, 1)[1]) if (password is None and len(raw.split(None, 1)) > 1) else ""
+    if password is None and not code:
+        return send("Send the code like this: /bigcode 1 2 3 4 5")
+
+    async def go():
+        c = TelegramClient(StringSession(pend["session"]), int(cfg["api_id"]), cfg["api_hash"])
+        await c.connect()
+        try:
+            if password is None:
+                await c.sign_in(cfg["phone"], code, phone_code_hash=pend["hash"])
+            else:
+                await c.sign_in(password=password)
+            me = await c.get_me()
+            return c.session.save(), (getattr(me, "first_name", "") or "")
+        finally:
+            await c.disconnect()
+    try:
+        sess, name = asyncio.run(go())
+    except errors.SessionPasswordNeededError:
+        pend["need_password"] = True
+        return send("Your account has a two-step password. Send it as /bigpass yourpassword (I delete the message at once).")
+    except Exception as e:
+        return send("Login failed: " + clean(e)[:140] + "\nSend /bigsetup again to get a new code.")
+    cfg["session"] = sess
+    cfg.pop("pending", None)
+    send(f"✅ Big-video mode is ON{', signed in as ' + name if name else ''}. Send me any big video: send it as a FILE "
+         "(paperclip → File) so Telegram keeps the full quality, and I will shrink it to under 20 MB myself.")
+
+
+def cmd_bigoff(st):
+    cfg = big_cfg()
+    if not cfg:
+        return send("Big-video mode is already off.")
+    if cfg.get("session"):
+        try:
+            TelegramClient, StringSession, errors = telethon_mods()
+            import asyncio
+
+            async def go():
+                c = TelegramClient(StringSession(cfg["session"]), int(cfg["api_id"]), cfg["api_hash"])
+                await c.connect()
+                try:
+                    await c.log_out()
+                finally:
+                    await c.disconnect()
+            asyncio.run(go())
+        except Exception as e:
+            print("bigoff logout:", clean(e))
+    mem().pop("big", None)
+    send("Big-video mode is OFF. I erased the saved login and signed that session out.")
+
+
+def shrink_video(src, dst, dur):
+    """Re-encode so the file is under BIG_TARGET bytes. Returns the final size."""
+    abr = 96_000
+    vb = max(int(BIG_TARGET * 8 / max(dur, 1) - abr) , 120_000)
+    for attempt in range(4):
+        short = 1080 if vb >= 2_500_000 else 720 if vb >= 1_200_000 else 540 if vb >= 600_000 else 480 if vb >= 300_000 else 360
+        vf = (f"scale='if(gt(iw,ih),-2,min({short},iw))':'if(gt(iw,ih),min({short},ih),-2)',format=yuv420p")
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vf", vf, "-c:v", "libx264", "-preset", "veryfast",
+               "-b:v", str(vb), "-maxrate", str(int(vb * 1.15)), "-bufsize", str(vb * 2), "-c:a", "aac", "-b:a", str(abr),
+               "-movflags", "+faststart", str(dst)]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1500)
+        if r.returncode:
+            raise RuntimeError("video converter failed: " + r.stderr[-150:])
+        size = Path(dst).stat().st_size
+        if size <= BIG_LIMIT:
+            return size, vb, short
+        vb = int(vb * 0.82)
+    raise RuntimeError("could not get the video under 20 MB, even at low quality")
+
+
+def fetch_big_video(msg, st):
+    v = msg.get("video") or msg.get("document")
+    size = int(v.get("file_size") or 0)
+    mb = size / 1024 / 1024
+    if not big_ready():
+        return send(f"This video is {mb:.0f} MB, and a Telegram bot can only receive 20 MB.\n"
+                    "Either send it as a normal video (not a file) so Telegram shrinks it, or switch on big-video mode "
+                    "so I can shrink it for you: /bigsetup")
+    send(f"📦 {mb:.0f} MB video. Fetching it through your Telegram account, then shrinking it to under 20 MB "
+         "(a few minutes)...")
+    TelegramClient, StringSession, errors = telethon_mods()
+    import asyncio
+    cfg = big_cfg()
+    botname = tg("getMe")["username"]
+    with tempfile.TemporaryDirectory() as d:
+        big = Path(d) / "big_input"
+
+        async def go():
+            c = TelegramClient(StringSession(cfg["session"]), int(cfg["api_id"]), cfg["api_hash"])
+            await c.connect()
+            try:
+                if not await c.is_user_authorized():
+                    raise RuntimeError("Telegram signed the saved login out")
+                async for m in c.iter_messages(botname, limit=25):
+                    if m.file and (m.video or m.document) and int(m.file.size or 0) == size:
+                        return await c.download_media(m, file=str(big))
+                return None
+            finally:
+                await c.disconnect()
+        try:
+            got = asyncio.run(go())
+        except Exception as e:
+            return send("I could not fetch it through your account: " + clean(e)[:140] +
+                        "\nIf the login was signed out, run /bigsetup again.")
+        if not got:
+            return send("I could not find that video in your chat with me. Send it again, as a file.")
+        dur, w, h = probe(got)
+        if dur <= 0:
+            return send("I fetched the file but could not read it as a video.")
+        out = Path(d) / "small.mp4"
+        try:
+            new, vb, short = shrink_video(got, out, dur)
+        except Exception as e:
+            return send("Shrinking failed: " + clean(e)[:160])
+        with open(out, "rb") as f:
+            r = S.post(f"{TGAPI}/sendVideo", data={"chat_id": CHAT, "supports_streaming": "true",
+                       "caption": f"Shrunk copy: {mb:.0f} MB → {new / 1024 / 1024:.1f} MB (up to {short}p). Reviewing this one."},
+                       files={"video": ("shrunk.mp4", f, "video/mp4")}, timeout=600)
+        j = r.json()
+        if not j.get("ok"):
+            return send("I made the small copy but Telegram refused it: " + str(j.get("description", ""))[:120])
+    note = ""
+    if vb < 600_000:
+        note = ("\n⚠️ This video is long for 20 MB, so the copy has low quality. For long videos, cut them in shorter "
+                "parts, or upload to YouTube yourself and use the link method.")
+    if note:
+        send(note.strip())
+    return start_job(j["result"], st, shrunk=True)
+
+
+def start_job(msg, st, shrunk=False):
     v = msg.get("video") or msg.get("document")
     jid = str(msg["message_id"])
     name = (v.get("file_name") or "your video")
-    if v.get("file_size", 0) > 19.5 * 1024 * 1024:
-        send("This video is over 20 MB, which is the most a Telegram bot can receive.\n"
-             "Send it again as a normal video (not as a file) so Telegram shrinks it, "
-             "or export it smaller (720x1280).")
-        return
+    if v.get("file_size", 0) > BIG_LIMIT and not shrunk:
+        return fetch_big_video(msg, st)
     send("Got it. Watching and checking your video now (about 1-3 minutes)...")
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "v.mp4"
@@ -1945,16 +2167,27 @@ def cmd_series(st, video_id=None):
 def apply_playlist(prop, jid, st):
     tok = yt_token()
     h = {"Authorization": f"Bearer {tok}"}
-    pl_id = prop["playlist_id"]
+    pl_id = prop["playlist_id"] or prop.get("created_pl")
     if not pl_id:
         r = S.post(f"{YT}/youtube/v3/playlists?part=snippet,status", headers=h, timeout=60,
                    json={"snippet": {"title": prop["new_title"]}, "status": {"privacyStatus": "public"}})
         r.raise_for_status()
         pl_id = r.json()["id"]
-    r = S.post(f"{YT}/youtube/v3/playlistItems?part=snippet", headers=h, timeout=60,
-               json={"snippet": {"playlistId": pl_id,
-                                 "resourceId": {"kind": "youtube#video", "videoId": prop["video_id"]}}})
-    r.raise_for_status()
+        prop["created_pl"] = pl_id          # remember it, so a retry never makes a second playlist
+    body = {"snippet": {"playlistId": pl_id, "resourceId": {"kind": "youtube#video", "videoId": prop["video_id"]}}}
+    r = None
+    for wait in (0, 3, 6, 12):              # a brand-new playlist often answers 409 for a few seconds
+        if wait:
+            time.sleep(wait)
+        r = S.post(f"{YT}/youtube/v3/playlistItems?part=snippet", headers=h, json=body, timeout=60)
+        if r.status_code < 400 or (r.status_code == 409 and "AlreadyInPlaylist" in r.text):
+            break
+        if r.status_code not in (409, 500, 502, 503, 404):
+            break
+    if r.status_code >= 400 and not (r.status_code == 409 and "AlreadyInPlaylist" in r.text):
+        return send("YouTube did not accept the video into the playlist yet (HTTP %d). The playlist exists, so nothing is lost: "
+                    "tap Try again in a minute.\nhttps://www.youtube.com/playlist?list=%s" % (r.status_code, pl_id),
+                    [[btn("Try again", jid, "pa")]])
     st["props"].pop(jid, None)
     send(f"✅ Added to the playlist.\nhttps://www.youtube.com/playlist?list={pl_id}")
 
@@ -2441,6 +2674,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/progress - how close you are to earning on YouTube\n"
         "/retention - where viewers leave your latest video, and why\n"
         "/scout - what works on other Egypt channels, and ideas\n"
+        "/bigsetup - let me handle videos over 20 MB (I shrink them for you)\n"
         "/asked - turn viewer questions into videos (You Asked, Kemet Answered)\n"
         "/review - weekly self-review now (also runs by itself on Sundays)\n"
         "/funnel - point your Shorts viewers to a long video\n"
@@ -2553,6 +2787,16 @@ def on_message(msg, st):
         cmd_news(st)
     elif text == "/scout":
         cmd_scout(st)
+    elif text.startswith("/bigsetup"):
+        cmd_bigsetup(msg, st, raw)
+    elif text.startswith("/bigcode"):
+        cmd_bigcode(msg, st, raw)
+    elif text.startswith("/bigpass"):
+        forget_message(msg)
+        pw = raw.split(None, 1)[1] if len(raw.split(None, 1)) > 1 else ""
+        cmd_bigcode(msg, st, raw, password=pw) if pw else send("Send it as /bigpass yourpassword")
+    elif text == "/bigoff":
+        cmd_bigoff(st)
     elif text == "/asked":
         cmd_asked(st)
     elif text == "/funnel":
@@ -2716,6 +2960,7 @@ def main():
             {"command": "retention", "description": "Where viewers leave your video"},
             {"command": "audit", "description": "Kemet Audited: check a claim vs evidence"},
             {"command": "scout", "description": "What works on other Egypt channels"},
+            {"command": "bigsetup", "description": "Handle videos over 20 MB"},
             {"command": "asked", "description": "Viewer questions into video ideas"},
             {"command": "review", "description": "Weekly self-review"},
             {"command": "funnel", "description": "Send Shorts viewers to a long video"},
