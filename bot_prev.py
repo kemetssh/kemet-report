@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.8.1"
+BOT_VERSION = "v10.10"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -148,6 +148,12 @@ def learned():
     sc = m.get("scout")
     if sc and sc.get("patterns"):
         parts.append("Market scan of other channels (small sample, hints only):\n" + "\n".join("- " + x for x in sc["patterns"][:4]))
+    tr = m.get("trend")
+    if tr and time.time() - tr.get("ts", 0) < 7 * 86400:
+        if tr.get("tags"):
+            parts.append("Hashtags/tags used right now by the best-performing recent Ancient Egypt videos: " + ", ".join(tr["tags"][:15]))
+        if tr.get("buzz"):
+            parts.append("What is trending in the Ancient Egypt niche now (checked " + time.strftime("%d %b", time.gmtime(tr["ts"])) + "): " + tr["buzz"][:600])
     return "\n".join(parts) or "No history yet."
 
 
@@ -303,6 +309,10 @@ Return JSON only with exactly these keys:
 
 
 def review_video(path, dur, w, h):
+    try:
+        trend_pack()
+    except Exception:
+        pass
     info = gemini_upload(path, "video/mp4")
     try:
         data = gemini([{"file_data": {"mime_type": "video/mp4", "file_uri": info["uri"]}},
@@ -2183,12 +2193,71 @@ def cmd_progress(st):
     send("\n".join(lines))
 
 
+# ---------------- trends: what is hot right now (free: YouTube search + Google-grounded Gemini) ----------------
+TREND_PROMPT = """Search the web for what is trending TODAY or this week around Ancient Egypt: new discoveries, museum or Grand Egyptian Museum news, viral claims, popular formats on TikTok, Reels and YouTube Shorts, and hashtags people use for it.
+Write plain text, max 90 words, no markdown: the 3 hottest topics, then the hashtags that are actually in use. Only say what you found. If something is not found, say so."""
+
+
+def trend_pack(force=False):
+    """Cached 24 h. Returns {"ts","tags","top","buzz"}. Never raises."""
+    m = mem()
+    tr = m.get("trend")
+    if tr and not force and time.time() - tr.get("ts", 0) < 86400:
+        return tr
+    tags, top, buzz = {}, [], ""
+    try:
+        tok = yt_token()
+        since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 30 * 86400))
+        found = yt_get("search", tok, part="snippet", q="ancient egypt", type="video", order="viewCount",
+                       publishedAfter=since, maxResults=15, relevanceLanguage="en")["items"]
+        ids = [i["id"]["videoId"] for i in found if i.get("id", {}).get("videoId")]
+        if ids:
+            rows = yt_get("videos", tok, part="snippet,statistics", id=",".join(ids))["items"]
+            for v in rows:
+                for t in (v["snippet"].get("tags") or [])[:15]:
+                    t = t.strip().lower().lstrip("#")
+                    if 2 < len(t) < 25 and t not in ("ancient egypt", "egypt"):
+                        tags[t] = tags.get(t, 0) + 1
+                top.append((int(v.get("statistics", {}).get("viewCount", 0)), v["snippet"].get("title", "")))
+    except Exception as e:
+        print("trend youtube failed:", clean(e)[:120])
+    try:
+        buzz, _ = gemini_text(TREND_PROMPT, search=True)
+    except Exception as e:
+        print("trend search failed:", clean(e)[:120])
+    top.sort(reverse=True)
+    best = [t for t, _ in sorted(tags.items(), key=lambda kv: -kv[1])][:15]
+    tr = {"ts": time.time(), "tags": best, "top": [t for _, t in top[:5]], "buzz": buzz.strip()}
+    if best or buzz:
+        m["trend"] = tr
+    return tr
+
+
+def cmd_trends(st):
+    send("Checking what is hot right now (YouTube + the web)...")
+    tr = trend_pack(force=True)
+    if not tr.get("tags") and not tr.get("buzz"):
+        return send("I could not read trends right now (search was busy). Try again in a while.")
+    lines = ["🔥 Trending now in the Ancient Egypt niche", ""]
+    if tr.get("buzz"):
+        lines += [tr["buzz"], ""]
+    if tr.get("top"):
+        lines += ["Top videos this month (by views):"] + ["• " + t for t in tr["top"]] + [""]
+    if tr.get("tags"):
+        lines += ["Tags the winners use:", " ".join("#" + t.replace(" ", "") for t in tr["tags"][:12]), ""]
+    lines.append("I use this automatically for your hashtags, packaging and cross-post kit. Cached for a day. Want a video from a trend? Send /news.")
+    send("\n".join(lines))
+
+
 CROSSPOST_PROMPT = """Write post captions to republish a short video about Ancient Egypt on other platforms.
 Video title: {title}. What it is about: {summary}
-Return JSON only: {{"tiktok": {{"caption": "max 150 chars, hook first", "hashtags": ["5-6 tags"]}},
-"reels": {{"caption": "max 200 chars", "hashtags": ["5-8 tags"]}},
-"facebook": {{"caption": "2 short lines, ends with a question", "hashtags": ["2-3 tags"]}}}}
-Never invent facts. Keep the calm, cinematic voice of the channel."""
+What is trending right now (use these hashtags and angles where they truly fit the video; never force an unrelated trend):
+{trend}
+Give THREE different options for each platform, each with a different angle (a question, a surprising true fact, a curiosity or story hook).
+Return JSON only: {{"tiktok": [{{"caption": "max 150 chars, hook first", "hashtags": ["5-6 tags"]}}, ... 3 items],
+"reels": [{{"caption": "max 200 chars", "hashtags": ["5-8 tags"]}}, ... 3 items],
+"facebook": [{{"caption": "2 short lines, ends with a question", "hashtags": ["2-3 tags"]}}, ... 3 items]}}
+Mix 1-2 currently trending tags with evergreen ones. Never invent facts. Keep the calm, cinematic voice of the channel."""
 
 
 def cmd_crosspost(st, video_id=None):
@@ -2197,14 +2266,23 @@ def cmd_crosspost(st, video_id=None):
         return send("Upload a video through me first, then I can prepare its cross-post kit.")
     vid = video_id if video_id in vids else max(vids.items(), key=lambda kv: kv[1]["uploaded"])[0]
     rec = vids[vid]
-    out = gemini([{"text": CROSSPOST_PROMPT.format(title=rec["title"], summary=rec.get("summary", ""))}])
-    parts = []
+    tr = trend_pack()
+    trend = ((tr.get("buzz") or "") + " Tags: " + ", ".join(tr.get("tags", [])[:12])).strip() or "no data"
+    out = gemini([{"text": CROSSPOST_PROMPT.format(title=rec["title"], summary=rec.get("summary", ""), trend=trend)}])
+    send("📣 Cross-post kit for: " + rec["title"] + "\n3 options for each app. Each option is its own message: tap and hold it, "
+         "choose Copy, and paste it into the app.")
     for key, name in (("tiktok", "TikTok"), ("reels", "Instagram Reels"), ("facebook", "Facebook")):
-        c = out.get(key) or {}
-        tags = " ".join("#" + t.lstrip("#") for t in c.get("hashtags", []))
-        parts.append(f"{name}:\n{c.get('caption', '')}\n{tags}")
-    send("📣 Cross-post kit for: " + rec["title"] + "\n\n" + "\n\n".join(parts) +
-         "\n\nThe video is below. Save it from Telegram and post it yourself on each app.")
+        opts = out.get(key) or []
+        if isinstance(opts, dict):
+            opts = [opts]
+        opts = [c for c in opts if isinstance(c, dict) and c.get("caption")][:3]
+        if not opts:
+            continue
+        send(f"━━ {name}: {len(opts)} options ━━")
+        for c in opts:
+            tags = " ".join("#" + t.lstrip("#") for t in c.get("hashtags", []))
+            send((str(c["caption"]).strip() + ("\n\n" + tags if tags else "")).strip())
+    send("The video is below. Save it from Telegram and post it yourself on each app.")
     try:
         tg("sendVideo", chat_id=CHAT, video=rec["file_id"], caption="Your video, ready to post")
     except Exception as e:
@@ -2641,7 +2719,7 @@ Choose the action. Actions: idea (wants video ideas), script (gave a topic to wr
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
-funnel (link a Short to a long video), besttime (when to post), thumbtest (thumbnail options), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), lessons (what you have learned), health (is everything working),
+funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), thumbtest (thumbnail options), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), lessons (what you have learned), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -2663,6 +2741,8 @@ def run_action(action, topic, st, text=""):
         return cmd_funnel(st)
     if action == "besttime":
         return cmd_besttime(st)
+    if action == "trends":
+        return cmd_trends(st)
     if action == "thumbtest":
         return cmd_thumbtest(st)
     if action == "asked":
@@ -2763,6 +2843,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/review - weekly self-review now (also runs by itself on Sundays)\n"
         "/funnel - point your Shorts viewers to a long video\n"
         "/besttime - when to post, from your own data\n"
+        "/trends - what is hot now in the niche (tags, topics)\n"
         "/thumbtest - 3 thumbnail options and how to test them\n"
         "/news - fresh Egypt news to turn into videos\n"
         "/audit - Kemet Audited: test a myth against evidence (or /audit your claim)\n"
@@ -2891,6 +2972,8 @@ def on_message(msg, st):
         cmd_funnel(st)
     elif text == "/besttime":
         cmd_besttime(st)
+    elif text == "/trends":
+        cmd_trends(st)
     elif text == "/thumbtest":
         cmd_thumbtest(st)
     elif text == "/review":
@@ -3063,6 +3146,7 @@ def main():
             {"command": "review", "description": "Weekly self-review"},
             {"command": "funnel", "description": "Send Shorts viewers to a long video"},
             {"command": "besttime", "description": "When to post"},
+            {"command": "trends", "description": "What is trending now"},
             {"command": "thumbtest", "description": "Thumbnail options and test"},
             {"command": "news", "description": "Egypt news to make videos about"},
             {"command": "longform", "description": "Plan long videos"},
