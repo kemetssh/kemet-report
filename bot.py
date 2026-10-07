@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.7.1"
+BOT_VERSION = "v10.8"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -337,11 +337,72 @@ def more_titles(job):
 
 # ---------------- youtube ----------------
 def yt_token():
-    r = S.post(GOOGLE_TOKEN, data={
-        "client_id": os.environ["YT_CLIENT_ID"], "client_secret": os.environ["YT_CLIENT_SECRET"],
-        "refresh_token": os.environ["YT_REFRESH_TOKEN"], "grant_type": "refresh_token"}, timeout=60)
+    # a login made with /ytauth (it can comment) is tried first; the original one is the fallback
+    cands = [t for t in ((ST.get("mem") or {}).get("yt_refresh"), os.environ.get("YT_REFRESH_TOKEN")) if t]
+    r = None
+    for rt in cands:
+        r = S.post(GOOGLE_TOKEN, data={
+            "client_id": os.environ["YT_CLIENT_ID"], "client_secret": os.environ["YT_CLIENT_SECRET"],
+            "refresh_token": rt, "grant_type": "refresh_token"}, timeout=60)
+        if r.ok:
+            return r.json()["access_token"]
     r.raise_for_status()
-    return r.json()["access_token"]
+
+
+YT_SCOPES = ["https://www.googleapis.com/auth/youtube", "https://www.googleapis.com/auth/youtube.force-ssl",
+             "https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/yt-analytics.readonly"]
+YT_REDIRECT = "http://localhost"
+
+
+def cmd_ytauth(st):
+    import urllib.parse
+    q = urllib.parse.urlencode({"client_id": os.environ["YT_CLIENT_ID"], "redirect_uri": YT_REDIRECT, "response_type": "code",
+                                "scope": " ".join(YT_SCOPES), "access_type": "offline", "prompt": "consent"})
+    url = "https://accounts.google.com/o/oauth2/v2/auth?" + q
+    send("🔑 New YouTube login with comment permission (about 3 minutes, on this phone):\n\n"
+         "1. Tap the link below and choose your Kemet Google account.\n"
+         "2. If Google says \"hasn't verified this app\", tap Advanced, then Go to the app (unsafe). It is your own app.\n"
+         "3. Tick ALL the boxes it shows, then Continue.\n"
+         "4. The page will then say it cannot connect to localhost: that is normal. Tap the address bar at the top of Safari, "
+         "copy the whole address (it contains code=...), and send it to me as:\n/ytcode paste-it-here\n\n" + url)
+
+
+def cmd_ytcode(msg, st, raw):
+    forget_message(msg)
+    import urllib.parse
+    arg = raw.split(None, 1)[1].strip() if len(raw.split(None, 1)) > 1 else ""
+    m = re.search(r"[?&]code=([^&\s]+)", arg)
+    code = urllib.parse.unquote(m.group(1) if m else arg)
+    if len(code) < 20:
+        return send("I could not find the code. Send it as /ytcode followed by the whole address from Safari "
+                    "(it starts with http://localhost/?code=...).")
+    r = S.post(GOOGLE_TOKEN, data={"code": code, "client_id": os.environ["YT_CLIENT_ID"], "client_secret": os.environ["YT_CLIENT_SECRET"],
+                                   "redirect_uri": YT_REDIRECT, "grant_type": "authorization_code"}, timeout=60)
+    j = {}
+    try:
+        j = r.json()
+    except Exception:
+        pass
+    if not r.ok or not j.get("refresh_token"):
+        why = j.get("error_description") or j.get("error") or f"HTTP {r.status_code}"
+        hint = ""
+        if "redirect_uri" in str(why) or "redirect" in str(j.get("error", "")):
+            hint = ("\nYour Google login type does not allow localhost. Fix: Google Cloud Console → APIs & Services → Credentials → "
+                    "your OAuth client → add http://localhost under Authorized redirect URIs → Save. Then send /ytauth again.")
+        elif "invalid_grant" in str(j.get("error", "")):
+            hint = "\nThe code is single use and expires in minutes. Send /ytauth again and use the new link."
+        return send("Google did not accept it: " + str(why)[:150] + hint)
+    sc = ""
+    try:
+        sc = S.get(GOOGLE_TOKEN.rsplit("/", 1)[0] + "/tokeninfo", params={"access_token": j.get("access_token", "")}, timeout=30).json().get("scope", "")
+    except Exception:
+        pass
+    mem()["yt_refresh"] = j["refresh_token"]
+    if "youtube.force-ssl" in sc or not sc:
+        send("✅ New YouTube login saved (encrypted). I can now post comments and replies, and upload captions. "
+             "Check /health: it should no longer say missing.")
+    else:
+        send("Saved, but Google did not give the comment permission (you may have left a box unticked). Run /ytauth again and tick every box.")
 
 
 def yt_upload(path, title, desc, tags, tok, ai=False):
@@ -2541,9 +2602,13 @@ def cmd_health(st):
             sc = r.json().get("scope", "")
             names = [("youtube.force-ssl", "comments"), ("youtube.upload", "upload"), ("yt-analytics.readonly", "analytics"),
                      ("youtube.readonly", "read")]
-            have = [n for k, n in names if k in sc] or ["none recognised"]
+            have = [n for k, n in names if k in sc]
+            if re.search(r"auth/youtube(\s|$)", sc):
+                have.append("manage")
+            have = have or ["none recognised"]
             miss = [] if "youtube.force-ssl" in sc else ["COMMENTING (posting comments and replies will fail)"]
-            return "can " + ", ".join(have) + ("; missing: " + ", ".join(miss) if miss else "")
+            src = " (new login)" if mem().get("yt_refresh") else ""
+            return "can " + ", ".join(have) + src + ("; missing: " + ", ".join(miss) + " → send /ytauth" if miss else "")
         chk("YouTube permissions", perms)
     m = mem()
     lines.append(f"Videos tracked: {len(m['videos'])} | Lessons learned: {len(m['lessons'])}")
@@ -2675,6 +2740,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/retention - where viewers leave your latest video, and why\n"
         "/scout - what works on other Egypt channels, and ideas\n"
         "/bigsetup - let me handle videos over 20 MB (I shrink them for you)\n"
+        "/ytauth - new YouTube login so I can post comments and captions\n"
         "/asked - turn viewer questions into videos (You Asked, Kemet Answered)\n"
         "/review - weekly self-review now (also runs by itself on Sundays)\n"
         "/funnel - point your Shorts viewers to a long video\n"
@@ -2787,6 +2853,10 @@ def on_message(msg, st):
         cmd_news(st)
     elif text == "/scout":
         cmd_scout(st)
+    elif text == "/ytauth":
+        cmd_ytauth(st)
+    elif text.startswith("/ytcode"):
+        cmd_ytcode(msg, st, raw)
     elif text.startswith("/bigsetup"):
         cmd_bigsetup(msg, st, raw)
     elif text.startswith("/bigcode"):
