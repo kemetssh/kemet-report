@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.8"
+BOT_VERSION = "v10.8.1"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1613,6 +1613,7 @@ Return JSON only: {{"verdict": "SUPPORTED" or "MOSTLY SUPPORTED" or "DISPUTED" o
 
 FACT_PROMPT = """Use web search. Fact-check these claims taken from a short Ancient Egypt video. Be strict and honest; never invent sources.
 Claims: {claims}
+For a claim that starts with "Title:" or "Description:", "fix" must be ONLY the full replacement text (a title under 70 characters, or the whole corrected description), ready to paste, with no label in front.
 Return JSON only: {{"results": [{{"claim": "...", "status": "solid" or "shaky" or "wrong", "note": "short reason", "fix": "how to say it correctly, or empty"}}]}}"""
 
 VERDICT_ICON = {"SUPPORTED": "✅", "MOSTLY SUPPORTED": "🟢", "DISPUTED": "🟡", "UNSUPPORTED": "🟠", "CONTRADICTED": "❌"}
@@ -1752,7 +1753,24 @@ def factcheck_job(job, gate=False):
     for c in remember_fact:
         remember("lessons", "Double-check this kind of claim before filming: " + c[:100])
     if gate and bad:
-        send(msg[:3900], [[btn("⬆️ Upload private anyway", job["id"], "ug")], [btn("Cancel", job["id"], "x")]])
+        rows = []
+        job.pop("fix_title", None)
+        job.pop("fix_desc", None)
+        for r in bad:
+            fix = str(r.get("fix") or "").strip().strip('"\u201c\u201d')
+            claim = str(r.get("claim", ""))
+            if not fix:
+                continue
+            if claim.startswith("Title:"):
+                job["fix_title"] = re.sub(r"^Title:\s*", "", fix)[:100]
+                rows.append([btn("✏️ Use the fixed title", job["id"], "ft")])
+            elif claim.startswith("Description:"):
+                job["fix_desc"] = re.sub(r"^Description:\s*", "", fix)[:4500]
+                rows.append([btn("✏️ Use the fixed description", job["id"], "fx")])
+        extra = ""
+        if rows:
+            extra = "\n\nTap a ✏️ button to apply the fix for the title or description. A wrong fact spoken in the video needs a re-record or an edit."
+        send(msg[:3700] + extra, rows + [[btn("⬆️ Upload private anyway", job["id"], "ug")], [btn("Cancel", job["id"], "x")]])
     else:
         send(msg[:4000])
     return bad
@@ -2980,6 +2998,16 @@ def on_callback(cb, st):
         return do_upload(job)
     if act == "ug" and stage == "confirm":
         return do_upload(job)
+    if act == "ft" and stage == "confirm" and job.get("fix_title"):
+        job["title"] = job.pop("fix_title")
+        job.pop("gate_key", None)
+        send("✅ Title changed to the fixed version.")
+        return ask_confirm(job)
+    if act == "fx" and stage == "confirm" and job.get("fix_desc"):
+        job["review"]["descriptions"][job["desc"]] = job.pop("fix_desc")
+        job.pop("gate_key", None)
+        send("✅ Description changed to the fixed version.")
+        return ask_confirm(job)
     if act == "p" and stage == "uploaded":
         return do_publish(job)
     if act == "k":
