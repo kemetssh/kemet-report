@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.6.2"
+BOT_VERSION = "v10.6.3"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1028,6 +1028,16 @@ Under 150 spoken words. Cinematic, mysterious but accurate. English.
 After the script add a line "CHECK:" listing any claim you could not confirm, or "CHECK: none"."""
 
 
+def plain(text):
+    """Telegram shows raw markdown: drop **bold**, ### headings and --- rules (JSON answers are left alone)."""
+    if text.lstrip().startswith(("{", "```", "[")):
+        return text
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.M)
+    text = re.sub(r"^\s*-{3,}\s*$", "", text, flags=re.M)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
 def gemini_text(prompt, search=False):
     body = {"contents": [{"parts": [{"text": prompt}]}]}
     if search:
@@ -1042,10 +1052,10 @@ def gemini_text(prompt, search=False):
         r = _gpost(body, rounds=2)
         prompt_note = "\n\n(Note: live web search was rate-limited, so this is NOT verified against today's news.)"
         cand = r.json()["candidates"][0]
-        text = "".join(p.get("text", "") for p in cand["content"]["parts"]).strip()
+        text = plain("".join(p.get("text", "") for p in cand["content"]["parts"]).strip())
         return text + prompt_note, []
     cand = r.json()["candidates"][0]
-    text = "".join(p.get("text", "") for p in cand["content"]["parts"]).strip()
+    text = plain("".join(p.get("text", "") for p in cand["content"]["parts"]).strip())
     chunks = cand.get("groundingMetadata", {}).get("groundingChunks", [])
     sources = [(c["web"].get("title", ""), c["web"].get("uri", "")) for c in chunks if c.get("web")]
     return text, sources
@@ -2067,7 +2077,7 @@ def cmd_cadence(st, raw):
     if len(parts) == 2 and parts[1].isdigit() and 1 <= int(parts[1]) <= 30:
         mem()["cadence_days"] = int(parts[1])
         return send(f"✅ Goal set: one video every {parts[1]} days. I will nudge you if you go quiet longer than that.")
-    send(f"Your goal is one video every {mem()['cadence_days']} days.\\nChange it like this: /cadence 4")
+    send(f"Your goal is one video every {mem()['cadence_days']} days.\nChange it like this: /cadence 4")
 
 
 def last_upload_ts(tok):
@@ -2107,7 +2117,7 @@ def cmd_batch(st):
     ideas = get_ideas()[:4]
     if not ideas:
         return send("I could not come up with ideas right now. Try again later.")
-    send("🎬 Film-day pack. Record these back to back:\\n" + "\\n".join(f"{n + 1}. {i['title']}" for n, i in enumerate(ideas)))
+    send("🎬 Film-day pack. Record these back to back:\n" + "\n".join(f"{n + 1}. {i['title']}" for n, i in enumerate(ideas)))
     for i in ideas:
         write_script(i)
 
@@ -2137,8 +2147,8 @@ def cmd_news(st):
     pid = new_pid(st)
     st["props"][pid] = {"type": "ideas", "ideas": [{"title": i["idea"], "hook": i.get("hook", "")} for i in items],
                         "created": time.time()}
-    body = "📰 Egypt news you can ride:\\n\\n" + "\\n\\n".join(
-        f"{n + 1}. {i.get('headline', '')}\\nVideo: {i['idea']}\\nOpening: {i.get('hook', '')}\\nWhy now: {i.get('why', '')}"
+    body = "📰 Egypt news you can ride:\n\n" + "\n\n".join(
+        f"{n + 1}. {i.get('headline', '')}\nVideo: {i['idea']}\nOpening: {i.get('hook', '')}\nWhy now: {i.get('why', '')}"
         for n, i in enumerate(items))
     seen, links = set(), []
     for t, u in sources:
@@ -2146,8 +2156,8 @@ def cmd_news(st):
             seen.add(u)
             links.append(f"• {t}: {u}")
     if links:
-        body += "\\n\\nSources:\\n" + "\\n".join(links[:5])
-    send(body + "\\n\\nTap one and I will write a fact-checked script. Check the sources before you film: news changes.",
+        body += "\n\nSources:\n" + "\n".join(links[:5])
+    send(body + "\n\nTap one and I will write a fact-checked script. Check the sources before you film: news changes.",
          [[btn(f"Script {n + 1}", pid, "is", n) for n in range(len(items))]])
 
 
@@ -2181,9 +2191,9 @@ def cmd_longform(st):
         return send("I could not plan long videos right now. Try again later.")
     pid = new_pid(st)
     st["props"][pid] = {"type": "longs", "concepts": cs, "created": time.time()}
-    body = "🎞 Long-video plans (they earn more per view):\\n\\n" + "\\n\\n".join(
-        f"{n + 1}. {c['title']}\\n{c.get('angle', '')}\\nChapters: " + " / ".join(c.get("outline", [])[:6]) +
-        f"\\nWhy: {c.get('why', '')}" for n, c in enumerate(cs))
+    body = "🎞 Long-video plans (they earn more per view):\n\n" + "\n\n".join(
+        f"{n + 1}. {c['title']}\n{c.get('angle', '')}\nChapters: " + " / ".join(c.get("outline", [])[:6]) +
+        f"\nWhy: {c.get('why', '')}" for n, c in enumerate(cs))
     send(body, [[btn(f"Write script {n + 1}", pid, "ls", n) for n in range(len(cs))]])
 
 
@@ -2191,15 +2201,15 @@ def write_long(c):
     send(f"Writing and fact-checking the long script: {c['title']} (1-2 minutes)...")
     text, sources = gemini_text(LONG_SCRIPT_PROMPT.format(
         title=c["title"], angle=c.get("angle", ""), outline=" / ".join(c.get("outline", []))), search=True)
-    msg = f"🎞 {c['title']}\\n\\n{text}"
+    msg = f"🎞 {c['title']}\n\n{text}"
     seen, lines = set(), []
     for t, u in sources:
         if u not in seen:
             seen.add(u)
             lines.append(f"• {t}: {u}")
     if lines:
-        msg += "\\n\\nSources I checked:\\n" + "\\n".join(lines[:6])
-    send(msg + "\\n\\nRecord it in your own voice and send me the video like any other.")
+        msg += "\n\nSources I checked:\n" + "\n".join(lines[:6])
+    send(msg + "\n\nRecord it in your own voice and send me the video like any other.")
 
 
 COLLAB_PROMPT = """The owner of the small YouTube history channel "Kemet | Ancient Egypt" wants to reach out to similar channels
@@ -2237,8 +2247,8 @@ def cmd_collab(st):
         c = by.get(d.get("channel_id"))
         if not c or not d.get("message"):
             continue
-        send(f"🤝 {c['snippet']['title']} ({int(c['statistics'].get('subscriberCount', 0)):,} subscribers)\\n"
-             f"https://www.youtube.com/channel/{c['id']}\\n\\nDraft message:\\n{d['message']}")
+        send(f"🤝 {c['snippet']['title']} ({int(c['statistics'].get('subscriberCount', 0)):,} subscribers)\n"
+             f"https://www.youtube.com/channel/{c['id']}\n\nDraft message:\n{d['message']}")
         shown += 1
     send("These are only drafts. Send them yourself: open the channel → About → business email, or message them. "
          "Never copy-paste the same text to many channels." if shown else "I could not write drafts this time.")
@@ -2251,7 +2261,7 @@ def cmd_links(st, raw):
     links = mem()["links"]
     if cmd == "/addlink":
         if "|" not in arg or not arg.split("|", 1)[1].strip().startswith("http"):
-            return send("Add a link like this:\\n/addlink My Egypt books | https://amzn.to/xxxx")
+            return send("Add a link like this:\n/addlink My Egypt books | https://amzn.to/xxxx")
         label, url = (x.strip() for x in arg.split("|", 1))
         links.append({"label": label[:60], "url": url[:300]})
         return send(f"✅ Saved. I will offer to add it to the description of each new video ({len(links)} saved).")
@@ -2261,12 +2271,12 @@ def cmd_links(st, raw):
             return send(f"Removed: {gone['label']}")
         return send("Say which one: /removelink 1  (see /links for the numbers)")
     if not links:
-        return send("No links saved yet. Add one:\\n/addlink My Egypt books | https://amzn.to/xxxx\\n"
+        return send("No links saved yet. Add one:\n/addlink My Egypt books | https://amzn.to/xxxx\n"
                     "Tip: only add links you earn from or want promoted (affiliate books, your shop). "
                     "If a link earns you money, YouTube expects you to say so: add 'affiliate link' to the label.")
-    send("Your links (added to each new video's description, you can switch off per video):\\n" +
-         "\\n".join(f"{n + 1}. {l['label']}: {l['url']}" for n, l in enumerate(links)) +
-         "\\n\\n/removelink 1 removes the first.")
+    send("Your links (added to each new video's description, you can switch off per video):\n" +
+         "\n".join(f"{n + 1}. {l['label']}: {l['url']}" for n, l in enumerate(links)) +
+         "\n\n/removelink 1 removes the first.")
 
 
 # ---------------- health, pause, free-text brain ----------------
@@ -2291,6 +2301,17 @@ def cmd_health(st):
     if "t" in tok:
         chk("YouTube channel", lambda: yt_get("channels", tok["t"], part="snippet", mine="true")["items"][0]["snippet"]["title"])
         chk("Analytics", lambda: (an_query(tok["t"], "views", 7), "working")[1])
+
+        def perms():
+            r = S.get(GOOGLE_TOKEN.rsplit("/", 1)[0] + "/tokeninfo", params={"access_token": tok["t"]}, timeout=30)
+            r.raise_for_status()
+            sc = r.json().get("scope", "")
+            names = [("youtube.force-ssl", "comments"), ("youtube.upload", "upload"), ("yt-analytics.readonly", "analytics"),
+                     ("youtube.readonly", "read")]
+            have = [n for k, n in names if k in sc] or ["none recognised"]
+            miss = [] if "youtube.force-ssl" in sc else ["COMMENTING (posting comments and replies will fail)"]
+            return "can " + ", ".join(have) + ("; missing: " + ", ".join(miss) if miss else "")
+        chk("YouTube permissions", perms)
     m = mem()
     lines.append(f"Videos tracked: {len(m['videos'])} | Lessons learned: {len(m['lessons'])}")
     lines.append("Autopilot: " + ("PAUSED (/resume to restart)" if st.get("paused") else "on"))
