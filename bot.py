@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.10"
+BOT_VERSION = "v10.11"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -924,7 +924,7 @@ Videos: """
 COMMENTS_PROMPT = """You reply to YouTube comments for the history channel "Kemet | Ancient Egypt".
 Voice: warm, calm, short (1-2 sentences), no emoji spam, never argue, never promise anything,
 only state facts you are sure of. For each comment decide: "reply" (praise, question, interest)
-or "hold" (rude, hateful, spam, scam links, bait). Return JSON only:
+or "hold" (rude, hateful, spam, scam links, bait; these get a separate evidence check). Return JSON only:
 {"items": [{"id": "...", "action": "reply" or "hold", "reply": "text, empty if hold"}]}
 Comments: """
 
@@ -1081,6 +1081,33 @@ def cmd_funnel(st):
          [[btn("Add link to the Short's description", pid, "fd")], [btn("📌 Post the comment (then pin it)", pid, "pc")]])
 
 
+EVIDENCE_PROMPT = """You help the owner of the history channel "Kemet | Ancient Egypt" answer comments that look rude, silly, spam or bait.
+For each comment, work out what the person is joking about, claiming or trying to prove. Even a joke or a rude comment often hides a claim
+(for example "aliens built the pyramids", "the curse killed them", "it is all fake"). Use web search to check that claim against evidence
+(archaeology, museum or university sources, peer-reviewed work).
+For each comment return:
+ "claim": what they are saying or trying to prove, in one plain line (empty if nothing),
+ "verdict": "true", "false", "partly true", "unknown" or "no claim",
+ "evidence": one short line naming the key evidence and where it comes from,
+ "action": "reply" if a calm factual answer would help anyone reading, or "ignore" if it is scam links, pure insults, or has no claim worth answering,
+ "reply": 1-3 short sentences. Calm, warm, never sarcastic, never insulting, no emoji spam. Give the fact and the evidence. If the joke is harmless, one light friendly line first, then the fact. If you did not find solid evidence, do not state a fact: say it is debated or ask what they mean. Empty if action is ignore.
+Return JSON only: {{"items": [{{"id": "...", "claim": "", "verdict": "", "evidence": "", "action": "reply", "reply": ""}}]}}
+Comments: {items}"""
+
+
+def evidence_replies(held):
+    """One grounded call for all held-back comments. Returns ({id: result}, sources). Never raises."""
+    try:
+        text, sources = gemini_text(EVIDENCE_PROMPT.format(items=json.dumps(
+            [{"id": h["id"], "video": h["video"], "text": h["text"]} for h in held])), search=True)
+        a, b = text.find("{"), text.rfind("}")
+        data = json.loads(text[a:b + 1])
+        return {r["id"]: r for r in data.get("items", []) if r.get("id")}, sources
+    except Exception as e:
+        print("evidence replies failed:", clean(e)[:120])
+        return {}, []
+
+
 def cmd_comments(st):
     send("Checking new comments...")
     tok = yt_token()
@@ -1122,8 +1149,30 @@ def cmd_comments(st):
         send(f"💬 {it['author']} on \"{it['video']}\":\n{it['text']}\n\nDraft reply:\n{reply}",
              [[btn("✅ Post reply", pid, "ca"), btn("Skip", pid, "cs")]])
     if held:
-        send("Held back (rude, spam or bait). I will not reply to these:\n" +
-             "\n".join(f"• {h['author']}: {h['text'][:120]}" for h in held))
+        ev, sources = evidence_replies(held)
+        skipped = []
+        for h in held:
+            r = ev.get(h["id"]) or {}
+            reply = (r.get("reply") or "").replace('"', "'").strip()[:500]
+            if r.get("action") != "reply" or not reply:
+                skipped.append(h)
+                continue
+            pid = new_pid(st)
+            st["props"][pid] = {"type": "comment", "parent": h["id"], "reply": reply, "created": time.time()}
+            send(f"🧐 {h['author']} on \"{h['video']}\" (looked rude or like bait, so I checked it):\n{h['text']}\n\n"
+                 f"What they claim: {r.get('claim') or 'unclear'}\nVerdict: {r.get('verdict', 'unknown')}\n"
+                 f"Evidence: {r.get('evidence') or 'none found'}\n\nDraft reply:\n{reply}",
+                 [[btn("✅ Post reply", pid, "ca"), btn("Skip", pid, "cs")]])
+        if skipped:
+            send("Not worth a reply (spam, scam or no claim to check):\n" +
+                 "\n".join(f"• {h['author']}: {h['text'][:120]}" for h in skipped))
+        seen_u, links = set(), []
+        for t, u in sources:
+            if u not in seen_u:
+                seen_u.add(u)
+                links.append(f"• {t}: {u}")
+        if links and len(held) != len(skipped):
+            send("Sources I checked:\n" + "\n".join(links[:6]))
     st["seen"] = sorted(seen)[-2000:]
 
 
