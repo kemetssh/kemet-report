@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.12"
+BOT_VERSION = "v10.13"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1089,8 +1089,8 @@ For each comment return:
  "claim": what they are saying or trying to prove, in one plain line (empty if nothing),
  "verdict": "true", "false", "partly true", "unknown" or "no claim",
  "evidence": one short line naming the key evidence and where it comes from,
- "action": "reply" if a calm factual answer would help anyone reading, or "ignore" if it is scam links, pure insults, or has no claim worth answering,
- "reply": 1-3 short sentences. Calm, warm, never sarcastic, never insulting, no emoji spam. Give the fact and the evidence. If the joke is harmless, one light friendly line first, then the fact. If you did not find solid evidence, do not state a fact: say it is debated or ask what they mean. Empty if action is ignore.
+ "action": "reply" for almost everything: a real claim, a joke, a silly or fake "fun fact", sarcasm, or a mild insult (jokes get a short friendly reply with a light line and the true fact, so readers learn something). Use "ignore" ONLY for scam or advertising links, hate speech, threats, or abuse with nothing to answer,
+ "reply": 1-3 short sentences. Calm, warm, never sarcastic, never insulting, no emoji spam. Give the fact and the evidence. If it is a joke or a silly "fact", play along for one light friendly line (never mock the person), then give the real fact or the real story behind it (for example what Akhenaten really did) and the evidence. If you did not find solid evidence, do not state a fact: say it is debated or ask what they mean. Empty if action is ignore.
 Return JSON only: {{"items": [{{"id": "...", "claim": "", "verdict": "", "evidence": "", "action": "reply", "reply": ""}}]}}
 Comments: {items}"""
 
@@ -1172,7 +1172,7 @@ def cmd_comments(st, full=False):
                      f"Evidence: {r.get('evidence') or 'none found'}\n\nDraft reply:\n{reply}",
                      [[btn("✅ Post reply", pid, "ca"), btn("Skip", pid, "cs")]])
             if skipped:
-                send("Not worth a reply (spam, scam or no claim to check):\n" +
+                send("Not worth a reply (scam, hate or abuse):\n" +
                      "\n".join(f"• {h['author']}: {h['text'][:120]}" for h in skipped))
             seen_u, links = set(), []
             for t, u in sources:
