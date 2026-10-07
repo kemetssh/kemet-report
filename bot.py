@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.11"
+BOT_VERSION = "v10.12"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1108,71 +1108,81 @@ def evidence_replies(held):
         return {}, []
 
 
-def cmd_comments(st):
-    send("Checking new comments...")
+def cmd_comments(st, full=False):
+    send("Checking ALL your comments that have no reply from you..." if full else "Checking new comments...")
     tok = yt_token()
-    vids, chid = my_videos(tok, 8)
+    vids, chid = my_videos(tok, 20 if full else 8)
     seen = set(st.get("seen", []))
+    dismissed = set(mem().setdefault("dismissed", []))
+    pending = {p.get("parent") for p in st.get("props", {}).values() if p.get("type") == "comment"}
+    skip_ids = (dismissed | pending) if full else (seen | dismissed)
     items = []
     for v in vids:
         try:
             threads = yt_get("commentThreads", tok, part="snippet", videoId=v["id"],
-                             maxResults=15, order="time")["items"]
+                             maxResults=50 if full else 15, order="time")["items"]
         except Exception:
             continue  # comments off on this video
         for t in threads:
             top = t["snippet"]["topLevelComment"]
             cid = top["id"]
             author_id = top["snippet"].get("authorChannelId", {}).get("value")
-            if cid in seen or t["snippet"].get("totalReplyCount", 0) > 0 or author_id == chid:
+            if cid in skip_ids or t["snippet"].get("totalReplyCount", 0) > 0 or author_id == chid:
                 continue
             items.append({"id": cid, "video": v["snippet"]["title"],
                           "author": top["snippet"].get("authorDisplayName", ""),
                           "text": top["snippet"].get("textOriginal", "")[:500]})
-    items = items[:6]
+    total = len(items)
+    cap = 18 if full else 6
+    items = items[:cap]
     if not items:
-        return send("No new comments waiting for a reply.")
-    out = gemini([{"text": COMMENTS_PROMPT + json.dumps(items)}])
-    by = {i["id"]: i for i in items}
-    held = []
-    for r in out.get("items", []):
-        it = by.get(r.get("id"))
-        if not it:
-            continue
-        seen.add(it["id"])
-        reply = (r.get("reply") or "").replace('"', "'").strip()[:500]
-        if r.get("action") != "reply" or not reply:
-            held.append(it)
-            continue
-        pid = new_pid(st)
-        st["props"][pid] = {"type": "comment", "parent": it["id"], "reply": reply, "created": time.time()}
-        send(f"💬 {it['author']} on \"{it['video']}\":\n{it['text']}\n\nDraft reply:\n{reply}",
-             [[btn("✅ Post reply", pid, "ca"), btn("Skip", pid, "cs")]])
-    if held:
-        ev, sources = evidence_replies(held)
-        skipped = []
-        for h in held:
-            r = ev.get(h["id"]) or {}
+        return send("No comments are waiting for a reply from you." if full else "No new comments waiting for a reply.")
+    for off in range(0, len(items), 6):
+        batch = items[off:off + 6]
+        out = gemini([{"text": COMMENTS_PROMPT + json.dumps(batch)}])
+        by = {i["id"]: i for i in batch}
+        held = []
+        for r in out.get("items", []):
+            it = by.get(r.get("id"))
+            if not it:
+                continue
+            seen.add(it["id"])
             reply = (r.get("reply") or "").replace('"', "'").strip()[:500]
             if r.get("action") != "reply" or not reply:
-                skipped.append(h)
+                held.append(it)
                 continue
             pid = new_pid(st)
-            st["props"][pid] = {"type": "comment", "parent": h["id"], "reply": reply, "created": time.time()}
-            send(f"🧐 {h['author']} on \"{h['video']}\" (looked rude or like bait, so I checked it):\n{h['text']}\n\n"
-                 f"What they claim: {r.get('claim') or 'unclear'}\nVerdict: {r.get('verdict', 'unknown')}\n"
-                 f"Evidence: {r.get('evidence') or 'none found'}\n\nDraft reply:\n{reply}",
+            st["props"][pid] = {"type": "comment", "parent": it["id"], "reply": reply, "created": time.time()}
+            send(f"💬 {it['author']} on \"{it['video']}\":\n{it['text']}\n\nDraft reply:\n{reply}",
                  [[btn("✅ Post reply", pid, "ca"), btn("Skip", pid, "cs")]])
-        if skipped:
-            send("Not worth a reply (spam, scam or no claim to check):\n" +
-                 "\n".join(f"• {h['author']}: {h['text'][:120]}" for h in skipped))
-        seen_u, links = set(), []
-        for t, u in sources:
-            if u not in seen_u:
-                seen_u.add(u)
-                links.append(f"• {t}: {u}")
-        if links and len(held) != len(skipped):
-            send("Sources I checked:\n" + "\n".join(links[:6]))
+        if held:
+            ev, sources = evidence_replies(held)
+            skipped = []
+            for h in held:
+                r = ev.get(h["id"]) or {}
+                reply = (r.get("reply") or "").replace('"', "'").strip()[:500]
+                if r.get("action") != "reply" or not reply:
+                    skipped.append(h)
+                    mem()["dismissed"] = (mem().get("dismissed", []) + [h["id"]])[-1500:]
+                    continue
+                pid = new_pid(st)
+                st["props"][pid] = {"type": "comment", "parent": h["id"], "reply": reply, "created": time.time()}
+                send(f"🧐 {h['author']} on \"{h['video']}\" (looked rude or like bait, so I checked it):\n{h['text']}\n\n"
+                     f"What they claim: {r.get('claim') or 'unclear'}\nVerdict: {r.get('verdict', 'unknown')}\n"
+                     f"Evidence: {r.get('evidence') or 'none found'}\n\nDraft reply:\n{reply}",
+                     [[btn("✅ Post reply", pid, "ca"), btn("Skip", pid, "cs")]])
+            if skipped:
+                send("Not worth a reply (spam, scam or no claim to check):\n" +
+                     "\n".join(f"• {h['author']}: {h['text'][:120]}" for h in skipped))
+            seen_u, links = set(), []
+            for t, u in sources:
+                if u not in seen_u:
+                    seen_u.add(u)
+                    links.append(f"• {t}: {u}")
+            if links and len(held) != len(skipped):
+                send("Sources I checked:\n" + "\n".join(links[:6]))
+    if total > len(items):
+        send(f"{total - len(items)} more comments have no reply yet. Send /comments again for the next batch.")
     st["seen"] = sorted(seen)[-2000:]
 
 
@@ -1199,6 +1209,8 @@ def on_prop(jid, act, st):
     if act in ("ts", "cs"):
         if kind == "title":
             remember("skips", prop["new"])
+        if kind == "comment":
+            mem()["dismissed"] = (mem().get("dismissed", []) + [prop["parent"]])[-1500:]
         st["props"].pop(jid, None)
         return send("Skipped.")
     if act == "ta" and kind == "title":
@@ -2801,7 +2813,7 @@ def run_action(action, topic, st, text=""):
     if action == "titles":
         return cmd_titles(st)
     if action == "comments":
-        return cmd_comments(st)
+        return cmd_comments(st, full=True)
     if action == "results":
         if not run_results(force=True):
             send("No video from this bot to check yet. Upload one first.")
@@ -2976,7 +2988,7 @@ def on_message(msg, st):
     elif text == "/titles":
         cmd_titles(st)
     elif text == "/comments":
-        cmd_comments(st)
+        cmd_comments(st, full=True)
     elif text == "/idea":
         cmd_idea(st)
     elif text == "/plan":
