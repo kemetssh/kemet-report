@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.13"
+BOT_VERSION = "v10.14"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2891,7 +2891,8 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "I will check it and give you choices to tap. Nothing goes on YouTube without your tap.\n\n"
         "/idea - fresh video ideas, then a fact-checked script\n"
         "/titles - better titles for your older videos (you approve each)\n"
-        "/comments - draft replies to new comments (you approve each)\n"
+        "/comments - draft replies to comments with no reply (you approve each)\n"
+        "/comments redo - bring back comments you skipped and check them again\n"
         "/subtitles - English + Arabic subtitles for your latest video\n"
         "/crosspost - captions for TikTok, Reels, Facebook\n"
         "/series - add your latest video to a playlist\n"
@@ -2988,6 +2989,10 @@ def on_message(msg, st):
     elif text == "/titles":
         cmd_titles(st)
     elif text == "/comments":
+        cmd_comments(st, full=True)
+    elif text in ("/comments redo", "/comments all"):
+        mem()["dismissed"] = []
+        send("Cleared the list of dismissed comments.")
         cmd_comments(st, full=True)
     elif text == "/idea":
         cmd_idea(st)
