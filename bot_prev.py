@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.16"
+BOT_VERSION = "v10.18"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -106,7 +106,8 @@ def load_state():
 def save_state(st):
     global _last_plain
     now = time.time()
-    st["jobs"] = {k: v for k, v in st["jobs"].items() if now - v.get("created", now) < 7 * 86400}
+    st["jobs"] = {k: v for k, v in st["jobs"].items()
+                  if now - v.get("created", now) < (7 if v.get("stage") in ("done", "cancelled", "uploaded") else 3) * 86400}
     st["props"] = {k: v for k, v in st.get("props", {}).items() if now - v.get("created", now) < 7 * 86400}
     st["seen"] = list(st.get("seen", []))[-2000:]
     st.pop("_val", None)
@@ -796,8 +797,14 @@ def start_job(msg, st, shrunk=False):
            "review": review, "created": time.time(), "stage": "title",
            "ai": bool(review.get("ai_visuals"))}
     pa = mem().get("pending_audit")
+    ss = mem().get("script_sources")
     if pa:
-        job["evidence"] = pa
+        job["evidence"] = dict(pa)
+        job["ev_on"] = True
+    if ss and time.time() - ss.get("ts", 0) < 14 * 86400 and ss.get("sources"):
+        ev = job.get("evidence") or {"claim": "Sources used for the facts in this video", "verdict": "", "sources": []}
+        ev["sources"] = merge_sources(ev.get("sources"), ss["sources"])
+        job["evidence"] = ev
         job["ev_on"] = True
     st["jobs"][jid] = job
     send(review_text(job))
@@ -814,7 +821,9 @@ def do_upload(job):
         p = Path(d) / "v.mp4"
         tg_download(job["file_id"], p)
         tok = yt_token()
-        desc = job["review"]["descriptions"][job["desc"]] + links_block(job) + evidence_block(job)
+        ev_txt = evidence_block(job)
+        desc = job["review"]["descriptions"][job["desc"]] + links_block(job)
+        desc = desc[:max(0, 4900 - len(ev_txt))] + ev_txt     # YouTube allows 5000 characters: the sources always fit
         vid, label_ok = yt_upload(p, job["title"], desc, job["review"].get("tags", []), tok,
                                   ai=job.get("ai", False))
         thumb_note = ""
@@ -1679,12 +1688,13 @@ def write_script(idea):
     text, sources = gemini_text(SCRIPT_PROMPT.format(title=idea["title"], hook=idea.get("hook", "")), search=True)
     msg = f"🎬 {idea['title']}\n\n{text}"
     if sources:
+        mem()["script_sources"] = {"title": idea["title"], "sources": dedupe_sources(sources, 10), "ts": time.time()}
         seen, lines = set(), []
-        for t, u in sources:
+        for t, u in dedupe_sources(sources, 10):
             if u not in seen:
                 seen.add(u)
                 lines.append(f"• {t}: {u}")
-        msg += "\n\nSources I checked:\n" + "\n".join(lines[:5])
+        msg += "\n\nSources I checked (they will be added to your video description):\n" + "\n".join(lines[:8])
     msg += "\n\nRecord it in your own voice, then send me the video. (AI can still be wrong: glance at the sources.)"
     send(msg)
     try:
@@ -1747,12 +1757,43 @@ def parse_obj(text):
         return {}
 
 
-def dedupe_sources(sources, n=6):
+_REDIR = {}
+
+
+def real_url(u):
+    """Gemini search returns Google redirect links. Follow once to the real page so the description shows the true source."""
+    if "grounding-api-redirect" not in u:
+        return u
+    if u in _REDIR:
+        return _REDIR[u]
+    out = u
+    try:
+        r = S.get(u, allow_redirects=False, timeout=8)
+        loc = r.headers.get("Location")
+        if loc and loc.startswith("http"):
+            out = loc
+    except Exception:
+        pass
+    _REDIR[u] = out
+    return out
+
+
+def dedupe_sources(sources, n=10):
     seen, out = set(), []
     for t, u in sources:
+        u = real_url(u) if u else u
         if u and u not in seen:
             seen.add(u)
             out.append([t or u, u])
+    return out[:n]
+
+
+def merge_sources(a, b, n=12):
+    out, seen = [], set()
+    for t, u in list(a or []) + list(b or []):
+        if u and u not in seen:
+            seen.add(u)
+            out.append([t, u])
     return out[:n]
 
 
@@ -1813,7 +1854,7 @@ def evidence_block(job):
     if ev.get("verdict"):
         lines.append(f"Verdict: {ev['verdict']}")
     lines.append("Sources:")
-    lines += [f"- {t}: {u}" for t, u in ev["sources"][:6]]
+    lines += [f"- {t}: {u}" for t, u in ev["sources"][:10]]
     return "\n\n" + "\n".join(lines)
 
 
@@ -1857,8 +1898,11 @@ def factcheck_job(job, gate=False):
     job["gate_bad"] = len(bad)
     msg = "🔎 Fact-check of your video\n\n" + "\n\n".join(lines)
     if srcs:
-        msg += "\n\nSources:\n" + "\n".join(f"• {t}: {u}" for t, u in srcs[:5])
-        job["evidence"] = {"claim": "Facts in this video were checked against these sources", "verdict": "", "sources": srcs}
+        prev = (job.get("evidence") or {}).get("sources") or []
+        allsrc = merge_sources(prev, srcs)
+        msg += "\n\nSources:\n" + "\n".join(f"• {t}: {u}" for t, u in allsrc[:10])
+        job["evidence"] = {"claim": (job.get("evidence") or {}).get("claim") or "Facts in this video were checked against these sources",
+                           "verdict": (job.get("evidence") or {}).get("verdict", ""), "sources": allsrc}
         job["ev_on"] = True
         msg += "\n\nI can add these sources to your description (switch on the confirm screen)."
     msg += ("\n\n⚠️ Fix the flagged lines before publishing. You can still upload as private."
@@ -2697,12 +2741,14 @@ def write_long(c):
         title=c["title"], angle=c.get("angle", ""), outline=" / ".join(c.get("outline", []))), search=True)
     msg = f"🎞 {c['title']}\n\n{text}"
     seen, lines = set(), []
-    for t, u in sources:
+    if sources:
+        mem()["script_sources"] = {"title": c["title"], "sources": dedupe_sources(sources, 10), "ts": time.time()}
+    for t, u in dedupe_sources(sources, 10):
         if u not in seen:
             seen.add(u)
             lines.append(f"• {t}: {u}")
     if lines:
-        msg += "\n\nSources I checked:\n" + "\n".join(lines[:6])
+        msg += "\n\nSources I checked (they will be added to your video description):\n" + "\n".join(lines[:8])
     send(msg + "\n\nRecord it in your own voice and send me the video like any other.")
 
 
@@ -2961,7 +3007,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "Or just write or speak to me normally: I work out what you want.\n"
         "/results - how your latest video is doing\n/plan - this week's plan\n"
         "/lessons - what I have learned about your channel\n"
-        "/report - daily channel report now\n/status - videos waiting for you\n/help")
+        "/report - daily channel report now\n/status - videos waiting for you (/status clear cancels them)\n/help")
 
 
 # ---------------- update the bot itself from Telegram ----------------
@@ -3109,10 +3155,21 @@ def on_message(msg, st):
         run_action("pause", "", st)
     elif text == "/resume":
         run_action("resume", "", st)
-    elif text == "/status":
+    elif text in ("/status", "/status clear"):
         open_jobs = [j for j in st["jobs"].values() if j["stage"] not in ("done", "cancelled", "uploaded")]
-        send("Waiting for your choice:\n" + "\n".join(f"• {j['name']} ({j['stage']})" for j in open_jobs)
-             if open_jobs else "Nothing waiting. Send me a video any time.")
+        if text == "/status clear":
+            for j in open_jobs:
+                j["stage"] = "cancelled"
+            send(f"🧹 Cancelled {len(open_jobs)} waiting upload(s). Your videos in Telegram are untouched. Send one again any time."
+                 if open_jobs else "Nothing was waiting.")
+        elif open_jobs:
+            def _age(j):
+                h = int((time.time() - j.get("created", time.time())) / 3600)
+                return f"{h // 24}d" if h >= 24 else f"{h}h"
+            send("Waiting for your choice:\n" + "\n".join(f"• {j['name']} ({j['stage']}, {_age(j)} ago)" for j in open_jobs)
+                 + "\n\nSend /status clear to cancel them all. Unfinished ones also expire after 3 days.")
+        else:
+            send("Nothing waiting. Send me a video any time.")
     elif raw and not raw.startswith("/"):
         route_text(raw, st)
     else:
@@ -3236,6 +3293,9 @@ def worker_ack(upto):
 def main():
     st = load_state()
     st.setdefault("props", {}); st.setdefault("seen", []); st.setdefault("n", 0)
+    for _j in st.get("jobs", {}).values():          # a run never survives between runs: a job left "checking" was interrupted
+        if _j.get("stage") == "checking":
+            _j["stage"] = "confirm"
     global ST
     ST = st
     try:
