@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.18"
+BOT_VERSION = "v10.19"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2752,6 +2752,47 @@ def write_long(c):
     send(msg + "\n\nRecord it in your own voice and send me the video like any other.")
 
 
+# ---------------- Community posts (YouTube has no free way to publish them, so the bot writes them for you to paste) ----------------
+POST_PROMPT = """Use web search to check every fact. Write 3 different YouTube Community post options for the channel "Kemet | Ancient Egypt" (calm, cinematic, evidence-first history; tiny channel that wants comments and returning viewers).
+Recent videos (do not repeat their exact topic): {recent}
+{memory}
+Make exactly these three, each on a different Ancient Egypt topic:
+1. "poll": a curious, fun question with 4 answer options, one of them correct. Add "answer": the correct option and a 1-2 sentence "reveal" with the real evidence, to post as a comment after the poll.
+2. "fact": a surprising TRUE fact in 2-3 short lines, ending with a question that invites comments. Name the source (museum, excavation, publication) in "source".
+3. "teaser": a short teaser for the next video idea, ending with a question. No fake promises or dates.
+Never invent facts or sources. No hashtag spam (max 2 hashtags), no emoji spam (max 2 emoji).
+Return JSON only: {{"posts": [{{"type": "poll", "question": "", "options": ["", "", "", ""], "answer": "", "reveal": ""}},
+ {{"type": "fact", "text": "", "source": ""}}, {{"type": "teaser", "text": ""}}]}}"""
+
+
+def cmd_post(st):
+    send("Writing 3 Community post options (checking the facts)...")
+    recent = [v.get("title", "") for v in list(mem()["videos"].values())[-6:]]
+    text, sources = gemini_text(POST_PROMPT.format(recent=json.dumps(recent), memory=learned()), search=True)
+    posts = [p for p in parse_obj(text).get("posts", []) if isinstance(p, dict)][:3]
+    if not posts:
+        return send("I could not write the posts right now (search was busy). Try again in a few minutes.")
+    send("📝 3 Community post options. Each is its own message: tap and hold it, choose Copy, then in the YouTube app go to "
+         "Create (+) → Create post (or your channel → Posts) and paste.")
+    for p in posts:
+        kind = p.get("type")
+        if kind == "poll" and p.get("question") and len(p.get("options") or []) >= 2:
+            opts = [str(o).strip() for o in p["options"][:4]]
+            send("🗳 POLL (choose Poll in the post screen, paste the question, then add each answer):\n\n" + str(p["question"]).strip() +
+                 "\n\n" + "\n".join(opts))
+            send(f"After about a day, post this as a comment under the poll (correct answer: {p.get('answer', '')}):\n\n" + str(p.get("reveal", "")).strip())
+        elif p.get("text"):
+            label = "💡 FACT POST" if kind == "fact" else "🎬 TEASER POST"
+            body = str(p["text"]).strip()
+            if kind == "fact" and p.get("source"):
+                body += "\n\nSource: " + str(p["source"]).strip()
+            send(label + " (copy the text below):\n\n" + body)
+    links = dedupe_sources(sources, 5)
+    if links:
+        send("Sources I checked:\n" + "\n".join(f"• {t}: {u}" for t, u in links))
+    send("Post one now and another in a few days. Replying to comments on your posts helps too: send /comments.")
+
+
 COLLAB_PROMPT = """The owner of the small YouTube history channel "Kemet | Ancient Egypt" wants to reach out to similar channels
 for friendly collaboration (shout-out swap, guest facts, a joint series). Write ONE short, warm, specific message for each channel below.
 No flattery, no begging, no fake claims, max 70 words, a clear small ask, written as the owner (first person).
@@ -2869,7 +2910,7 @@ Choose the action. Actions: idea (wants video ideas), script (gave a topic to wr
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
-funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), thumbtest (thumbnail options), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), lessons (what you have learned), health (is everything working),
+funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), lessons (what you have learned), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -2895,6 +2936,8 @@ def run_action(action, topic, st, text=""):
         return cmd_trends(st)
     if action == "thumbtest":
         return cmd_thumbtest(st)
+    if action == "post":
+        return cmd_post(st)
     if action == "asked":
         return cmd_asked(st)
     if action == "review":
@@ -2996,6 +3039,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/besttime - when to post, from your own data\n"
         "/trends - what is hot now in the niche (tags, topics)\n"
         "/thumbtest - 3 thumbnail options and how to test them\n"
+        "/post - 3 Community posts (poll, fact, teaser) to paste into YouTube\n"
         "/news - fresh Egypt news to turn into videos\n"
         "/audit - Kemet Audited: test a myth against evidence (or /audit your claim)\n"
         "/longform - plan long videos (they earn more)\n"
@@ -3131,6 +3175,8 @@ def on_message(msg, st):
         cmd_trends(st)
     elif text == "/thumbtest":
         cmd_thumbtest(st)
+    elif text == "/post":
+        cmd_post(st)
     elif text == "/review":
         weekly_review(st)
     elif text.startswith("/audit"):
@@ -3316,6 +3362,7 @@ def main():
             {"command": "besttime", "description": "When to post"},
             {"command": "trends", "description": "What is trending now"},
             {"command": "thumbtest", "description": "Thumbnail options and test"},
+            {"command": "post", "description": "Community posts to paste"},
             {"command": "news", "description": "Egypt news to make videos about"},
             {"command": "longform", "description": "Plan long videos"},
             {"command": "batch", "description": "4 scripts to film today"},
