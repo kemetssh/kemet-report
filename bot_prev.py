@@ -34,7 +34,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.14"
+BOT_VERSION = "v10.16"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -847,9 +847,13 @@ def do_upload(job):
     pid_c = None
     kit_note = ""
     if kit.get("pinned") and time.time() - kit.get("ts", 0) < 14 * 86400:
-        pid_c = new_pid(ST)
-        ST["props"][pid_c] = {"type": "pin", "video_id": vid, "text": kit["pinned"], "created": time.time()}
-        kit_note = "\n\n📌 Pinned comment ready: " + kit["pinned"]
+        if status == "public":
+            pid_c = new_pid(ST)
+            ST["props"][pid_c] = {"type": "pin", "video_id": vid, "text": kit["pinned"], "created": time.time()}
+            kit_note = "\n\n📌 Pinned comment ready: " + kit["pinned"]
+        else:
+            kit_note = ("\n\n📌 Pinned comment for later: " + kit["pinned"] +
+                        "\n(YouTube only accepts comments on a public video. When it goes public I will offer a button to post it.)")
     send(f"✅ Uploaded. {thumb_note}{label_note}Status: {status.upper()}\nhttps://youtu.be/{vid}{kit_note}\n\n{NOTICE}",
          ([[btn("📌 Post my comment (then pin it)", pid_c, "pc")]] if pid_c else []) +
          [[btn("Try to make it public", job["id"], "p")],
@@ -924,7 +928,9 @@ Videos: """
 COMMENTS_PROMPT = """You reply to YouTube comments for the history channel "Kemet | Ancient Egypt".
 Voice: warm, calm, short (1-2 sentences), no emoji spam, never argue, never promise anything,
 only state facts you are sure of. For each comment decide: "reply" (praise, question, interest)
-or "hold" (rude, hateful, spam, scam links, bait; these get a separate evidence check). Return JSON only:
+or "hold" (rude, hateful, spam, scam links, bait; these get a separate evidence check).
+Some comments carry a "thread": an exchange where the channel already replied and the viewer wrote back. Then answer the viewer's LATEST message:
+never repeat what was already said, keep it to 1-2 sentences, and if they insist on something unsupported, say once, calmly, that the evidence does not support it and stop. Return JSON only:
 {"items": [{"id": "...", "action": "reply" or "hold", "reply": "text, empty if hold"}]}
 Comments: """
 
@@ -1082,6 +1088,7 @@ def cmd_funnel(st):
 
 
 EVIDENCE_PROMPT = """You help the owner of the history channel "Kemet | Ancient Egypt" answer comments that look rude, silly, spam or bait.
+Some comments carry a "thread" (earlier messages): answer the viewer's latest message without repeating the channel's earlier reply, and never argue back and forth.
 For each comment, work out what the person is joking about, claiming or trying to prove. Even a joke or a rude comment often hides a claim
 (for example "aliens built the pyramids", "the curse killed them", "it is all fake"). Use web search to check that claim against evidence
 (archaeology, museum or university sources, peer-reviewed work).
@@ -1099,13 +1106,32 @@ def evidence_replies(held):
     """One grounded call for all held-back comments. Returns ({id: result}, sources). Never raises."""
     try:
         text, sources = gemini_text(EVIDENCE_PROMPT.format(items=json.dumps(
-            [{"id": h["id"], "video": h["video"], "text": h["text"]} for h in held])), search=True)
+            [{"id": h["id"], "video": h["video"], "text": h["text"], "thread": h.get("thread", "")} for h in held])), search=True)
         a, b = text.find("{"), text.rfind("}")
         data = json.loads(text[a:b + 1])
         return {r["id"]: r for r in data.get("items", []) if r.get("id")}, sources
     except Exception as e:
         print("evidence replies failed:", clean(e)[:120])
         return {}, []
+
+
+def follow_up(tok, cid, chid):
+    """A thread where the channel replied once and the viewer wrote back last. Returns None otherwise."""
+    try:
+        rs = yt_get("comments", tok, part="snippet", parentId=cid, maxResults=20, textFormat="plainText")["items"]
+    except Exception:
+        return None
+    if not rs:
+        return None
+    who = lambda r: r["snippet"].get("authorChannelId", {}).get("value")
+    mine = sum(1 for r in rs if who(r) == chid)
+    last = rs[-1]
+    if mine == 0 or mine >= 2 or who(last) == chid:
+        return None          # we never replied, we already answered twice (no arguing), or we spoke last
+    thread = "\n".join(("Kemet" if who(r) == chid else r["snippet"].get("authorDisplayName", "Viewer")) + ": " +
+                       r["snippet"].get("textOriginal", "")[:300] for r in rs[-4:])
+    return {"key": last["id"], "thread": thread, "text": last["snippet"].get("textOriginal", "")[:500],
+            "author": last["snippet"].get("authorDisplayName", "")}
 
 
 def cmd_comments(st, full=False):
@@ -1127,7 +1153,17 @@ def cmd_comments(st, full=False):
             top = t["snippet"]["topLevelComment"]
             cid = top["id"]
             author_id = top["snippet"].get("authorChannelId", {}).get("value")
-            if cid in skip_ids or t["snippet"].get("totalReplyCount", 0) > 0 or author_id == chid:
+            if author_id == chid:
+                continue
+            if t["snippet"].get("totalReplyCount", 0) > 0:
+                if not full or cid in pending:
+                    continue
+                fu = follow_up(tok, cid, chid)
+                if fu and fu["key"] not in skip_ids:
+                    items.append({"id": cid, "key": fu["key"], "video": v["snippet"]["title"], "author": fu["author"],
+                                  "text": fu["text"], "thread": fu["thread"]})
+                continue
+            if cid in skip_ids:
                 continue
             items.append({"id": cid, "video": v["snippet"]["title"],
                           "author": top["snippet"].get("authorDisplayName", ""),
@@ -1152,8 +1188,9 @@ def cmd_comments(st, full=False):
                 held.append(it)
                 continue
             pid = new_pid(st)
-            st["props"][pid] = {"type": "comment", "parent": it["id"], "reply": reply, "created": time.time()}
-            send(f"💬 {it['author']} on \"{it['video']}\":\n{it['text']}\n\nDraft reply:\n{reply}",
+            st["props"][pid] = {"type": "comment", "parent": it["id"], "key": it.get("key", it["id"]), "reply": reply, "created": time.time()}
+            tag = "↩️ follow-up from" if it.get("thread") else "💬"
+            send(f"{tag} {it['author']} on \"{it['video']}\":\n{it['text']}\n\nDraft reply:\n{reply}",
                  [[btn("✅ Post reply", pid, "ca"), btn("Skip", pid, "cs")]])
         if held:
             ev, sources = evidence_replies(held)
@@ -1163,10 +1200,10 @@ def cmd_comments(st, full=False):
                 reply = (r.get("reply") or "").replace('"', "'").strip()[:500]
                 if r.get("action") != "reply" or not reply:
                     skipped.append(h)
-                    mem()["dismissed"] = (mem().get("dismissed", []) + [h["id"]])[-1500:]
+                    mem()["dismissed"] = (mem().get("dismissed", []) + [h.get("key", h["id"])])[-1500:]
                     continue
                 pid = new_pid(st)
-                st["props"][pid] = {"type": "comment", "parent": h["id"], "reply": reply, "created": time.time()}
+                st["props"][pid] = {"type": "comment", "parent": h["id"], "key": h.get("key", h["id"]), "reply": reply, "created": time.time()}
                 send(f"🧐 {h['author']} on \"{h['video']}\" (looked rude or like bait, so I checked it):\n{h['text']}\n\n"
                      f"What they claim: {r.get('claim') or 'unclear'}\nVerdict: {r.get('verdict', 'unknown')}\n"
                      f"Evidence: {r.get('evidence') or 'none found'}\n\nDraft reply:\n{reply}",
@@ -1210,7 +1247,7 @@ def on_prop(jid, act, st):
         if kind == "title":
             remember("skips", prop["new"])
         if kind == "comment":
-            mem()["dismissed"] = (mem().get("dismissed", []) + [prop["parent"]])[-1500:]
+            mem()["dismissed"] = (mem().get("dismissed", []) + [prop.get("key", prop["parent"])])[-1500:]
         st["props"].pop(jid, None)
         return send("Skipped.")
     if act == "ta" and kind == "title":
@@ -1233,6 +1270,7 @@ def on_prop(jid, act, st):
         return send(f"↩️ Back to the old title:\n{prop['old']}")
     if act == "ca" and kind == "comment":
         post_reply(prop["parent"], prop["reply"])
+        mem()["dismissed"] = (mem().get("dismissed", []) + [prop.get("key", prop["parent"])])[-1500:]
         st["props"].pop(jid, None)
         return send("✅ Reply posted.")
     if act == "ek" and kind == "exp":
@@ -1795,7 +1833,12 @@ def factcheck_job(job, gate=False):
         return []
     send("🔎 Checking the claims, title and description against sources before upload (about a minute)..."
          if gate else "🔎 Checking every claim in your video against sources (about a minute)...")
-    text, sources = gemini_text(FACT_PROMPT.format(claims=json.dumps(claims[:9])), search=True)
+    try:
+        text, sources = gemini_text(FACT_PROMPT.format(claims=json.dumps(claims[:9])), search=True)
+    except Exception as e:
+        print("factcheck failed:", clean(e)[:120])
+        send("Google's AI is overloaded right now (error 503), so the fact-check could not run. Nothing was uploaded.")
+        return None
     res = [r for r in parse_obj(text).get("results", []) if r.get("claim")]
     if not res:
         send("I could not complete the fact-check. Try again in a minute.")
@@ -3139,9 +3182,8 @@ def on_callback(cb, st):
         bad = factcheck_job(job, gate=True)
         job["stage"] = "confirm"
         if bad is None:
-            return send("I could not check the facts just now. Tap again to retry, or upload anyway "
-                        "(it is private, so nothing is public).",
-                        [[btn("⬆️ Upload private anyway", jid, "ug")], [btn("Cancel", jid, "x")]])
+            return send("Choose: check again in a minute, or upload anyway (it is private, so nothing is public).",
+                        [[btn("🔁 Check again", jid, "u")], [btn("⬆️ Upload private anyway", jid, "ug")], [btn("Cancel", jid, "x")]])
         if bad:
             return      # factcheck_job showed the flagged lines with its own buttons
         return do_upload(job)
