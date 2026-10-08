@@ -6,6 +6,7 @@ pick thumbnail -> upload (private) -> optional "try to make public".
 Nothing is uploaded or published without a tap from you.
 """
 import base64
+import hashlib
 import json
 import os
 import re
@@ -34,7 +35,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.19"
+BOT_VERSION = "v10.21"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2093,7 +2094,9 @@ Lessons already known: {known}
 Return JSON only:
 {{"summary": "3 short sentences: what happened this week, honestly",
  "lessons": ["2 or 3 NEW short rules for future videos, each tied to something in the data above; no repeats of known lessons"],
- "next": "one concrete thing to do this week"}}"""
+ "next": "one concrete thing to do this week",
+ "ideas": [{{"title": "under 70 characters, curious and true", "hook": "first spoken sentence", "why": "which lesson or data point it uses"}}]}}
+Give EXACTLY 3 ideas to try next, each testing one of the lessons or a hint from the data. Never copy an existing title."""
 
 
 def weekly_review(st):
@@ -2126,6 +2129,7 @@ def weekly_review(st):
          + "\n".join("• " + l for l in lessons)
          + ("\n\nThis week: " + str(out["next"]) if out.get("next") else "")
          + "\n\nSmall numbers mean these are hints, not proof. /lessons shows everything I know.")
+    idea_taps(st, out.get("ideas", []), "💡 3 ideas to try this week:")
 
 
 TZ_OFFSET = {"EG": 3, "SA": 3, "AE": 4, "KW": 3, "QA": 3, "IQ": 3, "JO": 3, "MA": 1, "DZ": 1, "TN": 1, "LY": 2, "SD": 2,
@@ -2232,6 +2236,34 @@ def do_plan(st):
     send(body + "\n\nType /idea if you want fresh options.")
 
 
+def daily_idea_taps(st):
+    """The morning report (report.py) writes its 3 ideas to daily.json. Offer 3 taps for them, once per new set of ideas."""
+    data = None
+    repo, tok = os.getenv("GITHUB_REPOSITORY"), os.getenv("GITHUB_TOKEN")
+    if repo and tok:
+        try:
+            r = S.get(f"{GH_API}/repos/{repo}/contents/daily.json", params={"ref": os.getenv("GITHUB_REF_NAME", "main")},
+                      headers={"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github.raw+json"}, timeout=30)
+            if r.status_code == 200:
+                data = json.loads(r.text)
+        except Exception as e:
+            print("daily.json:", clean(e)[:100])
+    if data is None and (ROOT / "daily.json").exists():
+        try:
+            data = json.loads((ROOT / "daily.json").read_text(encoding="utf-8"))
+        except Exception:
+            data = None
+    ideas = [{"title": d.get("topic", ""), "hook": d.get("hook", ""), "why": d.get("why", "")}
+             for d in (data or {}).get("ideas", []) if isinstance(d, dict) and d.get("topic")][:3]
+    if not ideas:
+        return
+    key = hashlib.md5(json.dumps(ideas, sort_keys=True).encode()).hexdigest()[:12]
+    if mem().get("daily_ideas_key") == key:
+        return
+    mem()["daily_ideas_key"] = key
+    idea_taps(st, ideas, "💡 From your daily report. Tap an idea to start working on it:", compact=True)
+
+
 def housekeeping(st):
     if st.get("paused"):
         return
@@ -2245,6 +2277,10 @@ def housekeeping(st):
                 step()
             except Exception as e:
                 print("housekeeping:", clean(e))
+    try:
+        daily_idea_taps(st)
+    except Exception as e:
+        print("daily ideas:", clean(e)[:120])
     g = time.gmtime()
     week = time.strftime("%G-%V", g)
     if os.getenv("SKIP_WEEKLY"):
@@ -2381,6 +2417,32 @@ def trend_pack(force=False):
     return tr
 
 
+def idea_taps(st, ideas, heading, compact=False):
+    """Send exactly 3 ideas with one tap each; a tap writes the fact-checked script for that idea."""
+    ideas = [i for i in ideas if isinstance(i, dict) and i.get("title")][:3]
+    if not ideas:
+        return False
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "ideas", "ideas": [{"title": str(i["title"])[:100], "hook": str(i.get("hook", ""))} for i in ideas],
+                        "created": time.time()}
+    if compact:
+        body = heading + "\n\n" + "\n".join(f"{n + 1}. {i['title']}" for n, i in enumerate(ideas))
+    else:
+        body = heading + "\n\n" + "\n\n".join(
+            f"{n + 1}. {i['title']}\nOpening: {i.get('hook', '')}\nWhy: {i.get('why', '')}" for n, i in enumerate(ideas))
+    send(body[:3900] + "\n\nTap one and I start working on it: a fact-checked script you record in your own voice.",
+         [[btn(f"🎬 Start idea {n + 1}", pid, "is", n)] for n in range(len(ideas))])
+    return True
+
+
+TREND_IDEAS_PROMPT = """You advise the owner of the YouTube channel "Kemet | Ancient Egypt": short, calm, cinematic, evidence-first videos; he records his own voice and never fakes facts.
+{memory}
+What is trending now in the niche: {buzz}
+Top recent videos in the niche: {top}
+Give EXACTLY 3 video ideas that ride this trend honestly (no fake claims, no copying a title above), each different.
+Return JSON only: {{"ideas": [{{"title": "under 70 characters, curious and true", "hook": "first spoken sentence", "why": "one sentence: which trend it rides"}}]}}"""
+
+
 def cmd_trends(st):
     send("Checking what is hot right now (YouTube + the web)...")
     tr = trend_pack(force=True)
@@ -2393,8 +2455,15 @@ def cmd_trends(st):
         lines += ["Top videos this month (by views):"] + ["• " + t for t in tr["top"]] + [""]
     if tr.get("tags"):
         lines += ["Tags the winners use:", " ".join("#" + t.replace(" ", "") for t in tr["tags"][:12]), ""]
-    lines.append("I use this automatically for your hashtags, packaging and cross-post kit. Cached for a day. Want a video from a trend? Send /news.")
+    lines.append("I use this automatically for your hashtags, packaging and cross-post kit. Cached for a day.")
     send("\n".join(lines))
+    try:
+        out = gemini([{"text": TREND_IDEAS_PROMPT.format(memory=learned(), buzz=tr.get("buzz", "")[:600], top=json.dumps(tr.get("top", [])))}])
+        if not idea_taps(st, out.get("ideas", []), "💡 3 ideas that ride this trend:"):
+            send("I could not turn the trends into ideas right now. Send /idea or /news instead.")
+    except Exception as e:
+        print("trend ideas:", clean(e)[:120])
+        send("I could not turn the trends into ideas right now. Send /idea or /news instead.")
 
 
 CROSSPOST_PROMPT = """Write post captions to republish a short video about Ancient Egypt on other platforms.
