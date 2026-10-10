@@ -35,7 +35,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.21"
+BOT_VERSION = "v10.23"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1298,8 +1298,26 @@ def on_prop(jid, act, st):
         return upload_captions(prop, jid, st)
     if act == "pg" and kind == "plgen":
         return cmd_series(st, prop["video_id"])
+    if act == "pg" and kind == "plmore":
+        st["props"].pop(jid, None)
+        return cmd_series(st, more=True)
     if act == "xg" and kind == "xgen":
         return cmd_crosspost(st, prop["video_id"])
+    if act == "fs" and kind == "fbpages":
+        page = prop["pages"][int(st.get("_val", "0"))]
+        st["props"].pop(jid, None)
+        return fb_save(page)
+    if act == "fp" and kind == "fbpost":
+        rec = mem()["videos"].get(prop["video_id"]) or {}
+        send("Posting your video to your Facebook Page (about a minute)...")
+        try:
+            pid_ = fb_post_video(prop["caption"], rec["file_id"])
+        except Exception as e:
+            return send("Facebook did not post it: " + clean(e)[:220] + "\nIf it says the key expired or is invalid, send /fbsetup to reconnect. "
+                        "You can still copy the caption and post by hand.")
+        st["props"].pop(jid, None)
+        cfg = fb_cfg()
+        return send("✅ Posted to your Facebook Page " + cfg.get("page_name", "") + ".\nhttps://www.facebook.com/" + str(pid_ or cfg.get("page_id", "")))
     if act == "ls" and kind == "longs":
         return write_long(prop["concepts"][int(st.get("_val", "0"))])
     if act == "ad" and kind == "claims":
@@ -2466,6 +2484,104 @@ def cmd_trends(st):
         send("I could not turn the trends into ideas right now. Send /idea or /news instead.")
 
 
+# ---------------- Facebook Page (free Meta Graph API, own Page, development mode) ----------------
+FB = os.getenv("FB_BASE", "https://graph.facebook.com")
+FB_VER = "v23.0"
+
+FB_SETUP_HELP = (
+    "📘 Link your Facebook Page (one time, about 15 minutes, on your iPhone, free)\n\n"
+    "What it gives you: under every Facebook caption in the cross-post kit, a button posts your video to your Page. "
+    "Nothing posts without your tap. It works for a Facebook PAGE, not a personal profile (create the Page first if needed: "
+    "Facebook app → menu → Pages → Create).\n\n"
+    "1. Safari → developers.facebook.com → Log in with the Facebook account that manages the Kemet Page → Get Started and follow the steps "
+    "(Meta may ask to verify your phone number).\n"
+    "2. My Apps → Create App. Name: Kemet Bot. Choose the use case Other (or Manage everything on your Page) and type Business. "
+    "Leave the app in Development mode: that is enough for your own Page.\n"
+    "3. App settings → Basic. Copy the App ID. Tap Show next to App Secret and copy it too.\n"
+    "4. Open developers.facebook.com/tools/explorer → pick your app → in Permissions add: pages_show_list, pages_read_engagement, "
+    "pages_manage_posts, publish_video → Generate Access Token → Continue as you → select your Kemet Page → Done. Copy the Access Token.\n"
+    "5. Send me ONE message (I delete it at once):\n"
+    "/fbconnect APP_ID APP_SECRET ACCESS_TOKEN\n\n"
+    "I swap it for a long-lasting Page key, keep it encrypted in my notes, and confirm the Page name. /fboff removes it. "
+    "If Meta's screens look different or a step fails, send me a screenshot and I will adapt the steps."
+)
+
+
+def fb_cfg():
+    return mem().get("fb") or {}
+
+
+def fb_call(method, path, **kw):
+    r = S.request(method, f"{FB}/{FB_VER}/{path.lstrip('/')}", timeout=kw.pop("timeout", 60), **kw)
+    try:
+        j = r.json()
+    except Exception:
+        j = {}
+    if not r.ok or (isinstance(j, dict) and j.get("error")):
+        e = (j.get("error") if isinstance(j, dict) else None) or {}
+        raise RuntimeError(f"Facebook said: {e.get('message') or 'HTTP ' + str(r.status_code)} (code {e.get('code', r.status_code)})")
+    return j
+
+
+def cmd_fbsetup(st):
+    send(FB_SETUP_HELP)
+
+
+def cmd_fbconnect(msg, st, raw):
+    parts = raw.split()
+    forget_message(msg)
+    if len(parts) < 4:
+        return send("I need three things in one message: /fbconnect APP_ID APP_SECRET ACCESS_TOKEN. I deleted what you sent. "
+                    "Send /fbsetup for the steps.")
+    app_id, secret, token = parts[1], parts[2], parts[3]
+    if not app_id.isdigit() or not re.fullmatch(r"[0-9a-fA-F]{32}", secret) or len(token) < 30:
+        return send("Something looks wrong (App ID is only numbers, App Secret is 32 letters and numbers, the token is a long text). "
+                    "I deleted your message. Send it again, or /fbsetup for the steps.")
+    send("Connecting to Facebook...")
+    try:
+        lt = fb_call("GET", "oauth/access_token", params={"grant_type": "fb_exchange_token", "client_id": app_id,
+                                                          "client_secret": secret, "fb_exchange_token": token})["access_token"]
+        pages = fb_call("GET", "me/accounts", params={"access_token": lt, "fields": "id,name,access_token", "limit": 25}).get("data", [])
+    except Exception as e:
+        return send("Facebook did not accept that. " + clean(e)[:200] + "\nThe token lasts only about an hour: generate a fresh one in the "
+                    "Graph API Explorer and send /fbconnect again.")
+    pages = [p for p in pages if p.get("access_token") and p.get("id")]
+    if not pages:
+        return send("The login worked, but I see no Facebook Page you manage. In step 4, when Facebook asks which Pages to allow, tick your "
+                    "Kemet Page. (A personal profile cannot be used: create a Page first.) Then generate a new token and send /fbconnect again.")
+    if len(pages) == 1:
+        return fb_save(pages[0])
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "fbpages", "pages": [{"id": p["id"], "name": p.get("name", ""), "access_token": p["access_token"]} for p in pages[:8]],
+                        "created": time.time()}
+    send("Which Page should I post to?", [[btn(p.get("name", p["id"])[:40], pid, "fs", n)] for n, p in enumerate(pages[:8])])
+
+
+def fb_save(page):
+    mem()["fb"] = {"page_id": page["id"], "page_name": page.get("name", ""), "token": page["access_token"], "ts": time.time()}
+    send(f"✅ Connected to your Facebook Page: {page.get('name', page['id'])}. Your message with the keys is deleted and the Page key is kept encrypted.\n"
+         "Try it: send /crosspost. Under each Facebook caption you will see a button to post your video to the Page.")
+
+
+def fb_post_video(caption, file_id):
+    cfg = fb_cfg()
+    if not cfg:
+        raise RuntimeError("Facebook is not connected. Send /fbsetup.")
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "v.mp4"
+        tg_download(file_id, p)
+        with open(p, "rb") as f:
+            j = fb_call("POST", f"{cfg['page_id']}/videos", data={"description": caption[:2000], "access_token": cfg["token"]},
+                        files={"source": ("video.mp4", f, "video/mp4")}, timeout=600)
+    return j.get("id") or j.get("post_id") or ""
+
+
+def cmd_fboff(st):
+    mem().pop("fb", None)
+    send("Facebook is disconnected and the key is deleted from my notes. To remove the app's access fully, open Facebook → Settings → "
+         "Business integrations and remove Kemet Bot.")
+
+
 CROSSPOST_PROMPT = """Write post captions to republish a short video about Ancient Egypt on other platforms.
 Video title: {title}. What it is about: {summary}
 What is trending right now (use these hashtags and angles where they truly fit the video; never force an unrelated trend):
@@ -2498,8 +2614,15 @@ def cmd_crosspost(st, video_id=None):
         send(f"━━ {name}: {len(opts)} options ━━")
         for c in opts:
             tags = " ".join("#" + t.lstrip("#") for t in c.get("hashtags", []))
-            send((str(c["caption"]).strip() + ("\n\n" + tags if tags else "")).strip())
-    send("The video is below. Save it from Telegram and post it yourself on each app.")
+            body = (str(c["caption"]).strip() + ("\n\n" + tags if tags else "")).strip()
+            if key == "facebook" and fb_cfg():
+                pid = new_pid(st)
+                st["props"][pid] = {"type": "fbpost", "video_id": vid, "caption": body, "created": time.time()}
+                send(body, [[btn("📘 Post this to my Facebook Page", pid, "fp")]])
+            else:
+                send(body)
+    send("The video is below. Save it from Telegram and post it yourself on each app."
+         + ("" if fb_cfg() else "\n(Want a one-tap Facebook button? /fbsetup)"))
     try:
         tg("sendVideo", chat_id=CHAT, video=rec["file_id"], caption="Your video, ready to post")
     except Exception as e:
@@ -2515,27 +2638,77 @@ Pick the best playlist for it. If none fits but one of the series names clearly 
 Return JSON only: {{"playlist_id": "existing id or empty", "new_playlist_title": "only if creating, else empty", "reason": "one short line"}}"""
 
 
-def cmd_series(st, video_id=None):
-    vids = mem()["videos"]
-    if not vids:
-        return send("Upload a video through me first, then I can place it in a playlist.")
-    vid = video_id if video_id in vids else max(vids.items(), key=lambda kv: kv[1]["uploaded"])[0]
-    rec = vids[vid]
-    tok = yt_token()
-    pls = yt_get("playlists", tok, part="snippet", mine="true", maxResults=25).get("items", [])
+def playlist_scan(tok):
+    """All playlists, which videos each holds, and all channel videos (newest first)."""
+    pls = yt_get("playlists", tok, part="snippet", mine="true", maxResults=50).get("items", [])
     names = {p["id"]: p["snippet"]["title"] for p in pls}
+    placed = set()
+    for pid_ in names:
+        page = None
+        for _ in range(4):
+            kw = {"pageToken": page} if page else {}
+            try:
+                d = yt_get("playlistItems", tok, part="contentDetails", playlistId=pid_, maxResults=50, **kw)
+            except Exception:
+                break
+            placed |= {i["contentDetails"]["videoId"] for i in d.get("items", [])}
+            page = d.get("nextPageToken")
+            if not page:
+                break
+    vids, _ = my_videos(tok, 50)
+    vids = sorted(vids, key=lambda v: v["snippet"].get("publishedAt", ""), reverse=True)
+    return names, placed, vids
+
+
+def series_propose(st, names, v):
+    sn = v["snippet"]
     out = gemini([{"text": SERIES_PROMPT.format(
-        series=SERIES_HINT, playlists=json.dumps(names), title=rec["title"], summary=rec.get("summary", ""))}])
+        series=SERIES_HINT, playlists=json.dumps(names), title=sn.get("title", ""),
+        summary=(sn.get("description") or "")[:600])}])
     pl_id = out.get("playlist_id") if out.get("playlist_id") in names else ""
     new_title = "" if pl_id else (out.get("new_playlist_title") or "").strip()[:100]
     if not pl_id and not new_title:
-        return send("None of your playlists fits this video, and I would not force it. Skipped.")
+        return False
     pid = new_pid(st)
-    st["props"][pid] = {"type": "pl", "video_id": vid, "playlist_id": pl_id, "new_title": new_title,
+    st["props"][pid] = {"type": "pl", "video_id": v["id"], "playlist_id": pl_id, "new_title": new_title,
                         "created": time.time()}
     target = f"the playlist \"{names[pl_id]}\"" if pl_id else f"a NEW playlist \"{new_title}\""
-    send(f"📚 Add \"{rec['title']}\" to {target}?\nWhy: {out.get('reason', '')}",
+    send(f"📚 Add \"{sn.get('title', '')}\" to {target}?\nWhy: {out.get('reason', '')}",
          [[btn("✅ Yes", pid, "pa"), btn("Skip", pid, "cs")]])
+    return True
+
+
+def cmd_series(st, video_id=None, more=False):
+    tok = yt_token()
+    names, placed, vids = playlist_scan(tok)
+    if video_id:                                   # the button after an upload: that exact video
+        v = next((x for x in vids if x["id"] == video_id), None)
+        if v is None:
+            rec = mem()["videos"].get(video_id)
+            if not rec:
+                return send("I could not find that video.")
+            v = {"id": video_id, "snippet": {"title": rec["title"], "description": rec.get("summary", "")}}
+        if not series_propose(st, names, v):
+            send("None of your playlists fits this video, and I would not force it. Skipped.")
+        return
+    pending = {p.get("video_id") for p in st["props"].values() if p.get("type") == "pl"}
+    unplaced = [v for v in vids if v["id"] not in placed]
+    free = [v for v in unplaced if v["id"] not in pending]
+    send(f"Checked {len(names)} playlists and {len(vids)} videos: {len(vids) - len(unplaced)} "
+         f"already sit in a playlist, {len(unplaced)} do not.")
+    if not free:
+        return send("Every video is already in a playlist (or waiting for your tap). Nothing to add. 👍")
+    todo = free[:6] if more else free[:1]
+    made = 0
+    for v in todo:
+        made += 1 if series_propose(st, names, v) else 0
+    if not made:
+        send("None of the playlists fits the video(s) I checked, and I would not force it.")
+    if not more and len(free) > 1:
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "plmore", "created": time.time()}
+        send(f"{len(free) - 1} older video(s) are also in no playlist. Check them too?",
+             [[btn("Check the older ones", pid, "pg"), btn("No", pid, "cs")]])
 
 
 def apply_playlist(prop, jid, st):
@@ -2969,6 +3142,8 @@ def cmd_health(st):
     m = mem()
     lines.append(f"Videos tracked: {len(m['videos'])} | Lessons learned: {len(m['lessons'])}")
     lines.append("Autopilot: " + ("PAUSED (/resume to restart)" if st.get("paused") else "on"))
+    if fb_cfg():
+        lines.append("Facebook Page: connected (" + fb_cfg().get("page_name", "") + ")")
     lines.append("If a line shows ✗, copy it to me and I will fix it.")
     send("\n".join(lines))
 
@@ -3109,6 +3284,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/trends - what is hot now in the niche (tags, topics)\n"
         "/thumbtest - 3 thumbnail options and how to test them\n"
         "/post - 3 Community posts (poll, fact, teaser) to paste into YouTube\n"
+        "/fbsetup - link your Facebook Page (then /crosspost gets a post button)\n"
         "/news - fresh Egypt news to turn into videos\n"
         "/audit - Kemet Audited: test a myth against evidence (or /audit your claim)\n"
         "/longform - plan long videos (they earn more)\n"
@@ -3246,6 +3422,12 @@ def on_message(msg, st):
         cmd_thumbtest(st)
     elif text == "/post":
         cmd_post(st)
+    elif text == "/fbsetup":
+        cmd_fbsetup(st)
+    elif text.startswith("/fbconnect"):
+        cmd_fbconnect(msg, st, raw)
+    elif text == "/fboff":
+        cmd_fboff(st)
     elif text == "/review":
         weekly_review(st)
     elif text.startswith("/audit"):
@@ -3305,7 +3487,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -3419,7 +3601,7 @@ def main():
             {"command": "titles", "description": "Better titles for old videos"},
             {"command": "subtitles", "description": "English + Arabic subtitles"},
             {"command": "crosspost", "description": "TikTok / Reels / Facebook kit"},
-            {"command": "series", "description": "Add latest video to a playlist"},
+            {"command": "series", "description": "Check playlists, add latest video"},
             {"command": "progress", "description": "Progress toward earning"},
             {"command": "retention", "description": "Where viewers leave your video"},
             {"command": "audit", "description": "Kemet Audited: check a claim vs evidence"},
@@ -3432,6 +3614,7 @@ def main():
             {"command": "trends", "description": "What is trending now"},
             {"command": "thumbtest", "description": "Thumbnail options and test"},
             {"command": "post", "description": "Community posts to paste"},
+            {"command": "fbsetup", "description": "Link your Facebook Page"},
             {"command": "news", "description": "Egypt news to make videos about"},
             {"command": "longform", "description": "Plan long videos"},
             {"command": "batch", "description": "4 scripts to film today"},
