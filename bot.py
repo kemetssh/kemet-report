@@ -35,7 +35,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.23"
+BOT_VERSION = "v10.25"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -138,6 +138,14 @@ def remember(kind, item):
     m[kind] = m[kind][-30:]
 
 
+HOUSE_STYLE = """The owner's standing style rules (always follow them):
+- Whenever you suggest titles or ideas, include at least one "X or Y" title (a clear either/or choice, e.g. "Slaves or Paid Workers? The Evidence"). Prefer it over "Fact Check:" headers.
+- Frame scripts as an investigation into ONE specific mystery, not a general summary.
+- Every script opens with a concrete visual, archaeological hook (a site, relief, object or discovery), then the evidence.
+- Use a currently trending Egypt topic (a dig, museum news) only when you can verify it; never present an unverified trend as fact.
+- Every factual claim, including diet, dates and numbers, must be checked against evidence; if unsure, say so."""
+
+
 def learned():
     m = mem()
     parts = []
@@ -156,7 +164,7 @@ def learned():
             parts.append("Hashtags/tags used right now by the best-performing recent Ancient Egypt videos: " + ", ".join(tr["tags"][:15]))
         if tr.get("buzz"):
             parts.append("What is trending in the Ancient Egypt niche now (checked " + time.strftime("%d %b", time.gmtime(tr["ts"])) + "): " + tr["buzz"][:600])
-    return "\n".join(parts) or "No history yet."
+    return HOUSE_STYLE + "\n" + ("\n".join(parts) or "No history yet.")
 
 
 # ---------------- telegram ----------------
@@ -546,6 +554,7 @@ def ask_confirm(job):
          + (f"Links block: {'ON' if job.get('links_on', True) else 'OFF'} ({len(mem()['links'])} links)\n"
             if mem()["links"] else "")
          + (f"Sources block: {'ON' if job.get('ev_on', True) else 'OFF'}\n" if job.get("evidence") else "") +
+         ("\n⚠️ Worth a look: " + "; ".join(guard_check(job)) + "\n" if guard_check(job) else "") +
          "\nIt stays private until you publish it.",
          [[btn("⬆️ Upload as private", jid, "u")],
           [btn(f"AI label: {ai} (tap to switch)", jid, "l")]]
@@ -939,6 +948,7 @@ COMMENTS_PROMPT = """You reply to YouTube comments for the history channel "Keme
 Voice: warm, calm, short (1-2 sentences), no emoji spam, never argue, never promise anything,
 only state facts you are sure of. For each comment decide: "reply" (praise, question, interest)
 or "hold" (rude, hateful, spam, scam links, bait; these get a separate evidence check).
+For a first-time viewer's praise or question, you may occasionally (not in every reply) end with a gentle welcome such as "Welcome aboard, more Egypt stories are coming.", never pushy.
 Some comments carry a "thread": an exchange where the channel already replied and the viewer wrote back. Then answer the viewer's LATEST message:
 never repeat what was already said, keep it to 1-2 sentences, and if they insist on something unsupported, say once, calmly, that the evidence does not support it and stop. Return JSON only:
 {"items": [{"id": "...", "action": "reply" or "hold", "reply": "text, empty if hold"}]}
@@ -1346,6 +1356,26 @@ def on_prop(jid, act, st):
         st["props"].pop(jid, None)
         return send("✅ Comment posted. To pin it: open the video in the YouTube app, press and hold your comment, tap Pin. "
                     "(YouTube does not let me pin by code.)")
+    if act == "sl" and kind == "subl":
+        set_description_append(prop["video_id"], SUBLINES[prop["variant"]])
+        mem().setdefault("sublines", []).append({"vid": prop["video_id"], "variant": prop["variant"], "ts": time.time()})
+        st["props"].pop(jid, None)
+        return send("✅ Subscribe line added at the top of the description. I will compare the wordings after a few days of views.")
+    if act == "rd" and kind == "dref":
+        set_description_append(prop["video_id"], prop["lines"])
+        st["props"].pop(jid, None)
+        return send("✅ New opening lines added to the description.")
+    if act == "bl" and kind == "bestlink":
+        line = f"New here? Start with: {prop['title']} https://youtu.be/{prop['best']}"
+        done = 0
+        for t in prop["targets"]:
+            try:
+                set_description_append(t, line)
+                done += 1
+            except Exception:
+                pass
+        st["props"].pop(jid, None)
+        return send(f"✅ Added a pointer to your best video in {done} description(s).")
     if act == "fd" and kind == "funnel":
         set_description_append(prop["video_id"], prop["desc_line"])
         return send("✅ Link added to the description of your Short.",
@@ -2147,6 +2177,11 @@ def weekly_review(st):
          + "\n".join("• " + l for l in lessons)
          + ("\n\nThis week: " + str(out["next"]) if out.get("next") else "")
          + "\n\nSmall numbers mean these are hints, not proof. /lessons shows everything I know.")
+    if mem().get("goal"):
+        try:
+            send(goal_line(tok, mem()["goal"]))
+        except Exception:
+            pass
     idea_taps(st, out.get("ideas", []), "💡 3 ideas to try this week:")
 
 
@@ -2888,13 +2923,13 @@ def maybe_nudge(st, tok):
     st["props"][pid] = {"type": "nudge", "created": time.time()}
     send(f"⏰ It has been {gap:.0f} days since your last video (your goal: every {m['cadence_days']}). "
          "Channels grow on rhythm. Film one short one today, even a simple one.\n"
-         "Tip: /batch gives you 4 ready scripts to film in one sitting.",
+         "Tip: /batch gives you 5 ready scripts to film in one sitting.",
          [[btn("💡 Give me ideas", pid, "ci")]])
 
 
 def cmd_batch(st):
-    send("Preparing a film-day pack: 4 ideas with fact-checked scripts (a few minutes)...")
-    ideas = get_ideas()[:4]
+    send("Preparing a film-day pack: 5 ideas with fact-checked scripts (a few minutes)...")
+    ideas = get_ideas()[:5]
     if not ideas:
         return send("I could not come up with ideas right now. Try again later.")
     send("🎬 Film-day pack. Record these back to back:\n" + "\n".join(f"{n + 1}. {i['title']}" for n, i in enumerate(ideas)))
@@ -3148,13 +3183,431 @@ def cmd_health(st):
     send("\n".join(lines))
 
 
+# ---------------- growth pack (v10.24): find viewers, keep them, turn them into subscribers ----------------
+def latest_vids(tok, n=12):
+    vids, chid = my_videos(tok, n)
+    return sorted(vids, key=lambda v: v["snippet"].get("publishedAt", ""), reverse=True), chid
+
+
+def viewer_comments(tok, vids, chid, per=30):
+    rows = []
+    for v in vids:
+        try:
+            threads = yt_get("commentThreads", tok, part="snippet", videoId=v["id"], maxResults=per, order="relevance")["items"]
+        except Exception:
+            continue
+        for t in threads:
+            top = t["snippet"]["topLevelComment"]["snippet"]
+            if top.get("authorChannelId", {}).get("value") == chid:
+                continue
+            text = (top.get("textOriginal") or "").strip()
+            if len(text) >= 12:
+                rows.append({"video": v["snippet"]["title"][:60], "comment": text[:300]})
+    return rows
+
+
+COMMUNITY_PROMPT = """Use web search to check every fact. The owner of the tiny YouTube channel "Kemet | Ancient Egypt" (calm, evidence-first history) wants to share his newest video where Egypt fans already talk. He is a real person, not a brand: no hype, no "subscribe" begging, no fake claims.
+Video: "{title}" - {url}
+About it: {about}
+Write 3 posts, each leading with a real, checked fact or a real question and putting the video link last, softly:
+1. Reddit (for a subreddit like r/AncientEgypt or r/history): a title and a body of 3-5 short lines.
+2. A Facebook group about Ancient Egypt or history: 3-4 short lines.
+3. A Quora answer to a real question people ask about this topic: the question to look for, and a helpful 4-6 line answer that mentions the video only at the end.
+Return JSON only: {{"posts": [{{"where": "Reddit", "title": "", "body": ""}}, {{"where": "Facebook group", "body": ""}}, {{"where": "Quora", "question": "", "body": ""}}]}}"""
+
+
+def cmd_community(st):
+    send("Writing your community launch kit (checking facts)...")
+    tok = yt_token()
+    vids, _ = latest_vids(tok, 3)
+    if not vids:
+        return send("I found no videos yet.")
+    v = vids[0]
+    sn = v["snippet"]
+    url = "https://youtu.be/" + v["id"]
+    text, sources = gemini_text(COMMUNITY_PROMPT.format(title=sn["title"], url=url, about=(sn.get("description") or "")[:500]), search=True)
+    posts = [p for p in parse_obj(text).get("posts", []) if isinstance(p, dict) and p.get("body")][:3]
+    if not posts:
+        return send("I could not write the kit right now (search was busy). Try again in a few minutes.")
+    send(f"📣 Community launch kit for \"{sn['title']}\". Each post is its own message: hold it, tap Copy, paste it yourself.")
+    for p in posts:
+        head = {"Reddit": "🟠 REDDIT", "Quora": "🟥 QUORA"}.get(p.get("where"), "🔵 FACEBOOK GROUP")
+        extra = ("Title: " + p["title"] + "\n\n") if p.get("title") else ("Find this question: " + p["question"] + "\n\n") if p.get("question") else ""
+        send(f"{head}\n\n{extra}{str(p['body']).strip()}\n\n{url}" if "youtu.be" not in str(p["body"]) else f"{head}\n\n{extra}{str(p['body']).strip()}")
+    links = dedupe_sources(sources, 4)
+    if links:
+        send("Sources I checked:\n" + "\n".join(f"• {t}: {u}" for t, u in links))
+    send("Rules that keep you safe: read each group's rules first, many ban links, then post only the text and put the link in a comment. "
+         "Post in one or two places a day, never the same text everywhere, and answer every reply. Real answers earn subscribers; spam gets you banned.")
+
+
+STARTER_PROMPT = """The YouTube channel "Kemet | Ancient Egypt" wants ONE pinned comment under its newest video that makes viewers WANT to answer.
+Video: "{title}" - {about}
+Write 3 different options. Each is one short question people can answer with an opinion or a guess, tied to a real point of the video, never rude, no fake claims, no begging to subscribe. Max 180 characters each.
+Return JSON only: {{"options": ["", "", ""]}}"""
+
+
+def cmd_starter(st):
+    tok = yt_token()
+    vids, _ = latest_vids(tok, 3)
+    if not vids:
+        return send("I found no videos yet.")
+    v = vids[0]
+    sn = v["snippet"]
+    out = gemini([{"text": STARTER_PROMPT.format(title=sn["title"], about=(sn.get("description") or "")[:400])}])
+    opts = [str(o).strip()[:200] for o in out.get("options", []) if str(o).strip()][:3]
+    if not opts:
+        return send("I could not write the questions right now. Try again later.")
+    send(f"💬 Comment starters for \"{sn['title']}\". Tap one and I post it under your video; then press and hold it and tap Pin.\n\n"
+         + "\n\n".join(f"{n + 1}. {o}" for n, o in enumerate(opts)))
+    for n, o in enumerate(opts):
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "pin", "video_id": v["id"], "text": o, "created": time.time()}
+        send(f"Option {n + 1}: {o}", [[btn(f"📌 Post option {n + 1}", pid, "pc"), btn("Skip", pid, "cs")]])
+
+
+SUBLINES = [
+    "If this made you curious about Ancient Egypt, subscribe: a new true story every few days.",
+    "New here? Subscribe and I will bring you the next Kemet story, built on evidence.",
+    "Ancient Egypt has more secrets than one video can hold. Subscribe to follow the next one.",
+    "Want the real story behind the myths? Subscribe to Kemet.",
+]
+
+
+def subline_report(tok, log):
+    by = {}
+    for e in log:
+        if time.time() - e["ts"] < 3 * 86400:
+            continue
+        try:
+            views, subs = an_query(tok, "views,subscribersGained", 90, "video==" + e["vid"])
+        except Exception:
+            continue
+        a = by.setdefault(e["variant"], [0, 0])
+        a[0] += views
+        a[1] += subs
+    return {k: a for k, a in by.items() if a[0] >= 50}
+
+
+def cmd_sublines(st):
+    tok = yt_token()
+    m = mem()
+    log = m.setdefault("sublines", [])
+    rep = subline_report(tok, log)
+    if len(rep) >= 2:
+        rows = sorted(rep.items(), key=lambda kv: -(kv[1][1] / kv[1][0]))
+        send("📊 Subscribe-line results (subscribers per 100 views):\n" + "\n".join(
+            f"• {a[1] / a[0] * 100:.1f} - \"{SUBLINES[k]}\" ({a[0]} views)" for k, a in rows)
+             + "\n\nSmall numbers are hints, not proof. I keep rotating so the test goes on.")
+    vids, _ = latest_vids(tok, 5)
+    if not vids:
+        return send("I found no videos yet.")
+    used = {e["vid"] for e in log}
+    v = next((x for x in vids if x["id"] not in used), None)
+    if v is None:
+        return send("Every recent video already has a subscribe line. When a new one is out, send /sublines again.")
+    variant = len(log) % len(SUBLINES)
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "subl", "video_id": v["id"], "variant": variant, "created": time.time()}
+    send(f"📝 Add this line at the top of the description of \"{v['snippet']['title']}\"?\n\n{SUBLINES[variant]}\n\n"
+         "I rotate the wording and later report which one brings more subscribers.",
+         [[btn("✅ Add it", pid, "sl"), btn("Skip", pid, "cs")]])
+
+
+HOOK_PROMPT = """You coach the owner of the small YouTube history Shorts channel "Kemet | Ancient Egypt" (calm, evidence-first; he records his own voice).
+Recent videos with views per day (best first): {rows}
+Write 3 stronger OPENING LINES (spoken in the first 3 seconds) for the NEXT Short, each on a different Ancient Egypt topic that fits what works. Each is one sentence, true, specific, starts with the surprise or the question, no clickbait lies.
+Also say in one line what the best videos' openings seem to share (judging only from the titles and numbers).
+Return JSON only: {{"pattern": "", "hooks": [{{"topic": "", "line": ""}}]}}"""
+
+
+def cmd_hook(st):
+    tok = yt_token()
+    vids, _ = latest_vids(tok, 15)
+    rows = []
+    for v in vids:
+        pub = iso_ts(v["snippet"].get("publishedAt", ""))
+        age = max((time.time() - pub) / 86400, 0.5) if pub else 1
+        views = int(v.get("statistics", {}).get("viewCount", 0))
+        rows.append({"title": v["snippet"]["title"], "per_day": round(views / age, 1)})
+    rows.sort(key=lambda r: -r["per_day"])
+    out = gemini([{"text": HOOK_PROMPT.format(rows=json.dumps(rows[:12]))}])
+    hooks = [h for h in out.get("hooks", []) if isinstance(h, dict) and h.get("line")][:3]
+    if not hooks:
+        return send("I could not write hooks right now. Try again later.")
+    send("🎣 Opening lines for your next Short (say them in your own voice)\n\n"
+         + (f"What your best videos share: {out['pattern']}\n\n" if out.get("pattern") else "")
+         + "\n\n".join(f"{n + 1}. {h['line']}\n   Topic: {h.get('topic', '')}" for n, h in enumerate(hooks))
+         + "\n\nTap /idea if you want a full fact-checked script for one of them. For YOUR exact drop-offs, use /retention.")
+
+
+def goal_line(tok, goal):
+    subs = int(yt_get("channels", tok, part="statistics", mine="true")["items"][0]["statistics"].get("subscriberCount", 0))
+    try:
+        gained = an_query(tok, "subscribersGained", 28)[0]
+    except Exception:
+        gained = None
+    line = f"🎯 Goal {goal} subscribers: you have {subs} {bar(subs, goal)}"
+    if subs >= goal:
+        return line + "\nGoal reached! 🎉 Set a bigger one with /goal NUMBER."
+    if gained and gained > 0:
+        line += f"\nPace: {gained} in 28 days, about {int((goal - subs) / (gained / 28))} days to go."
+    else:
+        line += "\nNo recent pace to estimate yet."
+    return line
+
+
+def cmd_goal(st, raw):
+    m = mem()
+    tail = raw.split(None, 1)[1].strip() if len(raw.split(None, 1)) > 1 else ""
+    if tail.isdigit() and 1 <= int(tail) <= 100000000:
+        m["goal"] = int(tail)
+    if not m.get("goal"):
+        return send("Tell me your target, for example /goal 100. I will track it every week.")
+    tok = yt_token()
+    line = goal_line(tok, m["goal"])
+    out = gemini([{"text": "The YouTube history channel Kemet has this status: " + line + "\nWhat it knows: " + learned() +
+                   "\nGive ONE concrete, honest action for this week that would bring subscribers (no tricks, no promises). "
+                   'Return JSON only: {"action": "one or two short sentences"}'}])
+    send(line + ("\n\nThis week's one action: " + str(out["action"]) if out.get("action") else ""))
+
+
+def suggest(seed):
+    try:
+        r = S.get(os.getenv("SUGGEST_URL", "https://suggestqueries.google.com/complete/search"), params={"client": "firefox", "ds": "yt", "q": seed}, timeout=15)
+        return [str(x) for x in r.json()[1]][:8]
+    except Exception:
+        return []
+
+
+DEMAND_PROMPT = """You choose video topics for the small YouTube channel "Kemet | Ancient Egypt" (short, calm, evidence-first; he records his own voice).
+These are REAL YouTube search suggestions (what people type), each with the views of the top 5 videos already answering it ("competition", low = easy to rank):
+{rows}
+Pick the 3 best topics: strong demand (a common search) and weak competition. Write an honest, curious title under 70 characters, an opening line, and WHY (name the search phrase and the competition).
+Return JSON only: {{"ideas": [{{"title": "", "hook": "", "why": ""}}]}}"""
+
+
+def cmd_demand(st, raw):
+    seed = raw.split(None, 1)[1].strip()[:60] if len(raw.split(None, 1)) > 1 else ""
+    send("Checking what people really search for...")
+    seeds = [seed, seed + " why", seed + " how"] if seed else ["ancient egypt", "pharaoh", "egyptian god", "pyramid", "mummy"]
+    sugg = []
+    for s_ in seeds:
+        for x in suggest(s_):
+            if x not in sugg:
+                sugg.append(x)
+    if not sugg:
+        return send("YouTube search suggestions were not reachable. Try again later.")
+    tok = yt_token()
+    rows = []
+    for q in sugg[:6]:
+        views = []
+        try:
+            found = yt_get("search", tok, part="snippet", type="video", q=q, maxResults=5)["items"]
+            ids = [i["id"]["videoId"] for i in found if i.get("id", {}).get("videoId")]
+            if ids:
+                views = [int(v.get("statistics", {}).get("viewCount", 0)) for v in
+                         yt_get("videos", tok, part="statistics", id=",".join(ids))["items"]]
+        except Exception:
+            pass
+        rows.append({"search": q, "top5_views": views})
+    rows += [{"search": q, "top5_views": None} for q in sugg[6:10]]
+    out = gemini([{"text": DEMAND_PROMPT.format(rows=json.dumps(rows))}])
+    if not idea_taps(st, out.get("ideas", []), "🔎 3 topics people search for (with weak competition):"):
+        send("I could not pick topics right now. Try again later.")
+
+
+REFRESH_PROMPT = """You refresh the descriptions of OLD videos of the YouTube history channel "Kemet | Ancient Egypt" so they get found in search.
+For each video, write 2 new opening lines for the description: natural, keyword-rich (what people would type), 100% true to the video, no clickbait, no hashtags, max 220 characters in total.
+Videos: {rows}
+Return JSON only: {{"items": [{{"video_id": "", "lines": "", "why": "one short line"}}]}}"""
+
+
+def cmd_refresh(st):
+    tok = yt_token()
+    vids, _ = latest_vids(tok, 50)
+    old = []
+    for v in vids:
+        pub = iso_ts(v["snippet"].get("publishedAt", ""))
+        if pub and time.time() - pub > 30 * 86400:
+            views = int(v.get("statistics", {}).get("viewCount", 0))
+            old.append((views / ((time.time() - pub) / 86400), v))
+    pending = {p.get("video_id") for p in st["props"].values() if p.get("type") == "dref"}
+    old = [v for _, v in sorted(old, key=lambda x: x[0]) if v["id"] not in pending][:3]
+    if not old:
+        return send("No video older than 30 days needs a refresh yet. Check again later.")
+    rows = [{"video_id": v["id"], "title": v["snippet"]["title"], "description": (v["snippet"].get("description") or "")[:500]} for v in old]
+    out = gemini([{"text": REFRESH_PROMPT.format(rows=json.dumps(rows))}])
+    by = {v["id"]: v for v in old}
+    shown = 0
+    for i in out.get("items", []):
+        v = by.get(i.get("video_id"))
+        lines = str(i.get("lines", "")).strip()[:300]
+        if not v or not lines:
+            continue
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "dref", "video_id": v["id"], "lines": lines, "created": time.time()}
+        send(f"🔄 \"{v['snippet']['title']}\" ({v.get('statistics', {}).get('viewCount', 0)} views)\nNew opening lines for the description:\n\n{lines}\n\nWhy: {i.get('why', '')}",
+             [[btn("✅ Add them", pid, "rd"), btn("Skip", pid, "cs")]])
+        shown += 1
+    if not shown:
+        send("I could not write refreshes right now. Try again later.")
+
+
+CAL_PROMPT = """Use web search. Today is {today}. Find up to 6 REAL upcoming dates or events in the next 60 days that make Ancient Egypt interesting to the public: museum openings or exhibitions, excavation seasons and announcements, anniversaries (a discovery, a pharaoh's reign), festivals tied to Egypt, documentaries or films. Only what you can verify.
+Then give the 3 best video ideas timed to them: an honest title under 70 characters, an opening line, and WHY with the date and event.
+Return JSON only: {{"ideas": [{{"title": "", "hook": "", "why": ""}}]}}"""
+
+
+def cmd_calendar(st):
+    send("Looking at the next 60 days...")
+    text, sources = gemini_text(CAL_PROMPT.format(today=time.strftime("%Y-%m-%d")), search=True)
+    ideas = parse_obj(text).get("ideas", [])
+    if not idea_taps(st, ideas, "🗓 3 ideas timed to real events:"):
+        return send("I found nothing solid to time videos to right now. Try again later.")
+    links = dedupe_sources(sources, 4)
+    if links:
+        send("Sources:\n" + "\n".join(f"• {t}: {u}" for t, u in links))
+
+
+SRC_NAMES = {"YT_SEARCH": "YouTube search", "SUGGESTED": "Suggested videos", "BROWSE": "Home page", "SHORTS": "Shorts feed",
+             "EXT_URL": "Other websites", "NOTIFICATION": "Notifications", "YT_CHANNEL": "Your channel page",
+             "PLAYLIST": "Playlists", "NO_LINK_OTHER": "Direct/unknown", "RELATED_VIDEO": "Suggested videos",
+             "YT_OTHER_PAGE": "Other YouTube pages", "SUBSCRIBER": "Subscribers' feeds", "END_SCREEN": "End screens"}
+
+
+def cmd_subs(st):
+    tok = yt_token()
+    lines = ["🧲 Where subscribers come from (last 28 days)", ""]
+    try:
+        rows = an_dim(tok, "views,subscribersGained", "insightTrafficSourceType", 28)
+        rows = sorted(rows, key=lambda r: -(r[2] or 0))
+        for r in rows[:6]:
+            lines.append(f"• {SRC_NAMES.get(r[0], str(r[0]).title())}: {int(r[2] or 0)} subscribers from {int(r[1] or 0)} views")
+    except Exception as e:
+        lines.append(f"(Sources are missing: {clean(e)[:80]})")
+    best = None
+    try:
+        rows = an_dim(tok, "views,subscribersGained", "video", 90, {"sort": "-subscribersGained", "maxResults": 10})
+        ids = [r[0] for r in rows]
+        titles = {v["id"]: v["snippet"]["title"] for v in yt_get("videos", tok, part="snippet", id=",".join(ids))["items"]} if ids else {}
+        lines += ["", "Videos that win subscribers (90 days):"]
+        for r in rows[:5]:
+            lines.append(f"• {titles.get(r[0], r[0])[:60]}: {int(r[2] or 0)} subscribers from {int(r[1] or 0)} views")
+        cand = [r for r in rows if (r[1] or 0) >= 100 and (r[2] or 0) > 0]
+        if cand:
+            b = max(cand, key=lambda r: r[2] / r[1])
+            best = (b[0], titles.get(b[0], ""), b[2] / b[1] * 1000)
+    except Exception as e:
+        lines.append(f"(Per-video numbers are missing: {clean(e)[:80]})")
+    rows_btn = None
+    if best:
+        vids, _ = latest_vids(tok, 10)
+        targets = [v["id"] for v in vids if v["id"] != best[0]][:4]
+        lines += ["", f"Your best converter: \"{best[1][:60]}\" ({best[2]:.1f} subscribers per 1000 views)."]
+        if targets:
+            pid = new_pid(st)
+            st["props"][pid] = {"type": "bestlink", "best": best[0], "title": best[1], "targets": targets, "created": time.time()}
+            rows_btn = [[btn(f"🔗 Point {len(targets)} newer videos to it", pid, "bl"), btn("No", pid, "cs")]]
+    send("\n".join(lines)[:3900], rows_btn)
+
+
+PRAISE_PROMPT = """From these real comments on the YouTube channel "Kemet | Ancient Egypt", pick up to 5 that are genuinely kind or thoughtful (praise, "I learned something", a good insight). Copy each EXACTLY as written, never change a word.
+Also write ONE short Community post thanking viewers and asking what they want next. Do not quote or name anyone in it.
+Comments: {rows}
+Return JSON only: {{"best": ["exact comment text"], "post": ""}}"""
+
+
+def cmd_praise(st):
+    tok = yt_token()
+    vids, chid = latest_vids(tok, 10)
+    rows = viewer_comments(tok, vids, chid)
+    if not rows:
+        return send("No viewer comments yet. When kind ones arrive I will save the best.")
+    out = gemini([{"text": PRAISE_PROMPT.format(rows=json.dumps(rows[:60]))}])
+    texts = [r["comment"] for r in rows]
+    best = [b.strip() for b in out.get("best", []) if isinstance(b, str) and any(b.strip() and b.strip() in t for t in texts)][:5]
+    if not best:
+        return send("I found no standout kind comments yet. 🙂")
+    m = mem()
+    for b in best:
+        if b not in m.setdefault("praise", []):
+            m["praise"].append(b)
+    m["praise"] = m["praise"][-20:]
+    send("⭐ Your best comments (saved as social proof)\n\n" + "\n\n".join(f"“{b}”" for b in best)
+         + "\n\nUse them in a Community post or a Short's closing line. Quote without names unless the person agrees.")
+    if out.get("post"):
+        send("Thank-you post you can paste into YouTube (Create → Post):\n\n" + str(out["post"]).strip())
+
+
+VOICE_PROMPT = """You coach the owner of the YouTube history channel "Kemet | Ancient Egypt" on delivering his own voice-over. You cannot hear the audio, so judge ONLY from these numbers and titles and say so.
+Videos (average % of the video watched, seconds, views): {rows}
+In plain words: which videos keep people longest, what they have in common (length, topic, opening), and 3 concrete delivery tips for the next recording (pace, where to pause, the first 5 seconds, the ending). Be honest, no promises.
+Return JSON only: {{"summary": "", "tips": ["", "", ""]}}"""
+
+
+def cmd_voice(st):
+    tok = yt_token()
+    vids, _ = latest_vids(tok, 8)
+    rows = []
+    for v in vids:
+        try:
+            pct, dur, views = an_query(tok, "averageViewPercentage,averageViewDuration,views", 90, "video==" + v["id"])
+        except Exception:
+            continue
+        if views:
+            rows.append({"title": v["snippet"]["title"][:60], "avg_percent": round(pct, 1), "avg_seconds": round(dur), "views": int(views)})
+    if len(rows) < 2:
+        return send("I need at least two videos with views to compare. Try again after a few more videos.")
+    out = gemini([{"text": VOICE_PROMPT.format(rows=json.dumps(rows))}])
+    if not out.get("summary"):
+        return send("I could not finish the coaching right now. Try again later.")
+    send("🎙 Voice and pacing coach (from your numbers, I cannot hear the audio)\n\n" + str(out["summary"])
+         + "\n\n" + "\n".join("• " + str(t) for t in out.get("tips", [])[:4]))
+
+
+def cmd_poll(st):
+    ideas = get_ideas()[:4]
+    if len(ideas) < 2:
+        return send("I could not come up with options right now. Try again later.")
+    send("🗳 Feedback poll for the Community tab (Create → Post → Poll). Paste the question, then each answer:\n\n"
+         "Which Egypt story should I film next?\n\n" + "\n".join(str(i["title"])[:100] for i in ideas)
+         + "\n\nWhen it ends, send me the winner and I write the script. Voting is the easiest way for a viewer to join in.")
+
+
+def guard_check(job):
+    """Quick mistakes to fix before upload."""
+    warn = []
+    title = job.get("title", "")
+    try:
+        desc = job["review"]["descriptions"][job["desc"]]
+    except Exception:
+        desc = ""
+    if len(title) > 70:
+        warn.append(f"the title is {len(title)} characters; over 70 gets cut off on phones")
+    if "&#" in title or "&amp;" in title or "&#" in desc:
+        warn.append("there is a stray code like &#39; in the text")
+    caps = [w for w in re.findall(r"[A-Za-z]{4,}", title) if w.isupper()]
+    if len(caps) >= 2:
+        warn.append("the title has several ALL-CAPS words")
+    words = [w.lower() for w in re.findall(r"[A-Za-z]{4,}", title)]
+    dup = {w for w in words if words.count(w) > 1}
+    if dup:
+        warn.append("the title repeats: " + ", ".join(sorted(dup)))
+    if desc and "http" not in desc and not job.get("evidence"):
+        warn.append("no source or link in the description (viewers trust sources)")
+    if len(desc) > 4800:
+        warn.append("the description is very long")
+    return warn
+
+
 ROUTER_PROMPT = """You are the brain of a Telegram assistant that runs the YouTube history channel "Kemet | Ancient Egypt" for its owner.
 He wrote: "{text}"
 Choose the action. Actions: idea (wants video ideas), script (gave a topic to write a script about; put the topic in "topic"),
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
-funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), lessons (what you have learned), health (is everything working),
+funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), lessons (what you have learned), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -3216,6 +3669,12 @@ def run_action(action, topic, st, text=""):
         return cmd_batch(st)
     if action == "collab":
         return cmd_collab(st)
+    if action in ("community", "starter", "sublines", "hook", "demand", "refresh", "calendar", "subs", "praise", "voice", "poll", "goal"):
+        if action == "demand":
+            return cmd_demand(st, "/demand " + (topic or ""))
+        if action == "goal":
+            return cmd_goal(st, "/goal " + (topic or ""))
+        return globals()["cmd_" + action](st)
     if action == "lessons":
         return show_lessons()
     if action == "health":
@@ -3288,8 +3747,20 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/news - fresh Egypt news to turn into videos\n"
         "/audit - Kemet Audited: test a myth against evidence (or /audit your claim)\n"
         "/longform - plan long videos (they earn more)\n"
-        "/batch - 4 scripts to film in one sitting\n"
+        "/batch - 5 scripts to film in one sitting\n"
         "/collab - draft messages to similar channels\n"
+        "/community - posts to share your newest video in Reddit, Facebook groups, Quora\n"
+        "/starter - a question under your video that gets comments\n"
+        "/sublines - rotate the subscribe line and learn which brings subscribers\n"
+        "/hook - 3 opening lines for your next Short\n"
+        "/goal 100 - set a subscriber goal and track it\n"
+        "/demand - what people really search for (or /demand your topic)\n"
+        "/refresh - fresh description lines for old videos\n"
+        "/calendar - ideas timed to real Egypt events\n"
+        "/subs - where subscribers come from, link your best video\n"
+        "/praise - save your best comments as social proof\n"
+        "/voice - pacing coach from your own numbers\n"
+        "/poll - feedback poll: what to film next\n"
         "/cadence 3 - set how often you want to post\n"
         "/links /addlink /removelink - links added to your descriptions\n"
         "/health - check that everything works\n/pause /resume - stop or restart my own messages\n"
@@ -3446,6 +3917,12 @@ def on_message(msg, st):
         cmd_crosspost(st)
     elif text == "/series":
         cmd_series(st)
+    elif text in ("/community", "/starter", "/sublines", "/hook", "/refresh", "/calendar", "/subs", "/praise", "/voice", "/poll"):
+        globals()["cmd_" + text[1:]](st)
+    elif text.startswith("/demand"):
+        cmd_demand(st, text)
+    elif text.startswith("/goal"):
+        cmd_goal(st, text)
     elif text == "/health":
         cmd_health(st)
     elif text == "/pause":
@@ -3487,7 +3964,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -3617,8 +4094,20 @@ def main():
             {"command": "fbsetup", "description": "Link your Facebook Page"},
             {"command": "news", "description": "Egypt news to make videos about"},
             {"command": "longform", "description": "Plan long videos"},
-            {"command": "batch", "description": "4 scripts to film today"},
+            {"command": "batch", "description": "5 scripts to film today"},
             {"command": "collab", "description": "Draft collab messages"},
+            {"command": "community", "description": "Share video in Reddit/Facebook groups"},
+            {"command": "starter", "description": "Comment question for latest video"},
+            {"command": "sublines", "description": "Test subscribe wording"},
+            {"command": "hook", "description": "Opening lines for next Short"},
+            {"command": "goal", "description": "Subscriber goal tracker"},
+            {"command": "demand", "description": "What people search for"},
+            {"command": "refresh", "description": "Refresh old video descriptions"},
+            {"command": "calendar", "description": "Ideas timed to Egypt events"},
+            {"command": "subs", "description": "Where subscribers come from"},
+            {"command": "praise", "description": "Save best comments"},
+            {"command": "voice", "description": "Pacing coach"},
+            {"command": "poll", "description": "Poll: what to film next"},
             {"command": "links", "description": "Links added to descriptions"},
             {"command": "health", "description": "Check everything works"},
             {"command": "pause", "description": "Pause my own messages"},
