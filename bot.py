@@ -35,7 +35,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.32"
+BOT_VERSION = "v10.33"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -258,12 +258,16 @@ def compute_patterns(rows):
         b = [r["vpd"] for r in rows if not r["f"][name]]
         if len(a) < 2 or len(b) < 2:
             continue
+        if min(len(a), len(b)) < 3:               # too few on one side: a single hit would drive the ratio
+            few = "long videos" if name.startswith("a Short") and len(b) < len(a) else "videos"
+            out.append(f"Not enough to compare for {name}: only {min(len(a), len(b))} {few} on the smaller side")
+            continue
         ma, mb = sum(a) / len(a), sum(b) / len(b)
         if mb <= 0:
             continue
         ratio = ma / mb
         if ratio >= 1.5 or ratio <= 0.67:
-            out.append(f"Videos with {name} get about {ratio:.1f}x the daily views of the others ({len(a)} vs {len(b)} videos)")
+            out.append(f"Videos with {name.replace('a Short (60 seconds or less)', 'Shorts (60 seconds or less)')} get about {ratio:.1f}x the daily views of the others ({len(a)} vs {len(b)} videos)")
     return out[:5]
 
 
@@ -1060,43 +1064,133 @@ SRC_HEAD = "🔎 Facts in this video were checked against these sources"
 
 
 FALLBACK_NOTE = "FALLBACK: "
-SRC_HEAD_FB = "📚 Further reading: peer-reviewed works about this topic"
+SRC_HEAD_FB = "📚 Further reading about this topic"
 OPENALEX = os.getenv("OPENALEX_URL", "https://api.openalex.org")
 
 
-def scholar_sources(about, n=6):
-    """Free, no-key scholarly sources (OpenAlex) for when Google's live search is rate-limited."""
-    words = [w for w in re.findall(r"[A-Za-z]{4,}", str(about)) if w.lower() not in GENERIC_WORDS][:8]
+EGYPT_TERMS = ("egypt", "egyptian", "egyptology", "egyptologist", "pharaoh", "pharaonic", "nile", "pyramid", "ptolem", "nubia",
+               "kemet", "thebes", "karnak", "luxor", "giza", "sphinx", "amarna", "papyri", "papyrus", "mummy", "mummies",
+               "tutankhamun", "ramesses", "ramses", "cleopatra", "akhenaten", "hatshepsut", "coptic", "dynasty")
+WIKI = os.getenv("WIKI_URL", "https://en.wikipedia.org")
+TAVILY = os.getenv("TAVILY_URL", "https://api.tavily.com")
+BAD_DOMAINS = ("youtube.", "youtu.be", "reddit.", "facebook.", "instagram.", "tiktok.", "pinterest.", "quora.", "twitter.", "x.com",
+               "medium.com", "wordpress.", "blogspot.", "fandom.", "tripadvisor.", "amazon.", "ebay.", "linkedin.")
+TRUST_DOMAINS = (".edu", ".gov", ".ac.uk", "britishmuseum", "metmuseum", "louvre", "brooklynmuseum", "penn.museum", "uchicago.edu",
+                 "jstor", "britannica", "nature.com", "sciencedirect", "springer", "cambridge.org", "oup.com", "smithsonian",
+                 "nationalgeographic", "archaeology.org", "egyptology", "arce.org", "museum", "antiquities", "ahram", "livescience",
+                 "worldhistory.org", "science.org", "pnas.org", "plos.org", "doi.org", "griffith.ox")
+_WS = {}
+
+
+def tavily_key():
+    return os.getenv("TAVILY_KEY") or (mem().get("tavily") or {}).get("key", "")
+
+
+def short_title(t, n=95):
+    t = " ".join(str(t).split())
+    if len(t) <= n:
+        return t
+    return t[:n].rsplit(" ", 1)[0].rstrip(" ,;:-(") + "…"
+
+
+def web_search(query, n=8):
+    """Tavily (free key, no card): real web results. Returns [{title,url,content}] or [] when unavailable.
+    Social, shop and forum pages are dropped; museums, universities and journals come first."""
+    key = tavily_key()
+    if not key or not query:
+        return []
+    ck = query.lower().strip()
+    if ck in _WS:
+        return _WS[ck]
+    try:
+        r = S.post(TAVILY + "/search", headers={"Authorization": "Bearer " + key},
+                   json={"query": query[:380], "max_results": 10, "search_depth": "basic", "include_answer": False}, timeout=40)
+        if r.status_code in (401, 403):
+            mem()["tavily"] = dict(mem().get("tavily") or {}, bad=True)
+            return []
+        r.raise_for_status()
+        res = []
+        for x in r.json().get("results", []):
+            u = x.get("url") or ""
+            if not u.startswith("http") or any(b in u.lower().split("/")[2] for b in BAD_DOMAINS):
+                continue
+            res.append({"title": " ".join(str(x.get("title") or u).split())[:150], "url": u, "content": str(x.get("content") or "")[:700]})
+        good = [x for x in res if any(t in x["url"].lower() for t in TRUST_DOMAINS)]
+        res = good if len(good) >= 2 else good + [x for x in res if x not in good][:2]     # unknown sites only when too few trusted ones
+        mem()["tavily"] = dict(mem().get("tavily") or {}, bad=False, last=time.time())
+        _WS[ck] = res[:n]
+        return _WS[ck]
+    except Exception as e:
+        print("tavily:", clean(e)[:100])
+        return []
+
+
+def search_topic(about):
+    return str(about).split(". ")[0].strip()[:140]
+
+
+def wiki_sources(about, n=3):
+    """Keyless encyclopedia entries: only used as a last resort next to scholarly works."""
+    words = [w for w in re.findall(r"[A-Za-z]{4,}", str(about)) if w.lower() not in GENERIC_WORDS][:6]
     if not words:
         return []
     try:
-        r = S.get(OPENALEX + "/works", params={"search": " ".join(words) + " Egypt", "per-page": 15,
+        r = S.get(WIKI + "/w/api.php", params={"action": "query", "list": "search", "srsearch": " ".join(words) + " Egypt",
+                                               "srlimit": 5, "format": "json"}, timeout=30)
+        r.raise_for_status()
+        out = []
+        for x in r.json().get("query", {}).get("search", []):
+            t = x.get("title", "")
+            if t and any(k in (t + " " + str(x.get("snippet", ""))).lower() for k in EGYPT_TERMS):
+                out.append([f"Wikipedia: {t}", WIKI + "/wiki/" + t.replace(" ", "_")])
+        return out[:n]
+    except Exception as e:
+        print("wiki:", clean(e)[:100])
+        return []
+
+
+def scholar_sources(about, n=6):
+    """Free, no-key scholarly sources (OpenAlex) for when live search is unavailable.
+    Strict: the title must be about Egypt, share a topic word with the video, and name an author."""
+    words = [w for w in re.findall(r"[A-Za-z]{4,}", str(about)) if w.lower() not in GENERIC_WORDS][:8]
+    if not words:
+        return []
+    topic = title_words(" ".join(words))
+    try:
+        r = S.get(OPENALEX + "/works", params={"search": " ".join(words) + " Egypt", "per-page": 25,
                                                "filter": "has_doi:true", "select": "title,doi,publication_year,authorships"}, timeout=30)
         r.raise_for_status()
         out = []
         for w in r.json().get("results", []):
             if not w.get("doi") or not w.get("title"):
                 continue
-            au = ((w.get("authorships") or [{}])[0].get("author") or {}).get("display_name", "")
-            out.append([f"{au} ({w.get('publication_year', '')}): {w['title']}"[:120].strip(), w["doi"]])
-        return out[:n]
+            tl = w["title"].lower()
+            au = ((w.get("authorships") or [{}])[0].get("author") or {}).get("display_name", "").strip()
+            if not au or not any(t in tl for t in EGYPT_TERMS) or not (title_words(w["title"]) & topic):
+                continue
+            out.append([f"{au} ({w.get('publication_year', '')}): {short_title(w['title'])}".strip(), w["doi"]])
+        out = out[:n]
     except Exception as e:
         print("scholar:", clean(e)[:100])
-        return []
+        out = []
+    if len(out) < 2:
+        out += wiki_sources(about, 3 - len(out))
+    return out
 
 
 def fetch_sources(about, claims=()):
     """Sources for a video's topic. Returns (note, [[title, url], ...], busy). busy=True when Google's search was
     rate-limited (free daily quota), which says nothing about the video itself."""
     try:
-        text, srcs = gemini_text(SRC_PROMPT.format(about=str(about)[:900], claims=json.dumps(list(claims)[:8])), search=True, cache=True)
+        text, srcs = gemini_text(SRC_PROMPT.format(about=str(about)[:900], claims=json.dumps(list(claims)[:8])), search=True, cache=True,
+                                 topic=search_topic(about))
         if "NOT verified" not in text:
             return text, dedupe_sources(srcs, 12), False
     except Exception as e:
         print("fetch sources:", clean(e)[:100])
     fb = scholar_sources(about)                      # Google's search is busy: free peer-reviewed works instead
     if fb:
-        return FALLBACK_NOTE + "Google's live search is busy, so these are peer-reviewed works about the topic (further reading), not a line-by-line check.", fb, False
+        return FALLBACK_NOTE + "Live search is busy, so these are scholarly works and encyclopedia entries about the topic (further reading), not a line-by-line check.", fb, False
     return "", [], True
 
 
@@ -1193,8 +1287,8 @@ def cmd_sources(st, auto=False, limit=4):
     if busy_hit:
         m_ = mem()
         m_["last_srcscan"] = time.time() - 20 * 3600       # try again in about 4 hours, not a full day
-        send("Google's search hit its free daily limit, so I stopped. Nothing is wrong with your videos: "
-             "I try again automatically in a few hours, or send /sources later." + (" Found so far:" if pids else ""))
+        send("Google's search hit its free daily limit." + (f" I found sources for {len(pids)} video(s) above; the rest wait." if pids else " I found nothing yet.") +
+             " Nothing is wrong with your videos: I try again automatically in a few hours, or send /sources later.")
     if len(pids) > 1:
         pa = new_pid(st)
         st["props"][pa] = {"type": "srcall", "pids": pids, "created": time.time()}
@@ -1899,13 +1993,13 @@ def search_blocked():
     return time.time() - mem().get("search_busy_ts", 0) < 3 * 3600
 
 
-def gemini_text(prompt, search=False, cache=False):
+def gemini_text(prompt, search=False, cache=False, topic=None):
     key = hashlib.sha1(prompt.encode()).hexdigest()[:16]
     if search and cache:
         hit = (mem().get("scache") or {}).get(key)
         if hit and time.time() - hit.get("ts", 0) < 7 * 86400:
             return hit["t"], [tuple(x) for x in hit["s"]]
-    out = _gemini_text(prompt, search)
+    out = _gemini_text(prompt, search, topic)
     if search and cache and out[1] and "NOT verified" not in out[0]:
         sc = mem().setdefault("scache", {})
         sc[key] = {"ts": time.time(), "t": out[0][:3000], "s": [list(x) for x in out[1][:12]]}
@@ -1914,8 +2008,22 @@ def gemini_text(prompt, search=False, cache=False):
     return out
 
 
-def _gemini_text(prompt, search=False):
+def _gemini_text(prompt, search=False, topic=None):
     body = {"contents": [{"parts": [{"text": prompt}]}]}
+    if search and topic and tavily_key():             # real web results from Tavily; Google's free search quota is not touched
+        res = web_search(topic) + web_search(topic + " archaeology museum excavation")[:4]
+        seen, uniq = set(), []
+        for x in res:
+            if x["url"] not in seen:
+                seen.add(x["url"])
+                uniq.append(x)
+        uniq = uniq[:9]
+        if uniq:
+            ctx = "\n\n".join(f"[{i + 1}] {x['title']} ({x['url']})\n{x['content']}" for i, x in enumerate(uniq))
+            r = _gpost({"contents": [{"parts": [{"text": prompt + "\n\nWEB SEARCH RESULTS (this is your only web evidence; rely on "
+                                                 "it, cite by title, never invent a source or a fact that is not supported here):\n" + ctx}]}]}, rounds=3)
+            cand = r.json()["candidates"][0]
+            return plain("".join(p.get("text", "") for p in cand["content"]["parts"]).strip()), [(x["title"], x["url"]) for x in uniq]
     if search:
         body["tools"] = [{"google_search": {}}]
     try:
@@ -2181,7 +2289,7 @@ def verified_script(title, build_prompt):
     """Research from many kinds of sources, write ONLY from the fact sheet, then check the finished script once more."""
     sources, facts, unverified = [], "", False
     try:
-        facts, s1 = gemini_text(RESEARCH_PROMPT.format(title=title), search=True, cache=True)
+        facts, s1 = gemini_text(RESEARCH_PROMPT.format(title=title), search=True, cache=True, topic=title)
         sources += s1
         if "NOT verified" in facts:                 # search was rate-limited: do not treat the answer as researched
             facts, unverified = "", True
@@ -2192,13 +2300,13 @@ def verified_script(title, build_prompt):
     if facts:
         prompt += ("\n\nFACT SHEET from research (rely on it): use only CONFIRMED facts as plain statements; say 'according to' or 'most likely' "
                    "for SINGLE SOURCE or DISPUTED ones; leave out anything not on the sheet that you cannot confirm.\n" + facts[:6000])
-    text, s2 = gemini_text(prompt, search=True)
+    text, s2 = gemini_text(prompt, search=True, topic=title)
     if "NOT verified" in text:
         unverified = True
     sources += s2
     summary, changed = "", []
     try:
-        vt, s3 = gemini_text(VERIFY_PROMPT.format(script=text[:9000]), search=True)
+        vt, s3 = gemini_text(VERIFY_PROMPT.format(script=text[:9000]), search=True, topic=title)
         sources += s3
         vo = parse_obj(vt)
         res = [r for r in vo.get("results", []) if isinstance(r, dict) and r.get("claim")]
@@ -3171,6 +3279,29 @@ def fb_post_video(caption, file_id):
     return j.get("id") or j.get("post_id") or ""
 
 
+def cmd_searchkey(msg, st, raw):
+    parts = raw.split()
+    forget_message(msg)
+    key = parts[1] if len(parts) > 1 else ""
+    if not re.fullmatch(r"tvly-[A-Za-z0-9_-]{16,}", key):
+        return send("That does not look like a Tavily key (it starts with tvly-). I deleted your message. Send: /searchkey tvly-YOURKEY")
+    mem()["tavily"] = {"key": key, "ts": time.time()}
+    _WS.clear()
+    res = web_search("Rosetta Stone British Museum")
+    if not res:
+        t = mem().get("tavily") or {}
+        mem().pop("tavily", None)
+        return send("Tavily did not accept that key" + (" (it said not allowed)" if t.get("bad") else " (no answer)") +
+                    ". I deleted your message and did not keep the key. Copy it again from tavily.com and retry.")
+    send(f"✅ Web search connected: Tavily answered with {len(res)} results (first: {res[0]['title'][:70]}). Your message is deleted and the key is kept "
+         "encrypted. From now on scripts, fact-checks and sources use it before Google, so Google's free limit stops blocking them. /health shows it.")
+
+
+def cmd_searchoff(st):
+    mem().pop("tavily", None)
+    send("Tavily key deleted from my notes. I use Google search again, then the free scholarly fallback.")
+
+
 def cmd_fboff(st):
     mem().pop("fb", None)
     send("Facebook is disconnected and the key is deleted from my notes. To remove the app's access fully, open Facebook → Settings → "
@@ -3713,6 +3844,10 @@ def cmd_health(st):
     def login():
         tok["t"] = yt_token()
         return "token works"
+    if tavily_key():
+        chk("Tavily web search", lambda: "working" if web_search("Karnak temple Luxor") else "no answer or key refused (send /searchkey again)")
+    else:
+        lines.append("Tavily web search: not set (send /searchkey tvly-... to stop depending on Google's free limit)")
     chk("YouTube login", login)
     if "t" in tok:
         chk("YouTube channel", lambda: yt_get("channels", tok["t"], part="snippet", mine="true")["items"][0]["snippet"]["title"])
@@ -4465,6 +4600,10 @@ def on_message(msg, st):
         cmd_fbconnect(msg, st, raw)
     elif text == "/fboff":
         cmd_fboff(st)
+    elif text.startswith("/searchkey"):
+        cmd_searchkey(msg, st, raw)
+    elif text == "/searchoff":
+        cmd_searchoff(st)
     elif text == "/review":
         weekly_review(st)
     elif text.startswith("/audit"):
@@ -4678,6 +4817,7 @@ def main():
             {"command": "thumbtest", "description": "Thumbnail options and test"},
             {"command": "post", "description": "Community posts to paste"},
             {"command": "fbsetup", "description": "Link your Facebook Page"},
+            {"command": "searchkey", "description": "Connect free web search (Tavily)"},
             {"command": "news", "description": "Egypt news to make videos about"},
             {"command": "longform", "description": "Plan long videos"},
             {"command": "batch", "description": "5 scripts to film today"},
