@@ -35,7 +35,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.26"
+BOT_VERSION = "v10.27"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -146,6 +146,82 @@ HOUSE_STYLE = """The owner's standing style rules (always follow them):
 - Every factual claim, including diet, dates and numbers, must be checked against evidence; if unsure, say so."""
 
 
+GENERIC_WORDS = {"ancient", "egypt", "egyptian", "egyptians", "pharaoh", "pharaohs", "truth", "about", "real", "secret", "secrets",
+                 "what", "were", "that", "this", "with", "from", "they", "their", "have", "does", "really", "behind", "story", "evidence"}
+
+
+def title_words(t):
+    def stem(w):
+        for suf in ("ing", "ed", "es", "s"):
+            if w.endswith(suf) and len(w) - len(suf) >= 4:
+                return w[:-len(suf)]
+        return w
+    return {stem(w) for w in re.findall(r"[a-z]{4,}", str(t).lower()) if w not in GENERIC_WORDS}
+
+
+def made_titles():
+    """Every video already made: the whole channel (refreshed every 12 hours), the bot's own uploads, and topics added by hand."""
+    m = mem()
+    cache = m.get("made") or {}
+    if time.time() - cache.get("ts", 0) > 12 * 3600:
+        try:
+            vids, _ = my_videos(yt_token(), 50)
+            cache = {"ts": time.time(), "titles": [v["snippet"]["title"] for v in vids]}
+            m["made"] = cache
+        except Exception as e:
+            print("made titles:", clean(e))
+    out = list(cache.get("titles", []))
+    out += [r.get("title", "") for r in m["videos"].values()]
+    out += m.get("made_manual", [])
+    seen, res = set(), []
+    for t in out:
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            res.append(t)
+    return res
+
+
+def is_made(title, made=None):
+    a = title_words(title)
+    for t in (made if made is not None else made_titles()):
+        b = title_words(t)
+        if not a or not b:
+            continue
+        common = len(a & b)
+        if common >= 2 and common / min(len(a), len(b)) >= 0.6:
+            return True
+        if str(title).strip().lower() == str(t).strip().lower():
+            return True
+    return False
+
+
+def drop_made(items, key="title"):
+    made = made_titles()
+    return [i for i in items if isinstance(i, dict) and not is_made(i.get(key, ""), made)]
+
+
+def cmd_made(st, raw=""):
+    parts = raw.split(None, 2)
+    if len(parts) >= 3 and parts[1].lower() == "add":
+        topic = parts[2].strip()[:120]
+        lst = mem().setdefault("made_manual", [])
+        if topic not in lst:
+            lst.append(topic)
+        return send(f"Saved. I will never suggest \"{topic}\" again.")
+    if len(parts) >= 3 and parts[1].lower() == "remove":
+        lst = mem().setdefault("made_manual", [])
+        before = len(lst)
+        mem()["made_manual"] = [x for x in lst if x.lower() != parts[2].strip().lower()]
+        return send("Removed." if len(mem()["made_manual"]) < before else "I did not find that one in your added list.")
+    mem()["made"] = {}                       # refresh from YouTube now
+    titles = made_titles()
+    if not titles:
+        return send("I found no videos yet.")
+    send(f"✅ {len(titles)} videos/topics I will never offer again (I check your whole channel):\n" +
+         "\n".join("• " + t for t in titles[:60]) +
+         "\n\nSomething not on YouTube yet? Send /made add your topic")
+
+
 def learned():
     m = mem()
     parts = []
@@ -164,6 +240,13 @@ def learned():
             parts.append("Hashtags/tags used right now by the best-performing recent Ancient Egypt videos: " + ", ".join(tr["tags"][:15]))
         if tr.get("buzz"):
             parts.append("What is trending in the Ancient Egypt niche now (checked " + time.strftime("%d %b", time.gmtime(tr["ts"])) + "): " + tr["buzz"][:600])
+    try:
+        made = made_titles()
+    except Exception:
+        made = []
+    if made:
+        parts.append("VIDEOS THE OWNER HAS ALREADY MADE. Never suggest these topics again, not even reworded or from a new angle:\n" +
+                     "\n".join("- " + t for t in made[:70]))
     return HOUSE_STYLE + "\n" + ("\n".join(parts) or "No history yet.")
 
 
@@ -1529,7 +1612,7 @@ def get_ideas():
     titles = [v["snippet"]["title"] for v in vids]
     out = gemini([{"text": IDEAS_PROMPT.format(memory=learned(), titles=json.dumps(titles),
                                               comments=json.dumps(recent_comments(tok, vids)))}])
-    return [i for i in out.get("ideas", []) if i.get("title")][:5]
+    return drop_made([i for i in out.get("ideas", []) if i.get("title")])[:5]
 
 
 def cmd_idea(st):
@@ -1622,7 +1705,7 @@ def cmd_scout(st):
         return send("I did not find enough recent videos to learn from. Try again later.")
     out = gemini([{"text": SCOUT_PROMPT.format(memory=learned(), rows=json.dumps(
         [{k: r[k] for k in ("title", "channel", "views", "subs", "age_days", "minutes", "views_per_sub")} for r in rows]))}])
-    ideas = [i for i in out.get("ideas", []) if i.get("title")][:5]
+    ideas = drop_made([i for i in out.get("ideas", []) if i.get("title")])[:5]
     pats = [str(p) for p in out.get("patterns", [])][:4]
     gaps = [str(g) for g in out.get("gaps", [])][:3]
     if not ideas:
@@ -1678,7 +1761,7 @@ def cmd_asked(st):
     if not rows:
         return send("I found no viewer comments yet. When people comment, I will turn their questions into videos.")
     out = gemini([{"text": ASKED_PROMPT.format(comments=json.dumps(rows[:60]))}])
-    items = [i for i in out.get("items", []) if i.get("title") and i.get("question")][:3]
+    items = drop_made([i for i in out.get("items", []) if i.get("title") and i.get("question")])[:3]
     if not items:
         return send("No real questions in the comments yet. I will try again when there are more.")
     ideas = [{"title": i["title"], "hook": i.get("hook", ""),
@@ -2472,7 +2555,7 @@ def trend_pack(force=False):
 
 def idea_taps(st, ideas, heading, compact=False):
     """Send exactly 3 ideas with one tap each; a tap writes the fact-checked script for that idea."""
-    ideas = [i for i in ideas if isinstance(i, dict) and i.get("title")][:3]
+    ideas = drop_made([i for i in ideas if isinstance(i, dict) and i.get("title")])[:3]
     if not ideas:
         return False
     pid = new_pid(st)
@@ -2956,7 +3039,7 @@ def cmd_news(st):
         items = json.loads(text[a:b + 1]).get("items", [])
     except Exception:
         pass
-    items = [i for i in items if i.get("idea")][:5]
+    items = drop_made([i for i in items if i.get("idea")], "idea")[:5]
     if not items:
         return send("I did not find solid fresh Egypt news right now. Try again in a few days.")
     pid = new_pid(st)
@@ -3921,6 +4004,8 @@ def on_message(msg, st):
         cmd_crosspost(st)
     elif text == "/series":
         cmd_series(st)
+    elif text.startswith("/made"):
+        cmd_made(st, raw)
     elif text in ("/community", "/starter", "/sublines", "/hook", "/refresh", "/calendar", "/subs", "/praise", "/voice", "/poll"):
         globals()["cmd_" + text[1:]](st)
     elif text.startswith("/demand"):
@@ -4083,6 +4168,7 @@ def main():
             {"command": "subtitles", "description": "English + Arabic subtitles"},
             {"command": "crosspost", "description": "TikTok / Reels / Facebook kit"},
             {"command": "series", "description": "Check playlists, add latest video"},
+            {"command": "made", "description": "Videos I will never offer again"},
             {"command": "progress", "description": "Progress toward earning"},
             {"command": "retention", "description": "Where viewers leave your video"},
             {"command": "audit", "description": "Kemet Audited: check a claim vs evidence"},
