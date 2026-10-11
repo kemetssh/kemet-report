@@ -35,7 +35,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.30"
+BOT_VERSION = "v10.31"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -990,11 +990,16 @@ SRC_HEAD = "🔎 Facts in this video were checked against these sources"
 
 
 def fetch_sources(about, claims=()):
-    """Sources for a video's topic. Returns (note, [[title, url], ...])."""
-    text, srcs = gemini_text(SRC_PROMPT.format(about=str(about)[:900], claims=json.dumps(list(claims)[:8])), search=True)
+    """Sources for a video's topic. Returns (note, [[title, url], ...], busy). busy=True when Google's search was
+    rate-limited (free daily quota), which says nothing about the video itself."""
+    try:
+        text, srcs = gemini_text(SRC_PROMPT.format(about=str(about)[:900], claims=json.dumps(list(claims)[:8])), search=True)
+    except Exception as e:
+        print("fetch sources:", clean(e)[:100])
+        return "", [], True
     if "NOT verified" in text:
-        return "", []
-    return text, dedupe_sources(srcs, 12)
+        return "", [], True
+    return text, dedupe_sources(srcs, 12), False
 
 
 def source_block(srcs):
@@ -1008,7 +1013,7 @@ def has_sources(desc):
 def fetch_job_sources(job):
     r = job["review"]
     about = (job.get("title") or "") + ". " + r.get("summary", "")
-    text, srcs = fetch_sources(about, r.get("claims") or [])
+    text, srcs, busy = fetch_sources(about, r.get("claims") or [])
     if srcs:
         prev = (job.get("evidence") or {}).get("sources") or []
         allsrc = merge_sources(prev, srcs)
@@ -1019,6 +1024,8 @@ def fetch_job_sources(job):
              "\n".join(f"• {t}: {u}" for t, u in allsrc[:8]) + (("\n\n" + text[:500]) if text else ""))
     else:
         job["src_tries"] = job.get("src_tries", 0) + 1
+        if busy:
+            send("Google's search is busy right now (the free daily limit). Tap Fetch sources again in a few minutes.")
     return bool(srcs)
 
 
@@ -1052,6 +1059,9 @@ def cmd_sources(st, auto=False, limit=4):
     tok = yt_token()
     vids, _ = latest_vids(tok, 50)
     pending = {p.get("video_id") for p in st["props"].values() if p.get("type") == "srcb"}
+    if not mem().get("src_failed_reset2"):            # earlier versions counted search-limit errors as failures
+        mem()["src_failed"] = {}
+        mem()["src_failed_reset2"] = True
     failed = mem().setdefault("src_failed", {})
     todo = [v for v in vids if not has_sources(v["snippet"].get("description")) and v["id"] not in pending
             and failed.get(v["id"], 0) < 2]
@@ -1061,14 +1071,13 @@ def cmd_sources(st, auto=False, limit=4):
         return
     send(f"📚 {len(todo)} of your videos have no sources in the description. Checking the first {min(limit, len(todo))} now "
          "(nothing changes until you tap)...")
-    pids = []
+    pids, busy_hit = [], False
     for v in todo[:limit]:
         sn = v["snippet"]
-        try:
-            text, srcs = fetch_sources(sn.get("title", "") + ". " + (sn.get("description") or "")[:600])
-        except Exception as e:
-            print("sources:", clean(e)[:100])
-            srcs, text = [], ""
+        text, srcs, busy = fetch_sources(sn.get("title", "") + ". " + (sn.get("description") or "")[:600])
+        if busy:                                   # Google's free search limit: stop, do not blame the video
+            busy_hit = True
+            break
         if not srcs:
             failed[v["id"]] = failed.get(v["id"], 0) + 1
             continue
@@ -1079,13 +1088,18 @@ def cmd_sources(st, auto=False, limit=4):
         send(f"📚 \"{sn.get('title', '')}\"\n{len(srcs)} sources found:\n" + "\n".join(f"• {t}: {u}" for t, u in srcs[:5]) +
              (("\n\n" + text[:300]) if text else ""),
              [[btn("✅ Add to description", pid, "sb"), btn("Skip", pid, "cs")]])
+    if busy_hit:
+        m_ = mem()
+        m_["last_srcscan"] = time.time() - 20 * 3600       # try again in about 4 hours, not a full day
+        send("Google's search hit its free daily limit, so I stopped. Nothing is wrong with your videos: "
+             "I try again automatically in a few hours, or send /sources later." + (" Found so far:" if pids else ""))
     if len(pids) > 1:
         pa = new_pid(st)
         st["props"][pa] = {"type": "srcall", "pids": pids, "created": time.time()}
         send(f"Add sources to all {len(pids)} videos above in one go?" + (f" ({len(todo) - limit} more will follow later.)" if len(todo) > limit else ""),
              [[btn(f"✅ Add to all {len(pids)}", pa, "sa")]])
-    elif not pids and not auto:
-        send("I could not find solid sources for those videos right now (search was busy). Try again later.")
+    elif not pids and not auto and not busy_hit:
+        send("I found no solid sources for those videos. I will try the next ones.")
 
 
 def do_upload(job):
