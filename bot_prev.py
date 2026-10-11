@@ -35,7 +35,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.29"
+BOT_VERSION = "v10.30"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -445,7 +445,7 @@ Video length: {dur:.0f} seconds, size {w}x{h}.
 
 What you already know about this channel and its owner:
 {memory}
-
+{cleared}
 Return JSON only with exactly these keys:
 {{
  "verdict": "ready" or "fix first",
@@ -459,8 +459,17 @@ Return JSON only with exactly these keys:
  "thumb_times": [3 numbers in seconds inside the video, sharp frames with a clear subject],
  "ai_visuals": true or false,  // true if the pictures or video look realistic AI-generated or heavily altered (YouTube requires a label for that)
  "policy_notes": ["short flags for YouTube policy: copyrighted music, film clips, logos, misleading claims, reused content. empty if clean"],
- "claims": ["up to 8 factual claims about history that the narrator states (names, dates, places, causes), each as one plain sentence; empty if none"]
+ "claims": ["up to 8 factual claims about history that the narrator states (names, dates, places, causes), each as one plain sentence; empty if none"],
+ "follows_script": true or false  // true only if a pre-checked script was given above AND the video clearly follows it
 }}"""
+
+
+def cleared_text():
+    c = mem().get("cleared")
+    if not c or time.time() - c.get("ts", 0) > 14 * 86400 or not c.get("verified", True):
+        return ""
+    return ("\nThe owner's script for this video was ALREADY fact-checked with sources. Script:\n" + c["script"][:3500] +
+            "\nIn \"issues\" and \"claims\" list ONLY facts the video states that are NOT in this script or that contradict it.\n")
 
 
 def review_video(path, dur, w, h):
@@ -471,7 +480,7 @@ def review_video(path, dur, w, h):
     info = gemini_upload(path, "video/mp4")
     try:
         data = gemini([{"file_data": {"mime_type": "video/mp4", "file_uri": info["uri"]}},
-                       {"text": REVIEW_PROMPT.format(dur=dur, w=w, h=h, memory=learned())}])
+                       {"text": REVIEW_PROMPT.format(dur=dur, w=w, h=h, memory=learned(), cleared=cleared_text())}])
     finally:
         try:
             S.delete(f"{GBASE}/v1beta/{info['name']}", headers={"x-goog-api-key": GKEY}, timeout=30)
@@ -698,13 +707,15 @@ def ask_confirm(job):
          f"AI / altered-content label: {ai}\n"
          + (f"Links block: {'ON' if job.get('links_on', True) else 'OFF'} ({len(mem()['links'])} links)\n"
             if mem()["links"] else "")
-         + (f"Sources block: {'ON' if job.get('ev_on', True) else 'OFF'}\n" if job.get("evidence") else "") +
+         + (f"Sources in the description: {len((job.get('evidence') or {}).get('sources') or [])} (always added)\n"
+            if (job.get("evidence") or {}).get("sources") else "⛔ No sources found yet: every video needs them.\n") +
          ("\n⚠️ Worth a look: " + "; ".join(guard_check(job)) + "\n" if guard_check(job) else "") +
          "\nIt stays private until you publish it.",
-         [[btn("⬆️ Upload as private", jid, "u")],
-          [btn(f"AI label: {ai} (tap to switch)", jid, "l")]]
+         ([[btn("⬆️ Upload as private", jid, "u")]] if (job.get("evidence") or {}).get("sources") else
+          [[btn("🔄 Fetch sources", jid, "sf")]] +
+          ([[btn("⬆️ Upload private anyway (add sources later with /sources)", jid, "ug")]] if job.get("src_tries", 0) >= 2 else []))
+         + [[btn(f"AI label: {ai} (tap to switch)", jid, "l")]]
          + ([[btn("Links block on/off", jid, "lk")]] if mem()["links"] else [])
-         + ([[btn("Sources block on/off", jid, "ev")]] if job.get("evidence") else [])
          + [[btn("Cancel", jid, "x")]])
 
 
@@ -963,10 +974,118 @@ def start_job(msg, st, shrunk=False):
         job["ev_on"] = True
     st["jobs"][jid] = job
     send(review_text(job))
-    if review.get("claims"):
-        send(f"🔎 I noted {len(review['claims'])} factual claims in your video. Want them checked against sources?",
-             [[btn("Fact-check my claims", jid, "fc")]])
+    try:
+        auto_sources(job)
+    except Exception as e:
+        print("auto sources:", clean(e)[:120])
     ask_title(job)
+
+
+SRC_PROMPT = """Use web search. Find reliable sources (museums, universities, excavation reports, Egyptology institutes, the Egyptian Ministry of Tourism and Antiquities) that cover the facts of this Ancient Egypt YouTube video. Skip blogs, forums and AI-written pages.
+About the video: {about}
+Claims it makes: {claims}
+Write 3 short lines saying what the sources confirm, and name anything in the video that sources contradict or only weakly support. Never invent a source."""
+
+SRC_HEAD = "🔎 Facts in this video were checked against these sources"
+
+
+def fetch_sources(about, claims=()):
+    """Sources for a video's topic. Returns (note, [[title, url], ...])."""
+    text, srcs = gemini_text(SRC_PROMPT.format(about=str(about)[:900], claims=json.dumps(list(claims)[:8])), search=True)
+    if "NOT verified" in text:
+        return "", []
+    return text, dedupe_sources(srcs, 12)
+
+
+def source_block(srcs):
+    return SRC_HEAD + "\nSources:\n" + "\n".join(f"- {t}: {u}" for t, u in srcs[:12])
+
+
+def has_sources(desc):
+    return bool(re.search(r"^Sources:", desc or "", re.M))
+
+
+def fetch_job_sources(job):
+    r = job["review"]
+    about = (job.get("title") or "") + ". " + r.get("summary", "")
+    text, srcs = fetch_sources(about, r.get("claims") or [])
+    if srcs:
+        prev = (job.get("evidence") or {}).get("sources") or []
+        allsrc = merge_sources(prev, srcs)
+        job["evidence"] = {"claim": (job.get("evidence") or {}).get("claim") or "Facts in this video were checked against these sources",
+                           "verdict": (job.get("evidence") or {}).get("verdict", ""), "sources": allsrc}
+        job["ev_on"] = True
+        send(f"📚 Found {len(allsrc)} sources for this video. They go into the description automatically:\n" +
+             "\n".join(f"• {t}: {u}" for t, u in allsrc[:8]) + (("\n\n" + text[:500]) if text else ""))
+    else:
+        job["src_tries"] = job.get("src_tries", 0) + 1
+    return bool(srcs)
+
+
+def auto_sources(job):
+    """Every video gets sources, without asking: scan the claims, fetch sources when the idea was the owner's own."""
+    claims = job["review"].get("claims") or []
+    if claims:
+        factcheck_job(job)
+    if not (job.get("evidence") or {}).get("sources"):
+        fetch_job_sources(job)
+
+
+def set_description_sources(video_id, block):
+    tok = yt_token()
+    sn = yt_get("videos", tok, part="snippet", id=video_id)["items"][0]["snippet"]
+    desc = sn.get("description", "")
+    if has_sources(desc):
+        return False
+    body = {"title": sn["title"], "description": (desc[:max(0, 4900 - len(block) - 2)] + "\n\n" + block).strip(),
+            "categoryId": sn.get("categoryId", "27"), "tags": sn.get("tags", [])}
+    if sn.get("defaultLanguage"):
+        body["defaultLanguage"] = sn["defaultLanguage"]
+    r = S.put(f"{YT}/youtube/v3/videos?part=snippet", headers={"Authorization": f"Bearer {tok}"},
+              json={"id": video_id, "snippet": body}, timeout=60)
+    r.raise_for_status()
+    return True
+
+
+def cmd_sources(st, auto=False, limit=4):
+    """Go through the older videos and propose adding sources to every description that lacks them."""
+    tok = yt_token()
+    vids, _ = latest_vids(tok, 50)
+    pending = {p.get("video_id") for p in st["props"].values() if p.get("type") == "srcb"}
+    failed = mem().setdefault("src_failed", {})
+    todo = [v for v in vids if not has_sources(v["snippet"].get("description")) and v["id"] not in pending
+            and failed.get(v["id"], 0) < 2]
+    if not todo:
+        if not auto:
+            send("Every video I can see already has sources in its description. ✅")
+        return
+    send(f"📚 {len(todo)} of your videos have no sources in the description. Checking the first {min(limit, len(todo))} now "
+         "(nothing changes until you tap)...")
+    pids = []
+    for v in todo[:limit]:
+        sn = v["snippet"]
+        try:
+            text, srcs = fetch_sources(sn.get("title", "") + ". " + (sn.get("description") or "")[:600])
+        except Exception as e:
+            print("sources:", clean(e)[:100])
+            srcs, text = [], ""
+        if not srcs:
+            failed[v["id"]] = failed.get(v["id"], 0) + 1
+            continue
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "srcb", "video_id": v["id"], "title": sn.get("title", ""), "block": source_block(srcs),
+                            "created": time.time()}
+        pids.append(pid)
+        send(f"📚 \"{sn.get('title', '')}\"\n{len(srcs)} sources found:\n" + "\n".join(f"• {t}: {u}" for t, u in srcs[:5]) +
+             (("\n\n" + text[:300]) if text else ""),
+             [[btn("✅ Add to description", pid, "sb"), btn("Skip", pid, "cs")]])
+    if len(pids) > 1:
+        pa = new_pid(st)
+        st["props"][pa] = {"type": "srcall", "pids": pids, "created": time.time()}
+        send(f"Add sources to all {len(pids)} videos above in one go?" + (f" ({len(todo) - limit} more will follow later.)" if len(todo) > limit else ""),
+             [[btn(f"✅ Add to all {len(pids)}", pa, "sa")]])
+    elif not pids and not auto:
+        send("I could not find solid sources for those videos right now (search was busy). Try again later.")
 
 
 def do_upload(job):
@@ -1506,6 +1625,26 @@ def on_prop(jid, act, st):
         mem().setdefault("sublines", []).append({"vid": prop["video_id"], "variant": prop["variant"], "ts": time.time()})
         st["props"].pop(jid, None)
         return send("✅ Subscribe line added at the top of the description. I will compare the wordings after a few days of views.")
+    if act == "sb" and kind == "srcb":
+        try:
+            ok = set_description_sources(prop["video_id"], prop["block"])
+        except Exception as e:
+            return send("I could not update that description (" + clean(e)[:80] + "). Tap again later.", [[btn("Try again", jid, "sb")]])
+        st["props"].pop(jid, None)
+        return send(f"✅ Sources added to the description of \"{prop['title']}\"." if ok else "That video already has a Sources section.")
+    if act == "sa" and kind == "srcall":
+        done = 0
+        for p in prop["pids"]:
+            pr = st["props"].get(p)
+            if pr and pr.get("type") == "srcb":
+                try:
+                    if set_description_sources(pr["video_id"], pr["block"]):
+                        done += 1
+                    st["props"].pop(p, None)
+                except Exception as e:
+                    print("sources all:", clean(e)[:100])
+        st["props"].pop(jid, None)
+        return send(f"✅ Added sources to {done} video descriptions.")
     if act == "rd" and kind == "dref":
         set_description_append(prop["video_id"], prop["lines"])
         st["props"].pop(jid, None)
@@ -1850,7 +1989,8 @@ Return JSON only:
  "comment_ask": "one specific, easy question for the end of the video that viewers love to answer, e.g. a choice between two options",
  "pinned": "the pinned comment: 1-2 sentences that repeat the question and give people a reason to answer",
  "subscribe": "one reason to subscribe tied to THIS topic, e.g. what comes next in a series; never just 'please subscribe'"}}
-Give exactly 3 thumbs and exactly 3 hooks (one of each style). Everything must stay honest."""
+Give exactly 3 thumbs and exactly 3 hooks (one of each style). Everything must stay honest.
+Introduce NO new factual claim: use only facts that are already in the script above."""
 
 
 def make_kit(title, script_text=""):
@@ -1944,6 +2084,10 @@ def write_script(idea):
     msg = f"🎬 {idea['title']}\n\n{text}"
     if summary:
         msg += "\n\n" + summary
+    mem()["cleared"] = {"title": idea["title"], "script": text[:6000], "sources": sources, "ts": time.time(),
+                        "verified": "NOT fully verified" not in summary}
+    msg += ("\n\n✅ CLEARED BEFORE FILMING: facts, wording and sources are checked, so the upload review will not raise them again. "
+            "Record it as written; if you change a fact while recording, tell me and I recheck." if "NOT fully verified" not in summary else "")
     if sources:
         mem()["script_sources"] = {"title": idea["title"], "sources": sources, "ts": time.time()}
         msg += f"\n\nSources I checked ({len(sources)}, they will be added to your video description):\n" + "\n".join(f"• {t}: {u}" for t, u in sources)
@@ -2100,7 +2244,7 @@ def run_audit(claim, st):
 
 def evidence_block(job):
     ev = job.get("evidence")
-    if not ev or not job.get("ev_on", True) or not ev.get("sources"):
+    if not ev or not ev.get("sources"):
         return ""
     lines = [f"🔎 {ev['claim']}"]
     if ev.get("verdict"):
@@ -2156,7 +2300,7 @@ def factcheck_job(job, gate=False):
         job["evidence"] = {"claim": (job.get("evidence") or {}).get("claim") or "Facts in this video were checked against these sources",
                            "verdict": (job.get("evidence") or {}).get("verdict", ""), "sources": allsrc}
         job["ev_on"] = True
-        msg += "\n\nI can add these sources to your description (switch on the confirm screen)."
+        msg += "\n\nThese sources go into your description automatically."
     msg += ("\n\n⚠️ Fix the flagged lines before publishing. You can still upload as private."
             if bad else "\n\nEvery claim held up. 🏺")
     remember_fact = [r["claim"] for r in bad][:2]
@@ -2547,6 +2691,12 @@ def housekeeping(st):
     week = time.strftime("%G-%V", g)
     if os.getenv("SKIP_WEEKLY"):
         return
+    if now - m.get("last_srcscan", 0) > 24 * 3600:
+        m["last_srcscan"] = now
+        try:
+            cmd_sources(st, auto=True, limit=3)
+        except Exception as e:
+            print("sources scan:", clean(e)[:120])
     if g.tm_wday == 2 and g.tm_hour >= 7 and m["last_news"] != week:
         m["last_news"] = week
         try:
@@ -3229,6 +3379,8 @@ def write_long(c):
     msg = f"🎞 {c['title']}\n\n{text}"
     if summary:
         msg += "\n\n" + summary
+    mem()["cleared"] = {"title": c["title"], "script": text[:6000], "sources": sources, "ts": time.time(),
+                        "verified": "NOT fully verified" not in summary}
     if sources:
         mem()["script_sources"] = {"title": c["title"], "sources": sources, "ts": time.time()}
         msg += f"\n\nSources I checked ({len(sources)}, they will be added to your video description):\n" + "\n".join(f"• {t}: {u}" for t, u in sources)
@@ -3811,7 +3963,7 @@ ROUTER_PROMPT = """You are the brain of a Telegram assistant that runs the YouTu
 He wrote: "{text}"
 Choose the action. Actions: idea (wants video ideas), script (gave a topic to write a script about; put the topic in "topic"),
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
-subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes),
+subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes), sources (add sources to the descriptions of older videos),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
 funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), lessons (what you have learned), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
@@ -3863,6 +4015,8 @@ def run_action(action, topic, st, text=""):
         return cmd_series(st)
     if action == "sequel":
         return cmd_sequel(st)
+    if action == "sources":
+        return cmd_sources(st)
     if action == "progress":
         return cmd_progress(st)
     if action == "retention":
@@ -4133,6 +4287,8 @@ def on_message(msg, st):
         cmd_made(st, raw)
     elif text == "/sequel":
         cmd_sequel(st)
+    elif text == "/sources":
+        cmd_sources(st)
     elif text in ("/community", "/starter", "/sublines", "/hook", "/refresh", "/calendar", "/subs", "/praise", "/voice", "/poll"):
         globals()["cmd_" + text[1:]](st)
     elif text.startswith("/demand"):
@@ -4180,7 +4336,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -4213,8 +4369,13 @@ def on_callback(cb, st):
         return ask_confirm(job)
     if act == "fc" and stage in ("title", "desc", "thumb", "confirm"):
         return factcheck_job(job)
-    if act == "ev" and stage == "confirm":
-        job["ev_on"] = not job.get("ev_on", True)
+    if act == "sf" and stage == "confirm":
+        job["src_tries"] = job.get("src_tries", 0)
+        try:
+            fetch_job_sources(job)
+        except Exception as e:
+            print("fetch sources:", clean(e)[:100])
+            job["src_tries"] = job.get("src_tries", 0) + 1
         return ask_confirm(job)
     if act == "lk" and stage == "confirm":
         job["links_on"] = not job.get("links_on", True)
@@ -4297,6 +4458,7 @@ def main():
             {"command": "series", "description": "Check playlists, add latest video"},
             {"command": "made", "description": "Videos I will never offer again"},
             {"command": "sequel", "description": "Episodes for a video that is taking off"},
+            {"command": "sources", "description": "Add sources to old video descriptions"},
             {"command": "progress", "description": "Progress toward earning"},
             {"command": "retention", "description": "Where viewers leave your video"},
             {"command": "audit", "description": "Kemet Audited: check a claim vs evidence"},
