@@ -35,7 +35,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.31"
+BOT_VERSION = "v10.32"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -232,6 +232,73 @@ def find_winners(vids):
     return sorted(win, key=lambda x: x[0], reverse=True)
 
 
+def title_features(t):
+    t = str(t)
+    return {
+        "an either/or title (X or Y)": bool(re.search(r"\b[\w'’-]+ or [\w'’-]+", t, re.I)),
+        "a question in the title": "?" in t,
+        "a number in the title": bool(re.search(r"\d", t)),
+        "a colon header (like Fact Check:)": ":" in t,
+        "a short title (under 45 characters)": len(t) < 45,
+    }
+
+
+def compute_patterns(rows):
+    """rows: [{title, secs, views, age}] -> plain-language findings from the owner's own numbers (small sample, hints only)."""
+    rows = [r for r in rows if r["age"] >= 3]
+    if len(rows) < 8:
+        return []
+    for r in rows:
+        r["vpd"] = r["views"] / r["age"]
+        r["f"] = title_features(r["title"])
+        r["f"]["a Short (60 seconds or less)"] = 0 < r["secs"] <= 60
+    out = []
+    for name in rows[0]["f"]:
+        a = [r["vpd"] for r in rows if r["f"][name]]
+        b = [r["vpd"] for r in rows if not r["f"][name]]
+        if len(a) < 2 or len(b) < 2:
+            continue
+        ma, mb = sum(a) / len(a), sum(b) / len(b)
+        if mb <= 0:
+            continue
+        ratio = ma / mb
+        if ratio >= 1.5 or ratio <= 0.67:
+            out.append(f"Videos with {name} get about {ratio:.1f}x the daily views of the others ({len(a)} vs {len(b)} videos)")
+    return out[:5]
+
+
+def refresh_patterns(force=False):
+    m = mem()
+    p = m.get("patterns") or {}
+    if not force and time.time() - p.get("ts", 0) < 3 * 86400:
+        return p.get("lines", [])
+    tok = yt_token()
+    vids, _ = latest_vids(tok, 50)
+    secs = {}
+    ids = [v["id"] for v in vids]
+    if ids:
+        for it in yt_get("videos", tok, part="contentDetails", id=",".join(ids)).get("items", []):
+            secs[it.get("id")] = iso_seconds((it.get("contentDetails") or {}).get("duration"))
+    rows = []
+    for v in vids:
+        pub = iso_ts(v["snippet"].get("publishedAt", ""))
+        if pub:
+            rows.append({"title": v["snippet"].get("title", ""), "secs": secs.get(v["id"], 0),
+                         "views": int(v.get("statistics", {}).get("viewCount", 0)), "age": (time.time() - pub) / 86400})
+    lines = compute_patterns(rows)
+    m["patterns"] = {"ts": time.time(), "lines": lines, "n": len(rows)}
+    return lines
+
+
+def cmd_patterns(st):
+    lines = refresh_patterns(force=True)
+    n = (mem().get("patterns") or {}).get("n", 0)
+    if not lines:
+        return send(f"I need at least 8 videos with a few days of views to see patterns (I see {n}). Too little data would only mislead you.")
+    send("📊 What your own numbers say (small sample, treat as hints, not laws):\n\n" + "\n".join("• " + l for l in lines) +
+         "\n\nI use these when I suggest titles and ideas.")
+
+
 def cmd_sequel(st, auto=False):
     tok = yt_token()
     vids, chid = latest_vids(tok, 50)
@@ -302,6 +369,9 @@ def learned():
             parts.append("Hashtags/tags used right now by the best-performing recent Ancient Egypt videos: " + ", ".join(tr["tags"][:15]))
         if tr.get("buzz"):
             parts.append("What is trending in the Ancient Egypt niche now (checked " + time.strftime("%d %b", time.gmtime(tr["ts"])) + "): " + tr["buzz"][:600])
+    pat = (m.get("patterns") or {}).get("lines")
+    if pat:
+        parts.append("What the owner's own numbers show (small sample, hints only):\n" + "\n".join("- " + x for x in pat))
     try:
         made = made_titles()
     except Exception:
@@ -989,21 +1059,49 @@ Write 3 short lines saying what the sources confirm, and name anything in the vi
 SRC_HEAD = "🔎 Facts in this video were checked against these sources"
 
 
+FALLBACK_NOTE = "FALLBACK: "
+SRC_HEAD_FB = "📚 Further reading: peer-reviewed works about this topic"
+OPENALEX = os.getenv("OPENALEX_URL", "https://api.openalex.org")
+
+
+def scholar_sources(about, n=6):
+    """Free, no-key scholarly sources (OpenAlex) for when Google's live search is rate-limited."""
+    words = [w for w in re.findall(r"[A-Za-z]{4,}", str(about)) if w.lower() not in GENERIC_WORDS][:8]
+    if not words:
+        return []
+    try:
+        r = S.get(OPENALEX + "/works", params={"search": " ".join(words) + " Egypt", "per-page": 15,
+                                               "filter": "has_doi:true", "select": "title,doi,publication_year,authorships"}, timeout=30)
+        r.raise_for_status()
+        out = []
+        for w in r.json().get("results", []):
+            if not w.get("doi") or not w.get("title"):
+                continue
+            au = ((w.get("authorships") or [{}])[0].get("author") or {}).get("display_name", "")
+            out.append([f"{au} ({w.get('publication_year', '')}): {w['title']}"[:120].strip(), w["doi"]])
+        return out[:n]
+    except Exception as e:
+        print("scholar:", clean(e)[:100])
+        return []
+
+
 def fetch_sources(about, claims=()):
     """Sources for a video's topic. Returns (note, [[title, url], ...], busy). busy=True when Google's search was
     rate-limited (free daily quota), which says nothing about the video itself."""
     try:
-        text, srcs = gemini_text(SRC_PROMPT.format(about=str(about)[:900], claims=json.dumps(list(claims)[:8])), search=True)
+        text, srcs = gemini_text(SRC_PROMPT.format(about=str(about)[:900], claims=json.dumps(list(claims)[:8])), search=True, cache=True)
+        if "NOT verified" not in text:
+            return text, dedupe_sources(srcs, 12), False
     except Exception as e:
         print("fetch sources:", clean(e)[:100])
-        return "", [], True
-    if "NOT verified" in text:
-        return "", [], True
-    return text, dedupe_sources(srcs, 12), False
+    fb = scholar_sources(about)                      # Google's search is busy: free peer-reviewed works instead
+    if fb:
+        return FALLBACK_NOTE + "Google's live search is busy, so these are peer-reviewed works about the topic (further reading), not a line-by-line check.", fb, False
+    return "", [], True
 
 
-def source_block(srcs):
-    return SRC_HEAD + "\nSources:\n" + "\n".join(f"- {t}: {u}" for t, u in srcs[:12])
+def source_block(srcs, fallback=False):
+    return (SRC_HEAD_FB if fallback else SRC_HEAD) + "\nSources:\n" + "\n".join(f"- {t}: {u}" for t, u in srcs[:12])
 
 
 def has_sources(desc):
@@ -1014,10 +1112,12 @@ def fetch_job_sources(job):
     r = job["review"]
     about = (job.get("title") or "") + ". " + r.get("summary", "")
     text, srcs, busy = fetch_sources(about, r.get("claims") or [])
+    fb = text.startswith(FALLBACK_NOTE)
+    text = text.replace(FALLBACK_NOTE, "")
     if srcs:
         prev = (job.get("evidence") or {}).get("sources") or []
         allsrc = merge_sources(prev, srcs)
-        job["evidence"] = {"claim": (job.get("evidence") or {}).get("claim") or "Facts in this video were checked against these sources",
+        job["evidence"] = {"claim": (job.get("evidence") or {}).get("claim") or (SRC_HEAD_FB[2:] if fb else "Facts in this video were checked against these sources"),
                            "verdict": (job.get("evidence") or {}).get("verdict", ""), "sources": allsrc}
         job["ev_on"] = True
         send(f"📚 Found {len(allsrc)} sources for this video. They go into the description automatically:\n" +
@@ -1075,6 +1175,8 @@ def cmd_sources(st, auto=False, limit=4):
     for v in todo[:limit]:
         sn = v["snippet"]
         text, srcs, busy = fetch_sources(sn.get("title", "") + ". " + (sn.get("description") or "")[:600])
+        fb = text.startswith(FALLBACK_NOTE)
+        text = text.replace(FALLBACK_NOTE, "")
         if busy:                                   # Google's free search limit: stop, do not blame the video
             busy_hit = True
             break
@@ -1082,7 +1184,7 @@ def cmd_sources(st, auto=False, limit=4):
             failed[v["id"]] = failed.get(v["id"], 0) + 1
             continue
         pid = new_pid(st)
-        st["props"][pid] = {"type": "srcb", "video_id": v["id"], "title": sn.get("title", ""), "block": source_block(srcs),
+        st["props"][pid] = {"type": "srcb", "video_id": v["id"], "title": sn.get("title", ""), "block": source_block(srcs, fb),
                             "created": time.time()}
         pids.append(pid)
         send(f"📚 \"{sn.get('title', '')}\"\n{len(srcs)} sources found:\n" + "\n".join(f"• {t}: {u}" for t, u in srcs[:5]) +
@@ -1639,6 +1741,12 @@ def on_prop(jid, act, st):
         mem().setdefault("sublines", []).append({"vid": prop["video_id"], "variant": prop["variant"], "ts": time.time()})
         st["props"].pop(jid, None)
         return send("✅ Subscribe line added at the top of the description. I will compare the wordings after a few days of views.")
+    if act in ("bi", "bq", "bs") and kind == "brief":
+        if act == "bi":
+            return cmd_idea(st)
+        if act == "bq":
+            return cmd_sequel(st)
+        return cmd_sources(st, limit=3)
     if act == "sb" and kind == "srcb":
         try:
             ok = set_description_sources(prop["video_id"], prop["block"])
@@ -1786,7 +1894,27 @@ def plain(text):
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
-def gemini_text(prompt, search=False):
+def search_blocked():
+    """True for 3 hours after Google's free search limit was hit: automatic jobs wait instead of burning retries."""
+    return time.time() - mem().get("search_busy_ts", 0) < 3 * 3600
+
+
+def gemini_text(prompt, search=False, cache=False):
+    key = hashlib.sha1(prompt.encode()).hexdigest()[:16]
+    if search and cache:
+        hit = (mem().get("scache") or {}).get(key)
+        if hit and time.time() - hit.get("ts", 0) < 7 * 86400:
+            return hit["t"], [tuple(x) for x in hit["s"]]
+    out = _gemini_text(prompt, search)
+    if search and cache and out[1] and "NOT verified" not in out[0]:
+        sc = mem().setdefault("scache", {})
+        sc[key] = {"ts": time.time(), "t": out[0][:3000], "s": [list(x) for x in out[1][:12]]}
+        for k in sorted(sc, key=lambda k: sc[k].get("ts", 0))[:-20]:      # keep the 20 newest only
+            sc.pop(k, None)
+    return out
+
+
+def _gemini_text(prompt, search=False):
     body = {"contents": [{"parts": [{"text": prompt}]}]}
     if search:
         body["tools"] = [{"google_search": {}}]
@@ -1795,6 +1923,10 @@ def gemini_text(prompt, search=False):
     except GeminiBusy:
         if not search:
             raise
+        try:
+            mem()["search_busy_ts"] = time.time()
+        except Exception:
+            pass
         # search grounding has a tighter free quota: fall back to plain answer
         body.pop("tools")
         r = _gpost(body, rounds=2)
@@ -2049,7 +2181,7 @@ def verified_script(title, build_prompt):
     """Research from many kinds of sources, write ONLY from the fact sheet, then check the finished script once more."""
     sources, facts, unverified = [], "", False
     try:
-        facts, s1 = gemini_text(RESEARCH_PROMPT.format(title=title), search=True)
+        facts, s1 = gemini_text(RESEARCH_PROMPT.format(title=title), search=True, cache=True)
         sources += s1
         if "NOT verified" in facts:                 # search was rate-limited: do not treat the answer as researched
             facts, unverified = "", True
@@ -2678,6 +2810,64 @@ def daily_idea_taps(st):
     idea_taps(st, ideas, "💡 From your daily report. Tap an idea to start working on it:", compact=True)
 
 
+def nudge_line(tok):
+    m = mem()
+    last = last_upload_ts(tok)
+    if not last:
+        return ""
+    gap = (time.time() - last) / 86400
+    if gap <= m["cadence_days"] + 1:
+        return ""
+    return f"⏰ {gap:.0f} days since your last video (your goal: every {m['cadence_days']}). One short, simple video keeps the rhythm."
+
+
+def cmd_brief(st, force=False):
+    """One message a day with everything that needs you, instead of many separate pings."""
+    m = mem()
+    tok = yt_token()
+    lines, rows = [], []
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "brief", "created": time.time()}
+    try:
+        n = nudge_line(tok)
+        if n:
+            lines.append(n)
+            rows.append([btn("💡 Give me ideas", pid, "bi")])
+    except Exception as e:
+        print("brief nudge:", clean(e)[:80])
+    vids, _ = latest_vids(tok, 50)
+    try:
+        offered = m.setdefault("sequel_offered", [])
+        wins = [w for w in find_winners(vids) if w[2]["id"] not in offered]
+        if wins:
+            ratio, views, v = wins[0]
+            lines.append(f"🔥 \"{v['snippet'].get('title', '')}\" is taking off: {views} views, about {ratio:.1f}x your usual pace.")
+            rows.append([btn("🎬 Episode ideas for it", pid, "bq")])
+    except Exception as e:
+        print("brief sequel:", clean(e)[:80])
+    try:
+        failed = m.get("src_failed", {})
+        miss = [v for v in vids if not has_sources(v["snippet"].get("description")) and failed.get(v["id"], 0) < 2]
+        if miss:
+            lines.append(f"📚 {len(miss)} videos have no sources in the description yet.")
+            rows.append([btn("📚 Check 3 now", pid, "bs")])
+    except Exception as e:
+        print("brief sources:", clean(e)[:80])
+    try:
+        pats = refresh_patterns()
+        if pats and pats != m.get("patterns_seen"):
+            m["patterns_seen"] = pats
+            lines.append("📊 New pattern in your numbers: " + pats[0] + ". (/patterns shows all)")
+    except Exception as e:
+        print("brief patterns:", clean(e)[:80])
+    if not lines:
+        st["props"].pop(pid, None)
+        if force:
+            send("☀️ Nothing needs you right now. 👍")
+        return
+    send("☀️ Your daily brief\n\n" + "\n".join(lines), rows)
+
+
 def housekeeping(st):
     if st.get("paused"):
         return
@@ -2685,8 +2875,7 @@ def housekeeping(st):
     now = time.time()
     if now - m["last_check"] > 1800:
         m["last_check"] = now
-        for step in (lambda: run_results(False), lambda: run_exps(st),
-                     lambda: maybe_nudge(st, yt_token())):
+        for step in (lambda: run_results(False), lambda: run_exps(st)):
             try:
                 step()
             except Exception as e:
@@ -2695,22 +2884,19 @@ def housekeeping(st):
         daily_idea_taps(st)
     except Exception as e:
         print("daily ideas:", clean(e)[:120])
-    if now - m.get("last_sequel", 0) > 12 * 3600:
-        m["last_sequel"] = now
+    g0 = time.gmtime()
+    if "last_brief" not in m:
+        m["last_brief"] = now                       # first run after the update: the first brief comes tomorrow
+    elif (6 <= g0.tm_hour < 18 or os.getenv("NUDGE_ANY_HOUR")) and now - m.get("last_brief", 0) > 22 * 3600:
+        m["last_brief"] = now
         try:
-            cmd_sequel(st, auto=True)
+            cmd_brief(st)
         except Exception as e:
-            print("sequel:", clean(e)[:120])
+            print("brief:", clean(e)[:120])
     g = time.gmtime()
     week = time.strftime("%G-%V", g)
     if os.getenv("SKIP_WEEKLY"):
         return
-    if now - m.get("last_srcscan", 0) > 24 * 3600:
-        m["last_srcscan"] = now
-        try:
-            cmd_sources(st, auto=True, limit=3)
-        except Exception as e:
-            print("sources scan:", clean(e)[:120])
     if g.tm_wday == 2 and g.tm_hour >= 7 and m["last_news"] != week:
         m["last_news"] = week
         try:
@@ -3977,7 +4163,7 @@ ROUTER_PROMPT = """You are the brain of a Telegram assistant that runs the YouTu
 He wrote: "{text}"
 Choose the action. Actions: idea (wants video ideas), script (gave a topic to write a script about; put the topic in "topic"),
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
-subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes), sources (add sources to the descriptions of older videos),
+subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes), sources (add sources to the descriptions of older videos), patterns (what the owner's own numbers show about titles and formats), brief (a summary of everything that needs him),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
 funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), lessons (what you have learned), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
@@ -4303,6 +4489,10 @@ def on_message(msg, st):
         cmd_sequel(st)
     elif text == "/sources":
         cmd_sources(st)
+    elif text == "/patterns":
+        cmd_patterns(st)
+    elif text == "/brief":
+        cmd_brief(st, force=True)
     elif text in ("/community", "/starter", "/sublines", "/hook", "/refresh", "/calendar", "/subs", "/praise", "/voice", "/poll"):
         globals()["cmd_" + text[1:]](st)
     elif text.startswith("/demand"):
@@ -4350,7 +4540,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -4473,6 +4663,8 @@ def main():
             {"command": "made", "description": "Videos I will never offer again"},
             {"command": "sequel", "description": "Episodes for a video that is taking off"},
             {"command": "sources", "description": "Add sources to old video descriptions"},
+            {"command": "patterns", "description": "What your own numbers show"},
+            {"command": "brief", "description": "Your daily brief now"},
             {"command": "progress", "description": "Progress toward earning"},
             {"command": "retention", "description": "Where viewers leave your video"},
             {"command": "audit", "description": "Kemet Audited: check a claim vs evidence"},
