@@ -35,7 +35,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.25"
+BOT_VERSION = "v10.26"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -3825,8 +3825,12 @@ def on_message(msg, st):
     doc = msg.get("document") or {}
     if str(doc.get("file_name", "")).lower().endswith(".py"):
         return cmd_update(msg)
-    if msg.get("video") or str(doc.get("mime_type", "")).startswith("video/"):
-        return start_job(msg, st)
+    if msg.get("video") or str(doc.get("mime_type", "")).startswith("video/") or \
+            str(doc.get("file_name", "")).lower().endswith((".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".3gp")):
+        return start_job(msg, st)       # a video sent "as a file" often has an odd mime type, so the name counts too
+    if doc:
+        return send("I received the file \"%s\" but I can only read videos (mp4, mov), voice notes and my own bot.py. "
+                    "If it is a video, send it again as a Video." % str(doc.get("file_name", "file"))[:60])
     if msg.get("voice") or msg.get("audio"):
         return handle_voice(msg, st)
     raw = (msg.get("text") or "").strip()
