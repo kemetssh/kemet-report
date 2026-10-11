@@ -35,7 +35,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.27"
+BOT_VERSION = "v10.29"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -198,6 +198,68 @@ def is_made(title, made=None):
 def drop_made(items, key="title"):
     made = made_titles()
     return [i for i in items if isinstance(i, dict) and not is_made(i.get(key, ""), made)]
+
+
+SEQUEL_PROMPT = """You advise the owner of the YouTube channel "Kemet | Ancient Egypt": short, calm, evidence-first videos; he records his own voice and never fakes facts.
+{memory}
+One of his videos is doing much better than usual:
+Title: {title}
+About: {about}
+Views: {views} ({ratio:.1f}x the daily views of his usual video). Likes: {likes}. Comments: {comments}.
+What viewers wrote under it (their questions and reactions): {viewer}
+Give EXACTLY 3 follow-up EPISODES that continue this video for the same audience (Part 2, the next question, the opposite side, the deeper evidence). Each must be a different angle, honest, and not a copy of a title he already made: {made}
+Each title under 70 characters, ideally with a clear either/or or question; say in "why" what viewers asked for or what loop it opens.
+Return JSON only: {{"ideas": [{{"title": "", "hook": "first spoken sentence", "why": "one sentence"}}]}}"""
+
+
+def find_winners(vids):
+    """Videos doing clearly better than the channel's usual (views per day, not just total views)."""
+    rows = []
+    for v in vids:
+        pub = iso_ts(v["snippet"].get("publishedAt", ""))
+        if not pub:
+            continue
+        age = (time.time() - pub) / 86400
+        if age < 2:
+            continue
+        views = int(v.get("statistics", {}).get("viewCount", 0))
+        rows.append((views / max(age, 3), views, v))
+    if len(rows) < 3:
+        return []
+    vpds = sorted(r[0] for r in rows)
+    median = vpds[len(vpds) // 2] or 0.01
+    win = [(vpd / median, views, v) for vpd, views, v in rows if vpd >= 2 * median and views >= 40]
+    return sorted(win, key=lambda x: x[0], reverse=True)
+
+
+def cmd_sequel(st, auto=False):
+    tok = yt_token()
+    vids, chid = latest_vids(tok, 50)
+    wins = find_winners(vids)
+    offered = mem().setdefault("sequel_offered", [])
+    fresh_wins = [w for w in wins if w[2]["id"] not in offered]
+    if not fresh_wins:
+        if not auto:
+            send("No video is clearly beating your usual numbers right now, so I would not force an episode two. "
+                 "I check every day and tell you the moment one takes off." if not wins else
+                 "I already suggested episodes for your best videos. Send /sequel again after your next video has had a few days.")
+        return
+    ratio, views, v = fresh_wins[0]
+    sn = v["snippet"]
+    stt = v.get("statistics", {})
+    viewer = viewer_comments(tok, [v], chid, per=30)
+    out = gemini([{"text": SEQUEL_PROMPT.format(
+        memory=learned(), title=sn.get("title", ""), about=(sn.get("description") or "")[:400], views=views, ratio=ratio,
+        likes=stt.get("likeCount", "?"), comments=stt.get("commentCount", "?"),
+        viewer=json.dumps([r["comment"] for r in viewer][:25]), made=json.dumps(made_titles()[:40]))}])
+    ok = idea_taps(st, out.get("ideas", []),
+                   f"🔥 \"{sn.get('title', '')}\" is taking off: {views} views, about {ratio:.1f}x your usual pace. "
+                   "Strike while it is hot. 3 follow-up episodes:", allow_made=True)
+    if ok:
+        offered.append(v["id"])
+        send("Tip: film the episode within a few days, and mention the new one in a pinned comment under this video: https://youtu.be/" + v["id"])
+    elif not auto:
+        send("I could not write episode ideas right now. Try again later.")
 
 
 def cmd_made(st, raw=""):
@@ -1815,20 +1877,78 @@ def make_kit(title, script_text=""):
     return kit
 
 
+RESEARCH_PROMPT = """Research this Ancient Egypt topic with web search before a video is written: "{title}".
+Look across DIFFERENT kinds of sources, not one site: university or peer-reviewed work, museum collections (British Museum, the Met, the Egyptian Museum, the Grand Egyptian Museum), excavation reports and archaeology news, Egyptology institutes, and the Egyptian Ministry of Tourism and Antiquities. Skip blogs, forums and AI-generated pages.
+Write a FACT SHEET: 8 to 12 numbered facts a video could use (names, dates, places, numbers). After each fact write the source name and mark it:
+CONFIRMED (two or more independent reliable sources agree), SINGLE SOURCE (only one source), or DISPUTED (scholars disagree; say how).
+End with "OPEN QUESTIONS:" listing what is still debated or unknown. Never invent a source, quote or number; if you cannot find something, leave it out."""
+
+VERIFY_PROMPT = """Use web search. Verify this video script line by line against reliable sources (museums, universities, excavation reports). Be strict; never invent sources.
+Script:
+{script}
+List every factual claim (names, dates, places, numbers, causes). Mark each status "solid" (confirmed), "shaky" (only one source, or scholars disagree) or "wrong" (evidence contradicts it).
+If any claim is shaky or wrong, also return "corrected_script": the SAME script with only those lines fixed or softened (keep the structure, length and voice; use careful words like "most likely" for shaky claims). Otherwise leave it empty.
+Return JSON only: {{"results": [{{"claim": "...", "status": "solid" or "shaky" or "wrong", "note": "short reason", "fix": "how to say it, or empty"}}], "corrected_script": ""}}"""
+
+
+def verified_script(title, build_prompt):
+    """Research from many kinds of sources, write ONLY from the fact sheet, then check the finished script once more."""
+    sources, facts, unverified = [], "", False
+    try:
+        facts, s1 = gemini_text(RESEARCH_PROMPT.format(title=title), search=True)
+        sources += s1
+        if "NOT verified" in facts:                 # search was rate-limited: do not treat the answer as researched
+            facts, unverified = "", True
+    except Exception as e:
+        print("research:", clean(e)[:120])
+        unverified = True
+    prompt = build_prompt()
+    if facts:
+        prompt += ("\n\nFACT SHEET from research (rely on it): use only CONFIRMED facts as plain statements; say 'according to' or 'most likely' "
+                   "for SINGLE SOURCE or DISPUTED ones; leave out anything not on the sheet that you cannot confirm.\n" + facts[:6000])
+    text, s2 = gemini_text(prompt, search=True)
+    if "NOT verified" in text:
+        unverified = True
+    sources += s2
+    summary, changed = "", []
+    try:
+        vt, s3 = gemini_text(VERIFY_PROMPT.format(script=text[:9000]), search=True)
+        sources += s3
+        vo = parse_obj(vt)
+        res = [r for r in vo.get("results", []) if isinstance(r, dict) and r.get("claim")]
+        if res and "NOT verified" not in vt:
+            ok = sum(1 for r in res if str(r.get("status", "")).lower() == "solid")
+            bad = [r for r in res if str(r.get("status", "")).lower() != "solid"]
+            fixed = str(vo.get("corrected_script") or "").strip()
+            if bad and len(fixed) > 0.6 * len(text):
+                text = plain(fixed)
+                changed = bad
+            summary = f"🔎 Second check of the finished script: ✅ {ok} confirmed"
+            if bad:
+                summary += f", ⚠️ {len(bad)} softened or corrected"
+                summary += "\n" + "\n".join(f"• {r['claim']}: {r.get('note', '')}" for r in bad[:4])
+        else:
+            unverified = True
+    except Exception as e:
+        print("verify:", clean(e)[:120])
+        unverified = True
+    if unverified:
+        summary = ("⚠️ Search was busy, so part of the fact-check did not run. Treat the facts as NOT fully verified: "
+                   "glance at the sources, or send me the finished video and I check it again before upload.\n" + summary).strip()
+    return text, dedupe_sources(sources, 12), summary
+
+
 def write_script(idea):
     send(f"Writing and fact-checking: {idea['title']} ...")
-    text, sources = gemini_text(SCRIPT_PROMPT.format(title=idea["title"], hook=idea.get("hook", "")), search=True)
+    text, sources, summary = verified_script(idea["title"], lambda: SCRIPT_PROMPT.format(title=idea["title"], hook=idea.get("hook", "")))
     msg = f"🎬 {idea['title']}\n\n{text}"
+    if summary:
+        msg += "\n\n" + summary
     if sources:
-        mem()["script_sources"] = {"title": idea["title"], "sources": dedupe_sources(sources, 10), "ts": time.time()}
-        seen, lines = set(), []
-        for t, u in dedupe_sources(sources, 10):
-            if u not in seen:
-                seen.add(u)
-                lines.append(f"• {t}: {u}")
-        msg += "\n\nSources I checked (they will be added to your video description):\n" + "\n".join(lines[:8])
+        mem()["script_sources"] = {"title": idea["title"], "sources": sources, "ts": time.time()}
+        msg += f"\n\nSources I checked ({len(sources)}, they will be added to your video description):\n" + "\n".join(f"• {t}: {u}" for t, u in sources)
     msg += "\n\nRecord it in your own voice, then send me the video. (AI can still be wrong: glance at the sources.)"
-    send(msg)
+    send(msg[:4000])
     try:
         make_kit(idea["title"], text)
     except Exception as e:
@@ -1986,7 +2106,7 @@ def evidence_block(job):
     if ev.get("verdict"):
         lines.append(f"Verdict: {ev['verdict']}")
     lines.append("Sources:")
-    lines += [f"- {t}: {u}" for t, u in ev["sources"][:10]]
+    lines += [f"- {t}: {u}" for t, u in ev["sources"][:12]]
     return "\n\n" + "\n".join(lines)
 
 
@@ -2417,6 +2537,12 @@ def housekeeping(st):
         daily_idea_taps(st)
     except Exception as e:
         print("daily ideas:", clean(e)[:120])
+    if now - m.get("last_sequel", 0) > 12 * 3600:
+        m["last_sequel"] = now
+        try:
+            cmd_sequel(st, auto=True)
+        except Exception as e:
+            print("sequel:", clean(e)[:120])
     g = time.gmtime()
     week = time.strftime("%G-%V", g)
     if os.getenv("SKIP_WEEKLY"):
@@ -2553,9 +2679,10 @@ def trend_pack(force=False):
     return tr
 
 
-def idea_taps(st, ideas, heading, compact=False):
+def idea_taps(st, ideas, heading, compact=False, allow_made=False):
     """Send exactly 3 ideas with one tap each; a tap writes the fact-checked script for that idea."""
-    ideas = drop_made([i for i in ideas if isinstance(i, dict) and i.get("title")])[:3]
+    ideas = [i for i in ideas if isinstance(i, dict) and i.get("title")]
+    ideas = (ideas if allow_made else drop_made(ideas))[:3]
     if not ideas:
         return False
     pid = new_pid(st)
@@ -3097,19 +3224,15 @@ def cmd_longform(st):
 
 def write_long(c):
     send(f"Writing and fact-checking the long script: {c['title']} (1-2 minutes)...")
-    text, sources = gemini_text(LONG_SCRIPT_PROMPT.format(
-        title=c["title"], angle=c.get("angle", ""), outline=" / ".join(c.get("outline", []))), search=True)
+    text, sources, summary = verified_script(c["title"], lambda: LONG_SCRIPT_PROMPT.format(
+        title=c["title"], angle=c.get("angle", ""), outline=" / ".join(c.get("outline", []))))
     msg = f"🎞 {c['title']}\n\n{text}"
-    seen, lines = set(), []
+    if summary:
+        msg += "\n\n" + summary
     if sources:
-        mem()["script_sources"] = {"title": c["title"], "sources": dedupe_sources(sources, 10), "ts": time.time()}
-    for t, u in dedupe_sources(sources, 10):
-        if u not in seen:
-            seen.add(u)
-            lines.append(f"• {t}: {u}")
-    if lines:
-        msg += "\n\nSources I checked (they will be added to your video description):\n" + "\n".join(lines[:8])
-    send(msg + "\n\nRecord it in your own voice and send me the video like any other.")
+        mem()["script_sources"] = {"title": c["title"], "sources": sources, "ts": time.time()}
+        msg += f"\n\nSources I checked ({len(sources)}, they will be added to your video description):\n" + "\n".join(f"• {t}: {u}" for t, u in sources)
+    send((msg + "\n\nRecord it in your own voice and send me the video like any other.")[:4000])
 
 
 # ---------------- Community posts (YouTube has no free way to publish them, so the bot writes them for you to paste) ----------------
@@ -3688,7 +3811,7 @@ ROUTER_PROMPT = """You are the brain of a Telegram assistant that runs the YouTu
 He wrote: "{text}"
 Choose the action. Actions: idea (wants video ideas), script (gave a topic to write a script about; put the topic in "topic"),
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
-subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist),
+subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
 funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), lessons (what you have learned), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
@@ -3738,6 +3861,8 @@ def run_action(action, topic, st, text=""):
         return cmd_crosspost(st)
     if action == "series":
         return cmd_series(st)
+    if action == "sequel":
+        return cmd_sequel(st)
     if action == "progress":
         return cmd_progress(st)
     if action == "retention":
@@ -4006,6 +4131,8 @@ def on_message(msg, st):
         cmd_series(st)
     elif text.startswith("/made"):
         cmd_made(st, raw)
+    elif text == "/sequel":
+        cmd_sequel(st)
     elif text in ("/community", "/starter", "/sublines", "/hook", "/refresh", "/calendar", "/subs", "/praise", "/voice", "/poll"):
         globals()["cmd_" + text[1:]](st)
     elif text.startswith("/demand"):
@@ -4169,6 +4296,7 @@ def main():
             {"command": "crosspost", "description": "TikTok / Reels / Facebook kit"},
             {"command": "series", "description": "Check playlists, add latest video"},
             {"command": "made", "description": "Videos I will never offer again"},
+            {"command": "sequel", "description": "Episodes for a video that is taking off"},
             {"command": "progress", "description": "Progress toward earning"},
             {"command": "retention", "description": "Where viewers leave your video"},
             {"command": "audit", "description": "Kemet Audited: check a claim vs evidence"},
