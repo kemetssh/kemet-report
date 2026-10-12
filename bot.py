@@ -37,7 +37,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.39"
+BOT_VERSION = "v10.40"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -568,7 +568,7 @@ Return JSON only with exactly these keys:
  "issues": [{{"at": "mm:ss", "problem": "...", "fix": "..."}}],  // facts, sound, text, copyright look, pacing. max 6, empty if none
  "strengths": ["..."],  // max 3
  "titles": ["3 different titles, max 70 chars, curious but TRUE, no lies"],
- "descriptions": ["2 options, each 2-3 lines then hashtags (#AncientEgypt, add #Shorts if under 60s vertical)"],
+ "descriptions": ["2 options, each 2-3 lines, then a last line of hashtags (the bot swaps these for trending, relevant ones)"],
  "tags": ["up to 12 search tags"],
  "thumb_times": [3 numbers in seconds inside the video, sharp frames with a clear subject],
  "ai_visuals": true or false,  // true if the pictures or video look realistic AI-generated or heavily altered (YouTube requires a label for that)
@@ -610,7 +610,17 @@ def review_video(path, dur, w, h):
     data["ai_visuals"] = bool(data.get("ai_visuals"))
     data["policy_notes"] = [str(x)[:200] for x in data.get("policy_notes", [])][:4]
     try:
+        tags_h = pick_hashtags((data.get("summary") or "") + " " + " ".join(data.get("titles", [])), short=dur <= 60)
+        data["descriptions"] = [rewrite_hashtags(d, tags_h) for d in data.get("descriptions", [])]
+        data["hashtags"] = tags_h
+        extra = [t.lstrip("#").lower() for t in tags_h if t.lower() not in ("#shorts",)]
+        data["tags"] = list(dict.fromkeys([str(t) for t in data.get("tags", [])] + extra))[:15]
+    except Exception as e:
+        print("hashtags:", clean(e)[:100])
+    try:
         precheck_options(data)
+        if data.get("hashtags"):                      # a corrected description keeps the curated hashtags
+            data["descriptions"] = [rewrite_hashtags(d, data["hashtags"]) for d in data.get("descriptions", [])]
     except Exception as e:
         print("precheck:", clean(e)[:120])
     return data
@@ -643,7 +653,7 @@ def precheck_options(data):
         elif claim.startswith("Description:"):
             old_d = claim[12:].strip()
             for i, d in enumerate(descs):
-                if d.strip()[:60] == old_d[:60]:
+                if d.strip().startswith(old_d[:40]) or old_d.startswith(d.strip()[:40]):
                     descs[i] = re.sub(r"^Description:\s*", "", fix)[:4500]
                     n += 1
                     break
@@ -1433,6 +1443,124 @@ def cmd_watchnext(st, limit=4):
              [[btn(f"✅ Add all {len(pids)}", pa, "wa")]])
 
 
+NICHE_KEYS = ("egyptology", "pharaoh", "archaeolog", "history", "mumm", "pyramid", "tutankhamun", "nile", "hieroglyph", "ancientegypt",
+              "egypt", "giza", "cleopatra", "ramses", "ramesses", "anubis", "sphinx", "luxor", "karnak", "tomb", "temple", "gods")
+HASH_CLUSTER = re.compile(r"(?:(?<=\s)|^)(?:#[^\s#]+[ \t]*)+")
+
+
+def tag_to_hash(t):
+    words = re.findall(r"[a-z0-9]+", str(t).lower())
+    h = "".join(w.capitalize() for w in words)
+    if not words or len(h) < 3 or len(h) > 22 or h.isdigit():
+        return ""
+    return "#" + h
+
+
+def pick_hashtags(about, short=False, trend=None):
+    """3-5 hashtags: #AncientEgypt first, #Shorts for Shorts, then only TRENDING tags that truly fit this video (or the niche)."""
+    tr = trend if trend is not None else (mem().get("trend") or {})
+    out = ["#AncientEgypt"] + (["#Shorts"] if short else [])
+    topic = title_words(about)
+    for t in (tr.get("tags") or []):
+        ht = tag_to_hash(t)
+        if not ht or ht.lower() in [x.lower() for x in out]:
+            continue
+        key = ht.lower()[1:]
+        if (title_words(t) & topic) or any(n in key for n in NICHE_KEYS):
+            out.append(ht)
+        if len(out) >= 5:
+            break
+    for d in ("#Egyptology", "#History", "#Archaeology"):
+        if len(out) >= 3:
+            break
+        if d.lower() not in [x.lower() for x in out]:
+            out.append(d)
+    return out[:5]
+
+
+def rewrite_hashtags(desc, tags):
+    """Swap the description's hashtag cluster for the new one without touching sources, links or the Watch-next line."""
+    line = " ".join(tags)
+    cut = len(desc)
+    for mk in ("\n🔎 ", "\n📚 Further", "\nSources:"):
+        i = desc.find(mk)
+        if i != -1:
+            cut = min(cut, i)
+    head, tail = desc[:cut], desc[cut:]
+    ms = [m for m in HASH_CLUSTER.finditer(head)]
+    if ms:
+        m = ms[-1]
+        rest = head[m.end():]
+        head = head[:m.start()] + line + ("" if (not rest or rest.startswith("\n")) else " ") + rest
+    else:
+        paras = head.split("\n\n")
+        k = 1 if paras and paras[0].startswith("▶ Watch next:") and len(paras) > 1 else 0
+        paras[k] = paras[k].rstrip() + "\n" + line
+        head = "\n\n".join(paras)
+    return head + tail
+
+
+def current_hashtags(desc):
+    return [h.lower() for h in re.findall(r"#[^\s#]+", desc or "")]
+
+
+def set_description_hashtags(video_id, tags):
+    tok = yt_token()
+    sn = yt_get("videos", tok, part="snippet", id=video_id)["items"][0]["snippet"]
+    desc = sn.get("description", "")
+    new = rewrite_hashtags(desc, tags)
+    if new == desc or len(new) > 4990:
+        return False
+    body = {"title": sn["title"], "description": new, "categoryId": sn.get("categoryId", "27"), "tags": sn.get("tags", [])}
+    if sn.get("defaultLanguage"):
+        body["defaultLanguage"] = sn["defaultLanguage"]
+    r = S.put(f"{YT}/youtube/v3/videos?part=snippet", headers={"Authorization": f"Bearer {tok}"},
+              json={"id": video_id, "snippet": body}, timeout=60)
+    r.raise_for_status()
+    return True
+
+
+def cmd_hashtags(st, limit=4):
+    """Refresh the hashtags of older videos from what is trending now (nothing changes until you tap)."""
+    tr = trend_pack(force=bool(not (mem().get("trend") or {}).get("tags")))
+    if not (tr.get("tags") or []):
+        send("I could not read the trending tags right now, so I will not guess. Try again later.")
+        return
+    tok = yt_token()
+    vids, _ = latest_vids(tok, 50)
+    pending = {p.get("video_id") for p in st["props"].values() if p.get("type") == "htb"}
+    props = []
+    for v in vids:
+        if v["id"] in pending:
+            continue
+        sn = v["snippet"]
+        desc = sn.get("description") or ""
+        short = "#shorts" in desc.lower()
+        new = pick_hashtags(sn.get("title", "") + " " + desc[:300], short=short, trend=tr)
+        old = current_hashtags(desc)
+        if set(x.lower() for x in new) == set(old):
+            continue
+        if len(rewrite_hashtags(desc, new)) > 4990:
+            continue
+        props.append((v, new, old))
+    if not props:
+        return send("The hashtags on your videos already match what is trending. ✅")
+    send(f"#️⃣ Trending in your niche now: {', '.join('#' + t for t in tr['tags'][:8])}\n"
+         f"{len(props)} videos could use a refresh. Here are the first {min(limit, len(props))} (nothing changes until you tap).")
+    pids = []
+    for v, new, old in props[:limit]:
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "htb", "video_id": v["id"], "title": v["snippet"].get("title", ""), "tags": new, "created": time.time()}
+        pids.append(pid)
+        send(f"📺 \"{v['snippet'].get('title', '')}\"\nnow: {' '.join(old) if old else '(no hashtags)'}\nnew: {' '.join(new)}",
+             [[btn("✅ Use the new hashtags", pid, "hy"), btn("Skip", pid, "cs")]])
+    if len(pids) > 1:
+        pa = new_pid(st)
+        st["props"][pa] = {"type": "hta", "pids": pids, "created": time.time()}
+        send(f"Refresh all {len(pids)} in one go?" + (f" ({len(props) - limit} more will follow next time you send /hashtags.)" if len(props) > limit else ""),
+             [[btn(f"✅ Refresh all {len(pids)}", pa, "hz")]])
+
+
 def cmd_sources(st, auto=False, limit=4):
     """Go through the older videos and propose adding sources to every description that lacks them."""
     tok = yt_token()
@@ -1978,6 +2106,26 @@ def on_prop(jid, act, st):
     if act == "sh" and kind == "schedgen":
         st["props"].pop(jid, None)
         return cmd_schedule(st, prop["video_id"])
+    if act == "hy" and kind == "htb":
+        try:
+            ok = set_description_hashtags(prop["video_id"], prop["tags"])
+        except Exception as e:
+            return send("I could not update that description (" + clean(e)[:80] + "). Tap again later.", [[btn("Try again", jid, "hy")]])
+        st["props"].pop(jid, None)
+        return send(f"✅ Hashtags refreshed on \"{prop['title']}\"." if ok else "Nothing to change there.")
+    if act == "hz" and kind == "hta":
+        done = 0
+        for p in prop["pids"]:
+            pr = st["props"].get(p)
+            if pr and pr.get("type") == "htb":
+                try:
+                    if set_description_hashtags(pr["video_id"], pr["tags"]):
+                        done += 1
+                    st["props"].pop(p, None)
+                except Exception as e:
+                    print("hashtags all:", clean(e)[:100])
+        st["props"].pop(jid, None)
+        return send(f"✅ Refreshed hashtags on {done} videos.")
     if act == "wn" and kind == "wnb":
         try:
             ok = set_description_watch(prop["video_id"], prop["line"])
@@ -3656,7 +3804,7 @@ def trend_pack(force=False):
     except Exception as e:
         print("trend youtube failed:", clean(e)[:120])
     try:
-        buzz, _ = gemini_text(TREND_PROMPT, search=True)
+        buzz, _ = gemini_text(TREND_PROMPT, search=True, topic="Ancient Egypt news and viral videos this week")
     except Exception as e:
         print("trend search failed:", clean(e)[:120])
     top.sort(reverse=True)
@@ -4830,7 +4978,7 @@ Choose the action. Actions: idea (wants video ideas), script (gave a topic to wr
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes), sources (add sources to the descriptions of older videos), patterns (what the owner's own numbers show about titles and formats), brief (a summary of everything that needs him),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
-funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), lessons (what you have learned), health (is everything working),
+funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), lessons (what you have learned), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -4856,6 +5004,8 @@ def run_action(action, topic, st, text=""):
         return cmd_schedule(st)
     if action == "watchnext":
         return cmd_watchnext(st)
+    if action == "hashtags":
+        return cmd_hashtags(st)
     if action == "trends":
         return cmd_trends(st)
     if action == "thumbtest":
@@ -4972,6 +5122,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/funnel - point your Shorts viewers to a long video\n"
         "/besttime - when to post, from your own data\n"
         "/watchnext - add 'Watch next' links to old descriptions\n"
+        "/hashtags - refresh old hashtags from what is trending now\n"
         "/schedule - pick a publish time for your private video; /autoschedule on|off; /besthour 17 sets the US Eastern hour\n"
         "/trends - what is hot now in the niche (tags, topics)\n"
         "/thumbtest - 3 thumbnail options and how to test them\n"
@@ -5132,6 +5283,8 @@ def on_message(msg, st):
         cmd_besttime(st)
     elif text == "/watchnext":
         cmd_watchnext(st)
+    elif text == "/hashtags":
+        cmd_hashtags(st)
     elif text == "/schedule":
         cmd_schedule(st)
     elif text.startswith("/autoschedule"):
@@ -5229,7 +5382,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -5374,6 +5527,7 @@ def main():
             {"command": "besttime", "description": "When to post"},
             {"command": "schedule", "description": "Schedule the latest video at the best time"},
             {"command": "watchnext", "description": "Add Watch-next links to old videos"},
+            {"command": "hashtags", "description": "Refresh hashtags from what is trending"},
             {"command": "autoschedule", "description": "Auto-schedule uploads on or off"},
             {"command": "trends", "description": "What is trending now"},
             {"command": "thumbtest", "description": "Thumbnail options and test"},
