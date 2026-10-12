@@ -37,7 +37,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.40"
+BOT_VERSION = "v10.43"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -413,6 +413,10 @@ def learned():
             parts.append("Hashtags/tags used right now by the best-performing recent Ancient Egypt videos: " + ", ".join(tr["tags"][:15]))
         if tr.get("buzz"):
             parts.append("What is trending in the Ancient Egypt niche now (checked " + time.strftime("%d %b", time.gmtime(tr["ts"])) + "): " + tr["buzz"][:600])
+    gt = m.get("gtrend")
+    if gt and gt.get("buzz") and time.time() - gt.get("ts", 0) < 7 * 86400:
+        parts.append("What is viral WORLDWIDE right now (any niche): " + gt["buzz"][:500] +
+                     "\nUse a global trend only when it truthfully connects to Ancient Egypt (a format, a question people ask, a news hook). Never force it or mislead.")
     pat = (m.get("patterns") or {}).get("lines")
     if pat:
         parts.append("What the owner's own numbers show (small sample, hints only):\n" + "\n".join("- " + x for x in pat))
@@ -610,8 +614,9 @@ def review_video(path, dur, w, h):
     data["ai_visuals"] = bool(data.get("ai_visuals"))
     data["policy_notes"] = [str(x)[:200] for x in data.get("policy_notes", [])][:4]
     try:
-        tags_h = pick_hashtags((data.get("summary") or "") + " " + " ".join(data.get("titles", [])), short=dur <= 60)
-        data["descriptions"] = [rewrite_hashtags(d, tags_h) for d in data.get("descriptions", [])]
+        about_h = (data.get("summary") or "") + " " + " ".join(data.get("titles", []))
+        data["descriptions"] = [rewrite_hashtags(d, pick_hashtags(about_h, short=dur <= 60, keep=current_hashtags(d))) for d in data.get("descriptions", [])]
+        tags_h = pick_hashtags(about_h, short=dur <= 60)
         data["hashtags"] = tags_h
         extra = [t.lstrip("#").lower() for t in tags_h if t.lower() not in ("#shorts",)]
         data["tags"] = list(dict.fromkeys([str(t) for t in data.get("tags", [])] + extra))[:15]
@@ -619,8 +624,10 @@ def review_video(path, dur, w, h):
         print("hashtags:", clean(e)[:100])
     try:
         precheck_options(data)
-        if data.get("hashtags"):                      # a corrected description keeps the curated hashtags
-            data["descriptions"] = [rewrite_hashtags(d, data["hashtags"]) for d in data.get("descriptions", [])]
+        if data.get("hashtags"):                      # a corrected description keeps its hashtags
+            about_h = (data.get("summary") or "") + " " + " ".join(data.get("titles", []))
+            data["descriptions"] = [d if current_hashtags(d) else rewrite_hashtags(d, pick_hashtags(about_h, short=dur <= 60))
+                                    for d in data.get("descriptions", [])]
     except Exception as e:
         print("precheck:", clean(e)[:120])
     return data
@@ -1456,24 +1463,39 @@ def tag_to_hash(t):
     return "#" + h
 
 
-def pick_hashtags(about, short=False, trend=None):
-    """3-5 hashtags: #AncientEgypt first, #Shorts for Shorts, then only TRENDING tags that truly fit this video (or the niche)."""
+def pick_hashtags(about, short=False, trend=None, keep=()):
+    """3-5 hashtags. Order: #AncientEgypt, #Shorts (Shorts), the video's OWN existing hashtags (kept, never dropped), then only TRENDING
+    tags whose words appear in this video's own topic. A generic niche tag is never added just because it is trending."""
     tr = trend if trend is not None else (mem().get("trend") or {})
     out = ["#AncientEgypt"] + (["#Shorts"] if short else [])
+
+    def has(h):
+        return h.lower() in [x.lower() for x in out]
+    for k in keep:
+        k = str(k)
+        if k.startswith("#") and 2 < len(k) <= 23 and not has(k) and len(out) < 5:
+            nice = {"#ancientegypt": "#AncientEgypt", "#shorts": "#Shorts", "#kemet": "#Kemet"}.get(k.lower(), k)
+            if nice[1:].islower():
+                nice = "#" + nice[1:2].upper() + nice[2:]
+            out.append(nice)
     topic = title_words(about)
     for t in (tr.get("tags") or []):
-        ht = tag_to_hash(t)
-        if not ht or ht.lower() in [x.lower() for x in out]:
-            continue
-        key = ht.lower()[1:]
-        if (title_words(t) & topic) or any(n in key for n in NICHE_KEYS):
-            out.append(ht)
         if len(out) >= 5:
             break
+        ht = tag_to_hash(t)
+        if ht and not has(ht) and (title_words(t) & topic):
+            out.append(ht)
+    g = mem().get("gtrend") or {}
+    if len(out) < 5 and time.time() - g.get("ts", 0) < 7 * 86400:
+        for t in (g.get("tags") or []):
+            ht = tag_to_hash(t)
+            if ht and not has(ht) and (ht[1:].lower() in SAFE_GENERIC or (title_words(t) & topic)):
+                out.append(ht)                       # one slot only, and only a tag that is true for this video
+                break
     for d in ("#Egyptology", "#History", "#Archaeology"):
         if len(out) >= 3:
             break
-        if d.lower() not in [x.lower() for x in out]:
+        if not has(d):
             out.append(d)
     return out[:5]
 
@@ -1536,29 +1558,222 @@ def cmd_hashtags(st, limit=4):
         sn = v["snippet"]
         desc = sn.get("description") or ""
         short = "#shorts" in desc.lower()
-        new = pick_hashtags(sn.get("title", "") + " " + desc[:300], short=short, trend=tr)
         old = current_hashtags(desc)
-        if set(x.lower() for x in new) == set(old):
-            continue
+        new = pick_hashtags(sn.get("title", "") + " " + desc[:300], short=short, trend=tr, keep=old)
+        if not [x for x in new if x.lower() not in old]:
+            continue                                   # nothing new that truly fits this video: leave it alone
         if len(rewrite_hashtags(desc, new)) > 4990:
             continue
         props.append((v, new, old))
     if not props:
-        return send("The hashtags on your videos already match what is trending. ✅")
+        return send("No trending tag fits your videos better than the hashtags they already have, so I changed nothing. ✅")
+    gtags = (mem().get("gtrend") or {}).get("tags") or []
     send(f"#️⃣ Trending in your niche now: {', '.join('#' + t for t in tr['tags'][:8])}\n"
+         + (f"🌍 Viral worldwide now: {', '.join('#' + t for t in gtags[:8])}\n" if gtags else "") +
          f"{len(props)} videos could use a refresh. Here are the first {min(limit, len(props))} (nothing changes until you tap).")
     pids = []
     for v, new, old in props[:limit]:
         pid = new_pid(st)
         st["props"][pid] = {"type": "htb", "video_id": v["id"], "title": v["snippet"].get("title", ""), "tags": new, "created": time.time()}
         pids.append(pid)
-        send(f"📺 \"{v['snippet'].get('title', '')}\"\nnow: {' '.join(old) if old else '(no hashtags)'}\nnew: {' '.join(new)}",
+        send(f"📺 \"{v['snippet'].get('title', '')}\"\nnow: {' '.join(old) if old else '(no hashtags)'}\nnew: {' '.join(new)}\n(kept yours, added: {' '.join(x for x in new if x.lower() not in old)})",
              [[btn("✅ Use the new hashtags", pid, "hy"), btn("Skip", pid, "cs")]])
     if len(pids) > 1:
         pa = new_pid(st)
         st["props"][pa] = {"type": "hta", "pids": pids, "created": time.time()}
         send(f"Refresh all {len(pids)} in one go?" + (f" ({len(props) - limit} more will follow next time you send /hashtags.)" if len(props) > limit else ""),
              [[btn(f"✅ Refresh all {len(pids)}", pa, "hz")]])
+
+
+# ---------------- full checkup of every video ----------------
+def set_description_replace(video_id, old, new):
+    tok = yt_token()
+    sn = yt_get("videos", tok, part="snippet", id=video_id)["items"][0]["snippet"]
+    desc = sn.get("description", "")
+    if not old or old not in desc:
+        return False
+    nd = desc.replace(old, new, 1)
+    if len(nd) > 4990:
+        return False
+    body = {"title": sn["title"], "description": nd, "categoryId": sn.get("categoryId", "27"), "tags": sn.get("tags", [])}
+    if sn.get("defaultLanguage"):
+        body["defaultLanguage"] = sn["defaultLanguage"]
+    r = S.put(f"{YT}/youtube/v3/videos?part=snippet", headers={"Authorization": f"Bearer {tok}"},
+              json={"id": video_id, "snippet": body}, timeout=60)
+    r.raise_for_status()
+    return True
+
+
+def rc_core(desc):
+    """The first real paragraph of a description (no Watch-next line, no trailing hashtags): the text that gets fact-checked."""
+    for p in (desc or "").split("\n\n"):
+        p = p.strip()
+        if not p or p.startswith("▶ Watch next:") or p.startswith("http") or p.startswith("🔎") or p.startswith("Sources:"):
+            continue
+        ms = list(HASH_CLUSTER.finditer(p))
+        if ms and p[ms[-1].end():].strip() == "":
+            p = p[:ms[-1].start()].rstrip()
+        return p
+    return ""
+
+
+def rc_facts(title, core):
+    claims = ["Title: " + title] + (["Description: " + core[:500]] if len(core) > 20 else [])
+    prompt = FACT_PROMPT.format(claims=json.dumps(claims)) + (
+        "\nThe Description claim is only the FIRST PARAGRAPH of a longer description: its fix must be the full corrected paragraph, nothing more.")
+    text, _ = gemini_text(prompt, search=True, topic=title)
+    if "NOT verified" in text:
+        return None
+    res = [r for r in parse_obj(text).get("results", []) if isinstance(r, dict) and r.get("claim")]
+    return res or None
+
+
+def cmd_recheck(st, restart=True):
+    tok = yt_token()
+    if restart or not mem().get("recheck"):
+        vids, _ = latest_vids(tok, 50)
+        mem()["recheck"] = {"ids": [v["id"] for v in vids], "i": 0, "auto": False, "ts": time.time(), "flagged": 0}
+        send(f"🔍 Full checkup of your {len(vids)} videos: facts in the title and description, sources, hashtags, Watch-next link and playlist. "
+             "I show 3 videos at a time. Nothing changes until you tap.")
+    rc_batch(st)
+
+
+def rc_batch(st, n=3):
+    rc = mem().get("recheck")
+    if not rc:
+        return
+    ids = rc["ids"][rc["i"]:rc["i"] + n]
+    if not ids:
+        mem()["recheck"] = None
+        return send(f"✅ Full checkup finished. {rc.get('flagged', 0)} of {len(rc['ids'])} videos had something to fix; the rest are in good shape. 🏺")
+    tok = yt_token()
+    pool, _v = watch_pool(tok)
+    names, placed, _vv = playlist_scan(tok)
+    got = {v["id"]: v for v in yt_get("videos", tok, part="snippet", id=",".join(ids)).get("items", [])}
+    for vid in ids:
+        v = got.get(vid)
+        if v:
+            try:
+                rc_card(st, v, pool, placed)
+            except Exception as e:
+                print("recheck card:", clean(e)[:120])
+                send(f"I could not check \"{v['snippet'].get('title', vid)}\" just now. It stays in the list for the next checkup.")
+        rc["flagged"] = rc.get("flagged", 0)
+    rc["i"] += len(ids)
+    left = len(rc["ids"]) - rc["i"]
+    if left <= 0:
+        mem()["recheck"] = None
+        return send(f"✅ Full checkup finished. {rc.get('flagged', 0)} of {len(rc['ids'])} videos had something to fix. 🏺")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "rcnext", "created": time.time()}
+    send(f"{left} videos left.", [[btn("➡️ Check the next 3", pid, "rn")], [btn("⏩ Keep going by itself (3 every 5 minutes)", pid, "rg")],
+                                 [btn("Stop here", pid, "rx")]])
+
+
+def rc_card(st, v, pool, placed):
+    sn = v["snippet"]
+    vid, title, desc = v["id"], sn.get("title", ""), sn.get("description") or ""
+    core = rc_core(desc)
+    lines, btns_, fixes = [f"📋 \"{title}\""], [], []
+    prop = {"type": "rck", "video_id": vid, "title": title, "created": time.time()}
+    pid = new_pid(st)
+    # facts
+    res = None
+    try:
+        res = rc_facts(title, core)
+    except Exception as e:
+        print("recheck facts:", clean(e)[:100])
+    if res is None:
+        lines.append("⚪ Facts: could not be checked right now (try again later)")
+    else:
+        bad = [r for r in res if str(r.get("status", "")).lower() in ("shaky", "wrong")]
+        if not bad:
+            lines.append("✅ Facts: title and description hold up")
+        for r in bad:
+            c = str(r.get("claim", ""))
+            fx = str(r.get("fix") or "").strip().strip('"\u201c\u201d')
+            lines.append(f"⚠️ Facts: {c[:120]}\n   {str(r.get('note', ''))[:160]}")
+            if fx and c.startswith("Title:"):
+                prop["fix_title"] = re.sub(r"^Title:\s*", "", fx)[:100]
+                btns_.append([btn("✏️ Use the corrected title", pid, "rt")])
+                fixes.append("rt")
+                lines.append(f"   Say instead: {prop['fix_title']}")
+            elif fx and c.startswith("Description:") and core:
+                prop["par_old"], prop["par_new"] = core, re.sub(r"^Description:\s*", "", fx)[:900]
+                btns_.append([btn("✏️ Use the corrected opening paragraph", pid, "rp")])
+                fixes.append("rp")
+                lines.append(f"   Say instead: {prop['par_new'][:300]}")
+    # sources
+    if has_sources(desc):
+        lines.append("✅ Sources in the description")
+    else:
+        lines.append("⚠️ No sources in the description")
+        btns_.append([btn("📚 Find and add sources", pid, "rs")])
+        fixes.append("rs")
+    # Watch next
+    if has_watch_next(desc):
+        lines.append("✅ Watch-next link")
+    else:
+        n = pick_next(title + " " + desc[:300], pool, exclude=vid) if pool else None
+        if n:
+            prop["wn_line"] = watch_line(n)
+            lines.append(f"⚠️ No Watch-next link (would point to: {n['title'][:70]})")
+            btns_.append([btn("▶ Add the Watch-next link", pid, "rw")])
+            fixes.append("rw")
+        else:
+            lines.append("⚪ Watch-next link: no public video to point to yet")
+    # hashtags
+    old = current_hashtags(desc)
+    new = pick_hashtags(title + " " + desc[:300], short="#shorts" in desc.lower(), keep=old)
+    add = [x for x in new if x.lower() not in old]
+    if add:
+        prop["tags"] = new
+        lines.append(f"⚠️ Hashtags: add {' '.join(add)} (kept yours)")
+        btns_.append([btn("#️⃣ Add the hashtags", pid, "rh")])
+        fixes.append("rh")
+    else:
+        lines.append("✅ Hashtags")
+    # playlist
+    if vid in placed:
+        lines.append("✅ In a playlist")
+    else:
+        lines.append("⚠️ Not in any playlist")
+        btns_.append([btn("📚 Find a playlist", pid, "rl")])
+    flagged = any(l.startswith("⚠️") for l in lines)
+    if flagged:
+        mem()["recheck"]["flagged"] = mem()["recheck"].get("flagged", 0) + 1
+    if len([f for f in fixes if f]) >= 2:
+        btns_.append([btn("✅ Fix everything above", pid, "rv")])
+    if btns_:
+        btns_.append([btn("Skip", pid, "cs")])
+        st["props"][pid] = prop
+    send("\n".join(lines)[:3900], btns_ or None)
+
+
+def rc_do(st, prop, which):
+    """Apply one fix to one video. Returns a short result line."""
+    vid = prop["video_id"]
+    try:
+        if which == "rt" and prop.get("fix_title"):
+            set_title(vid, prop["fix_title"])
+            return "✏️ title corrected"
+        if which == "rp" and prop.get("par_old"):
+            return "✏️ opening paragraph corrected" if set_description_replace(vid, prop["par_old"], prop["par_new"]) else "opening paragraph: could not apply"
+        if which == "rw" and prop.get("wn_line"):
+            return "▶ Watch-next link added" if set_description_watch(vid, prop["wn_line"]) else "Watch-next link: nothing to add"
+        if which == "rh" and prop.get("tags"):
+            return "#️⃣ hashtags added" if set_description_hashtags(vid, prop["tags"]) else "hashtags: nothing to add"
+        if which == "rs":
+            tok = yt_token()
+            sn = yt_get("videos", tok, part="snippet", id=vid)["items"][0]["snippet"]
+            text, srcs, busy = fetch_sources(sn.get("title", "") + ". " + (sn.get("description") or "")[:600])
+            if not srcs:
+                return "sources: none found yet (search busy), try again later" if busy else "sources: no solid source found"
+            fb = text.startswith(FALLBACK_NOTE)
+            return f"📚 {len(srcs)} sources added" if set_description_sources(vid, source_block(srcs, fb)) else "sources: already there"
+    except Exception as e:
+        return f"{which}: failed ({clean(e)[:60]})"
+    return ""
 
 
 def cmd_sources(st, auto=False, limit=4):
@@ -2106,6 +2321,26 @@ def on_prop(jid, act, st):
     if act == "sh" and kind == "schedgen":
         st["props"].pop(jid, None)
         return cmd_schedule(st, prop["video_id"])
+    if kind == "rck" and act in ("rt", "rp", "rw", "rh", "rs", "rv"):
+        order = ["rt", "rp", "rw", "rh", "rs"] if act == "rv" else [act]
+        done = [rc_do(st, prop, w) for w in order if (w != "rs" or act in ("rs", "rv"))]
+        st["props"].pop(jid, None)
+        return send(f"Done for \"{prop['title']}\":\n" + "\n".join("• " + d for d in done if d))
+    if kind == "rck" and act == "rl":
+        st["props"].pop(jid, None)
+        return cmd_series(st, prop["video_id"])
+    if kind == "rcnext" and act == "rn":
+        st["props"].pop(jid, None)
+        return rc_batch(st)
+    if kind == "rcnext" and act == "rg":
+        st["props"].pop(jid, None)
+        if mem().get("recheck"):
+            mem()["recheck"]["auto"] = True
+        send("⏩ Going on by myself: 3 videos every 5 minutes. Send /recheck stop to pause.")
+        return rc_batch(st)
+    if kind == "rcnext" and act == "rx":
+        st["props"].pop(jid, None)
+        return send("Paused. Send /recheck continue to go on where I stopped, or /recheck to start again.")
     if act == "hy" and kind == "htb":
         try:
             ok = set_description_hashtags(prop["video_id"], prop["tags"])
@@ -3659,6 +3894,12 @@ def housekeeping(st):
         send_due_reminders()
     except Exception as e:
         print("reminders:", clean(e)[:100])
+    try:
+        rcs = m.get("recheck")
+        if rcs and rcs.get("auto"):
+            rc_batch(st)
+    except Exception as e:
+        print("recheck auto:", clean(e)[:100])
     if now - m["last_check"] > 1800:
         m["last_check"] = now
         for step in (lambda: run_results(False), lambda: run_exps(st)):
@@ -3780,6 +4021,51 @@ TREND_PROMPT = """Search the web for what is trending TODAY or this week around 
 Write plain text, max 90 words, no markdown: the 3 hottest topics, then the hashtags that are actually in use. Only say what you found. If something is not found, say so."""
 
 
+GLOBAL_PROMPT = """Search the web for what is going VIRAL worldwide right now (this week) on YouTube, TikTok and Instagram: the biggest topics, formats and challenges, in any niche.
+Write plain text, max 90 words, no markdown: the 6 biggest viral topics, then the hashtags actually in use for them. Only say what you found. If something is not found, say so."""
+GLOBAL_REGIONS = ("US", "GB", "IN", "BR")
+# generic tags that are truthful for an educational history video, so a globally trending one may be used even if the title does not repeat the word
+SAFE_GENERIC = {"history", "facts", "didyouknow", "education", "educational", "learn", "documentary", "mystery", "science", "archaeology",
+                "ancienthistory", "historyfacts", "explained", "mythology", "ancient", "discovery", "knowledge"}
+
+
+def global_pack(force=False):
+    """What is viral worldwide now: tags/hashtags from YouTube's most-popular charts (US, GB, IN, BR) plus a web look. Cached 24 h. Never raises."""
+    m = mem()
+    g = m.get("gtrend")
+    if g and not force and time.time() - g.get("ts", 0) < 86400:
+        return g
+    cnt, titles = {}, []
+    try:
+        tok = yt_token()
+        for rg in GLOBAL_REGIONS:
+            try:
+                items = yt_get("videos", tok, part="snippet", chart="mostPopular", regionCode=rg, maxResults=40).get("items", [])
+            except Exception as e:
+                print("global chart", rg, clean(e)[:80])
+                continue
+            for v in items:
+                sn = v.get("snippet") or {}
+                titles.append(sn.get("title", ""))
+                found = [t.strip().lower().lstrip("#") for t in (sn.get("tags") or [])[:15]]
+                found += [h.lstrip("#").lower() for h in re.findall(r"#[^\s#]+", sn.get("title", "") + " " + (sn.get("description") or "")[:300])]
+                for t in set(found):
+                    if 2 < len(t) < 25 and not t.isdigit():
+                        cnt[t] = cnt.get(t, 0) + 1
+    except Exception as e:
+        print("global trend youtube:", clean(e)[:100])
+    buzz = ""
+    try:
+        buzz, _ = gemini_text(GLOBAL_PROMPT, search=True, topic="viral worldwide this week trending topics hashtags")
+    except Exception as e:
+        print("global buzz:", clean(e)[:100])
+    tags = [t for t, c in sorted(cnt.items(), key=lambda kv: -kv[1]) if c >= 2][:30]
+    g = {"ts": time.time(), "tags": tags, "buzz": buzz.strip() if "NOT verified" not in buzz else "", "n": len(titles)}
+    if tags or g["buzz"]:
+        m["gtrend"] = g
+    return g
+
+
 def trend_pack(force=False):
     """Cached 24 h. Returns {"ts","tags","top","buzz"}. Never raises."""
     m = mem()
@@ -3812,6 +4098,10 @@ def trend_pack(force=False):
     tr = {"ts": time.time(), "tags": best, "top": [t for _, t in top[:5]], "buzz": buzz.strip()}
     if best or buzz:
         m["trend"] = tr
+    try:
+        global_pack(force)
+    except Exception as e:
+        print("global pack:", clean(e)[:100])
     return tr
 
 
@@ -3854,10 +4144,18 @@ def cmd_trends(st):
         lines += ["Top videos this month (by views):"] + ["• " + t for t in tr["top"]] + [""]
     if tr.get("tags"):
         lines += ["Tags the winners use:", " ".join("#" + t.replace(" ", "") for t in tr["tags"][:12]), ""]
+    g = mem().get("gtrend") or {}
+    if g.get("buzz") or g.get("tags"):
+        lines += ["🌍 Viral worldwide right now (any niche)", ""]
+        if g.get("buzz"):
+            lines += [g["buzz"], ""]
+        if g.get("tags"):
+            lines += ["Tags on the world's most-watched videos (US, UK, India, Brazil):", " ".join("#" + t.replace(" ", "") for t in g["tags"][:12]), ""]
+        lines.append("I only put a global tag on your video when it is true for that video (like #History or #Mystery): an unrelated viral tag can get a video flagged as spam and does not bring viewers.\n")
     lines.append("I use this automatically for your hashtags, packaging and cross-post kit. Cached for a day.")
     send("\n".join(lines))
     try:
-        out = gemini([{"text": TREND_IDEAS_PROMPT.format(memory=learned(), buzz=tr.get("buzz", "")[:600], top=json.dumps(tr.get("top", [])))}])
+        out = gemini([{"text": TREND_IDEAS_PROMPT.format(memory=learned(), buzz=(tr.get("buzz", "")[:600] + ((" | Worldwide viral now: " + g["buzz"][:400]) if g.get("buzz") else "")), top=json.dumps(tr.get("top", [])))}])
         if not idea_taps(st, out.get("ideas", []), "💡 3 ideas that ride this trend:"):
             send("I could not turn the trends into ideas right now. Send /idea or /news instead.")
     except Exception as e:
@@ -4978,7 +5276,7 @@ Choose the action. Actions: idea (wants video ideas), script (gave a topic to wr
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes), sources (add sources to the descriptions of older videos), patterns (what the owner's own numbers show about titles and formats), brief (a summary of everything that needs him),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
-funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), lessons (what you have learned), health (is everything working),
+funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), lessons (what you have learned), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -5006,6 +5304,8 @@ def run_action(action, topic, st, text=""):
         return cmd_watchnext(st)
     if action == "hashtags":
         return cmd_hashtags(st)
+    if action == "recheck":
+        return cmd_recheck(st)
     if action == "trends":
         return cmd_trends(st)
     if action == "thumbtest":
@@ -5123,6 +5423,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/besttime - when to post, from your own data\n"
         "/watchnext - add 'Watch next' links to old descriptions\n"
         "/hashtags - refresh old hashtags from what is trending now\n"
+        "/recheck - full checkup of all my videos (facts, sources, hashtags, Watch-next, playlist)\n"
         "/schedule - pick a publish time for your private video; /autoschedule on|off; /besthour 17 sets the US Eastern hour\n"
         "/trends - what is hot now in the niche (tags, topics)\n"
         "/thumbtest - 3 thumbnail options and how to test them\n"
@@ -5285,6 +5586,18 @@ def on_message(msg, st):
         cmd_watchnext(st)
     elif text == "/hashtags":
         cmd_hashtags(st)
+    elif text.startswith("/recheck"):
+        arg = text.split(None, 1)[1].strip().lower() if len(text.split(None, 1)) > 1 else ""
+        if arg == "stop":
+            if mem().get("recheck"):
+                mem()["recheck"]["auto"] = False
+            send("Paused. Send /recheck continue to go on where I stopped.")
+        elif arg == "continue":
+            if mem().get("recheck"):
+                mem()["recheck"]["auto"] = False
+            cmd_recheck(st, restart=False)
+        else:
+            cmd_recheck(st)
     elif text == "/schedule":
         cmd_schedule(st)
     elif text.startswith("/autoschedule"):
@@ -5382,7 +5695,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -5528,6 +5841,7 @@ def main():
             {"command": "schedule", "description": "Schedule the latest video at the best time"},
             {"command": "watchnext", "description": "Add Watch-next links to old videos"},
             {"command": "hashtags", "description": "Refresh hashtags from what is trending"},
+            {"command": "recheck", "description": "Full checkup of all my videos"},
             {"command": "autoschedule", "description": "Auto-schedule uploads on or off"},
             {"command": "trends", "description": "What is trending now"},
             {"command": "thumbtest", "description": "Thumbnail options and test"},
