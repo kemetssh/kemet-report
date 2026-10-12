@@ -37,7 +37,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.36"
+BOT_VERSION = "v10.38"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1288,6 +1288,94 @@ def set_description_sources(video_id, block):
     return True
 
 
+WN_RE = re.compile(r"^▶ Watch next:", re.M)
+
+
+def has_watch_next(desc):
+    return bool(WN_RE.search((desc or "")[:600]))
+
+
+def watch_pool(tok):
+    """The channel's latest videos, and which of them are public (a 'next' link to a private video would lead nowhere)."""
+    vids, _ = latest_vids(tok, 50)
+    ids = [v["id"] for v in vids]
+    pub = set()
+    for i in range(0, len(ids), 50):
+        for it in yt_get("videos", tok, part="status", id=",".join(ids[i:i + 50])).get("items", []):
+            if (it.get("status") or {}).get("privacyStatus") == "public":
+                pub.add(it.get("id"))
+    pool = []
+    for v in vids:
+        if v["id"] in pub:
+            ts = iso_ts(v["snippet"].get("publishedAt", ""))
+            age = max(((time.time() - ts) / 86400) if ts else 30, 1)
+            pool.append({"id": v["id"], "title": v["snippet"].get("title", ""), "vpd": int(v.get("statistics", {}).get("viewCount", 0)) / age})
+    return pool, vids
+
+
+def pick_next(about, pool, exclude=""):
+    """The best video to watch after this one: same topic first, then the one that performs best. Never itself."""
+    import math
+    w = title_words(about)
+    best, bs = None, -1.0
+    for c in pool:
+        if c["id"] == exclude:
+            continue
+        sc = 2.0 * len(w & title_words(c["title"])) + min(math.log10(c["vpd"] + 1) * 1.5, 3.0)
+        if sc > bs:
+            best, bs = c, sc
+    return best
+
+
+def watch_line(n):
+    return f"▶ Watch next: {n['title'][:90]} → https://youtu.be/{n['id']}"
+
+
+def set_description_watch(video_id, line):
+    tok = yt_token()
+    sn = yt_get("videos", tok, part="snippet", id=video_id)["items"][0]["snippet"]
+    desc = sn.get("description", "")
+    if has_watch_next(desc) or len(line) + 2 + len(desc) > 4990:      # never push the Sources block off the end
+        return False
+    body = {"title": sn["title"], "description": line + "\n\n" + desc,
+            "categoryId": sn.get("categoryId", "27"), "tags": sn.get("tags", [])}
+    if sn.get("defaultLanguage"):
+        body["defaultLanguage"] = sn["defaultLanguage"]
+    r = S.put(f"{YT}/youtube/v3/videos?part=snippet", headers={"Authorization": f"Bearer {tok}"},
+              json={"id": video_id, "snippet": body}, timeout=60)
+    r.raise_for_status()
+    return True
+
+
+def cmd_watchnext(st, limit=4):
+    """Old videos without a 'Watch next' line: propose one each (nothing changes until you tap)."""
+    tok = yt_token()
+    pool, vids = watch_pool(tok)
+    if not pool:
+        return send("I need at least one public video to point to. Nothing to do yet.")
+    pending = {p.get("video_id") for p in st["props"].values() if p.get("type") == "wnb"}
+    todo = [v for v in vids if not has_watch_next(v["snippet"].get("description")) and v["id"] not in pending]
+    if not todo:
+        return send("Every video already ends its opening lines with a Watch-next link. ✅")
+    send(f"▶ {len(todo)} videos have no 'Watch next' link. Here are the first {min(limit, len(todo))} (nothing changes until you tap).")
+    pids = []
+    for v in todo[:limit]:
+        sn = v["snippet"]
+        n = pick_next(sn.get("title", "") + " " + (sn.get("description") or "")[:300], pool, exclude=v["id"])
+        if not n:
+            continue
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "wnb", "video_id": v["id"], "title": sn.get("title", ""), "line": watch_line(n), "created": time.time()}
+        pids.append(pid)
+        send(f"📺 \"{sn.get('title', '')}\"\nwill point viewers to:\n{n['title']}",
+             [[btn("✅ Add the link", pid, "wn"), btn("Skip", pid, "cs")]])
+    if len(pids) > 1:
+        pa = new_pid(st)
+        st["props"][pa] = {"type": "wna", "pids": pids, "created": time.time()}
+        send(f"Add all {len(pids)} links in one go?" + (f" ({len(todo) - limit} more videos will follow next time you send /watchnext.)" if len(todo) > limit else ""),
+             [[btn(f"✅ Add all {len(pids)}", pa, "wa")]])
+
+
 def cmd_sources(st, auto=False, limit=4):
     """Go through the older videos and propose adding sources to every description that lacks them."""
     tok = yt_token()
@@ -1347,6 +1435,15 @@ def do_upload(job):
         tok = yt_token()
         ev_txt = evidence_block(job)
         desc = job["review"]["descriptions"][job["desc"]] + links_block(job)
+        try:
+            pool, _v = watch_pool(tok)
+            nxt = pick_next(job["title"] + " " + job["review"].get("summary", ""), pool)
+            if nxt:
+                desc = watch_line(nxt) + "\n\n" + desc
+                job["next_title"] = nxt["title"]
+                job["next_id"] = nxt["id"]
+        except Exception as e:
+            print("watch next:", clean(e)[:100])
         desc = desc[:max(0, 4900 - len(ev_txt))] + ev_txt     # YouTube allows 5000 characters: the sources always fit
         vid, label_ok = yt_upload(p, job["title"], desc, job["review"].get("tags", []), tok,
                                   ai=job.get("ai", False))
@@ -1369,7 +1466,7 @@ def do_upload(job):
         label_note = ("AI label set. " if label_ok else
                       "I could not set the AI label by code: switch it on in YouTube Studio. ")
     mem()["videos"][vid] = {"uploaded": time.time(), "title": job["title"], "file_id": job["file_id"],
-                            "summary": job["review"].get("summary", ""), "checked": False}
+                            "summary": job["review"].get("summary", ""), "checked": False, "next": job.get("next_id", "")}
     pid = new_pid(ST)
     ST["props"][pid] = {"type": "subgen", "video_id": vid, "created": time.time()}
     pid_pl = new_pid(ST)
@@ -1389,6 +1486,10 @@ def do_upload(job):
         else:
             kit_note = ("\n\n📌 Pinned comment for later: " + kit["pinned"] +
                         "\n(YouTube only accepts comments on a public video. When it goes public I will offer a button to post it.)")
+    if job.get("next_title"):
+        kit_note += (f"\n\n▶ Viewers are pointed to \"{job['next_title']}\" in the first line of the description.\n"
+                     f"🎞️ One 30-second step only you can do (YouTube does not allow it by code): Studio → Content → this video → Editor → "
+                     f"End screen → Video → pick \"{job['next_title']}\".")
     auto_msg = auto_schedule_on() and status == "private"
     send(f"✅ Uploaded. {thumb_note}{label_note}Status: {status.upper()}\nhttps://youtu.be/{vid}{kit_note}" + ("" if auto_msg else f"\n\n{NOTICE}"),
          ([[btn("📌 Post my comment (then pin it)", pid_c, "pc")]] if pid_c else []) +
@@ -1797,6 +1898,26 @@ def on_prop(jid, act, st):
     if act == "sh" and kind == "schedgen":
         st["props"].pop(jid, None)
         return cmd_schedule(st, prop["video_id"])
+    if act == "wn" and kind == "wnb":
+        try:
+            ok = set_description_watch(prop["video_id"], prop["line"])
+        except Exception as e:
+            return send("I could not update that description (" + clean(e)[:80] + "). Tap again later.", [[btn("Try again", jid, "wn")]])
+        st["props"].pop(jid, None)
+        return send(f"✅ Watch-next link added to \"{prop['title']}\"." if ok else "That description already has one, or it is too long to add a line safely.")
+    if act == "wa" and kind == "wna":
+        done = 0
+        for p in prop["pids"]:
+            pr = st["props"].get(p)
+            if pr and pr.get("type") == "wnb":
+                try:
+                    if set_description_watch(pr["video_id"], pr["line"]):
+                        done += 1
+                    st["props"].pop(p, None)
+                except Exception as e:
+                    print("watchnext all:", clean(e)[:100])
+        st["props"].pop(jid, None)
+        return send(f"✅ Added Watch-next links to {done} videos.")
     if act == "su" and kind == "unsched":
         st["props"].pop(jid, None)
         return cmd_unschedule(st, prop["video_id"])
@@ -3021,14 +3142,24 @@ def best_slots(tok, n=3, now=None):
 
 
 def yt_schedule(vid, tok, when):
+    """True when YouTube accepted the schedule. The PUT succeeding is the proof; the read-back can lag, so it is only
+    retried a few times (Studio showed 'Scheduled' while the first read-back was still empty)."""
     iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(when))
     r = S.put(f"{YT}/youtube/v3/videos?part=status", headers={"Authorization": f"Bearer {tok}"},
               json={"id": vid, "status": {"privacyStatus": "private", "publishAt": iso, "selfDeclaredMadeForKids": False}}, timeout=60)
     r.raise_for_status()
-    g = yt_get("videos", tok, part="status", id=vid)
-    items = g.get("items") or []
-    pa = (items[0].get("status") or {}).get("publishAt") if items else None
-    return bool(pa)
+    for i in range(3):
+        try:
+            items = yt_get("videos", tok, part="status", id=vid).get("items") or []
+            st_ = (items[0].get("status") or {}) if items else {}
+            if st_.get("publishAt"):
+                return True
+            if st_.get("privacyStatus") in ("public", "unlisted"):
+                return False                       # it went live instead of waiting: not a schedule
+        except Exception as e:
+            print("schedule read-back:", clean(e)[:80])
+        time.sleep(0 if os.getenv("RUN_SECONDS") == "0" else 2)
+    return True
 
 
 def cmd_schedule(st, video_id=None):
@@ -4617,7 +4748,7 @@ Choose the action. Actions: idea (wants video ideas), script (gave a topic to wr
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes), sources (add sources to the descriptions of older videos), patterns (what the owner's own numbers show about titles and formats), brief (a summary of everything that needs him),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
-funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), lessons (what you have learned), health (is everything working),
+funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), lessons (what you have learned), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -4641,6 +4772,8 @@ def run_action(action, topic, st, text=""):
         return cmd_besttime(st)
     if action == "schedule":
         return cmd_schedule(st)
+    if action == "watchnext":
+        return cmd_watchnext(st)
     if action == "trends":
         return cmd_trends(st)
     if action == "thumbtest":
@@ -4756,6 +4889,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/review - weekly self-review now (also runs by itself on Sundays)\n"
         "/funnel - point your Shorts viewers to a long video\n"
         "/besttime - when to post, from your own data\n"
+        "/watchnext - add 'Watch next' links to old descriptions\n"
         "/schedule - pick a publish time for your private video; /autoschedule on|off; /besthour 17 sets the US Eastern hour\n"
         "/trends - what is hot now in the niche (tags, topics)\n"
         "/thumbtest - 3 thumbnail options and how to test them\n"
@@ -4908,6 +5042,8 @@ def on_message(msg, st):
         cmd_funnel(st)
     elif text == "/besttime":
         cmd_besttime(st)
+    elif text == "/watchnext":
+        cmd_watchnext(st)
     elif text == "/schedule":
         cmd_schedule(st)
     elif text.startswith("/autoschedule"):
@@ -5005,7 +5141,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -5140,6 +5276,7 @@ def main():
             {"command": "funnel", "description": "Send Shorts viewers to a long video"},
             {"command": "besttime", "description": "When to post"},
             {"command": "schedule", "description": "Schedule the latest video at the best time"},
+            {"command": "watchnext", "description": "Add Watch-next links to old videos"},
             {"command": "autoschedule", "description": "Auto-schedule uploads on or off"},
             {"command": "trends", "description": "What is trending now"},
             {"command": "thumbtest", "description": "Thumbnail options and test"},
