@@ -37,7 +37,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.38"
+BOT_VERSION = "v10.39"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -69,12 +69,19 @@ def clean(text):
 # ---------------- state ----------------
 # The notes file lives in a public repo, so it is stored scrambled (AES-256) with a key only you have
 # (the WORKER_SECRET secret). Without the key it is unreadable.
-STATE_MARK = "KEMET-ENC1:"
+STATE_MARK = "KEMET-ENC1:"            # older format (still readable, converted on the next save)
+STATE_MARK2 = "KEMET-ENC2:"           # AES-256 + a check value (HMAC-SHA256) that is verified BEFORE anything is opened
 _last_plain = None
+_migrate = False
 
 
 def _state_key():
     return os.getenv("STATE_KEY") or os.getenv("WORKER_SECRET") or ""
+
+
+def _plain_ok():
+    """Plain-text notes only when someone deliberately sets ALLOW_PLAIN_STATE=1 (the test setup). Never in your real repo."""
+    return os.getenv("ALLOW_PLAIN_STATE") == "1" and not _state_key()
 
 
 def _crypt(data, decrypt):
@@ -89,18 +96,45 @@ def _crypt(data, decrypt):
     return r.stdout.decode()
 
 
+def _mac(ct):
+    import hmac
+    mk = hashlib.sha256(b"kemet-state-mac|" + _state_key().encode()).digest()
+    return hmac.new(mk, ct.encode(), hashlib.sha256).hexdigest()
+
+
+def seal_state(plain):
+    ct = _crypt(plain, False)
+    return STATE_MARK2 + ct + "." + _mac(ct)
+
+
+def open_state(raw):
+    import hmac
+    if raw.startswith(STATE_MARK2):
+        body = raw[len(STATE_MARK2):]
+        ct, _, tag = body.rpartition(".")
+        if not ct or not hmac.compare_digest(tag, _mac(ct)):
+            raise RuntimeError("the notes file failed its integrity check (changed by someone, or the key is wrong): stopping instead of using it")
+        return _crypt(ct, True)
+    return _crypt(raw[len(STATE_MARK):], True)
+
+
 def load_state():
-    global _last_plain
+    global _last_plain, _migrate
+    if not _state_key() and not _plain_ok():
+        raise RuntimeError("no notes key (STATE_KEY or WORKER_SECRET): refusing to run, because your logins would be saved as readable text in a public repo")
     if STATE_FILE.exists():
         raw = STATE_FILE.read_text().strip()
-        if raw.startswith(STATE_MARK):
-            if not _state_key():
-                raise RuntimeError("the notes file is scrambled but the key is missing")
-            plain = _crypt(raw[len(STATE_MARK):], True)   # a wrong key stops the run instead of wiping the notes
+        if (raw.startswith(STATE_MARK2) or raw.startswith(STATE_MARK)) and not _state_key():
+            raise RuntimeError("the notes file is scrambled but the key is missing")
+        if raw.startswith(STATE_MARK2) or raw.startswith(STATE_MARK):
+            plain = open_state(raw)                         # a wrong key stops the run instead of wiping the notes
             _last_plain = plain
+            _migrate = raw.startswith(STATE_MARK)           # old format: rewrite once in the new one
             return json.loads(plain)
         try:
-            return json.loads(raw)       # older, readable notes: they get scrambled on the next save
+            data = json.loads(raw)       # older, readable notes: they get scrambled on the next save
+            _migrate = True
+            return data
         except Exception:
             pass
     return {"offset": 0, "jobs": {}, "props": {}, "seen": [], "n": 0}
@@ -115,12 +149,16 @@ def save_state(st):
     st["seen"] = list(st.get("seen", []))[-2000:]
     st.pop("_val", None)
     plain = json.dumps(st, indent=1)
-    if _state_key():
-        if plain != _last_plain:          # only rewrite when something changed, so GitHub sees no pointless edits
-            STATE_FILE.write_text(STATE_MARK + _crypt(plain, False))
-            _last_plain = plain
-    else:
+    global _migrate
+    if _plain_ok():
         STATE_FILE.write_text(plain)
+        return
+    if not _state_key():
+        raise RuntimeError("no notes key: refusing to save your logins as readable text")
+    if plain != _last_plain or _migrate:          # only rewrite when something changed, so GitHub sees no pointless edits
+        STATE_FILE.write_text(seal_state(plain))
+        _last_plain = plain
+        _migrate = False
 
 
 # ---------------- the bot's memory (what it learns about you and the channel) ----------------
@@ -810,6 +848,25 @@ def links_block(job):
     return "\n\n" + "\n".join(f"{l['label']}: {l['url']}" for l in links)
 
 
+def plan_line(job):
+    """What will happen after the upload, shown BEFORE the upload tap: the date and time it goes public (auto-scheduling on)."""
+    if not auto_schedule_on():
+        return ""
+    pl = job.get("plan")
+    if not pl or time.time() - pl.get("ts", 0) > 7200 or pl["slot"][0] - time.time() < 3600:
+        try:
+            sl = best_slots(yt_token())
+            pl = {"ts": time.time(), "slot": list(sl[0])} if sl else None
+        except Exception as e:
+            print("plan:", clean(e)[:100])
+            pl = None
+        job["plan"] = pl
+    if not pl:
+        return ""
+    return (f"📅 Uploads as private, then I schedule it to go public on {pl['slot'][1]}.\n"
+            f"Why: {pl['slot'][2]}.\nYou can change or cancel that right after the upload. Turn it off with /autoschedule off.")
+
+
 def ask_confirm(job):
     job["stage"] = "confirm"
     jid = job["id"]
@@ -824,7 +881,7 @@ def ask_confirm(job):
          + (f"Sources in the description: {len((job.get('evidence') or {}).get('sources') or [])} (always added)\n"
             if (job.get("evidence") or {}).get("sources") else "⛔ No sources found yet: every video needs them.\n") +
          ("\n⚠️ Worth a look: " + "; ".join(guard_check(job)) + "\n" if guard_check(job) else "") +
-         "\nIt stays private until you publish it.",
+         ("\n" + plan_line(job) if plan_line(job) else "\nIt stays private until you publish it."),
          ([[btn("⬆️ Upload as private", jid, "u")]] if (job.get("evidence") or {}).get("sources") else
           [[btn("🔄 Fetch sources", jid, "sf")]] +
           ([[btn("⬆️ Upload private anyway (add sources later with /sources)", jid, "ug")]] if job.get("src_tries", 0) >= 2 else []))
@@ -1426,7 +1483,30 @@ def cmd_sources(st, auto=False, limit=4):
         send("I found no solid sources for those videos. I will try the next ones.")
 
 
+def find_recent_dup(tok, title):
+    """A video with exactly this title was uploaded in the last 90 minutes (a run may have stopped after YouTube took it)."""
+    vids, _ = latest_vids(tok, 5)
+    for v in vids:
+        ts = iso_ts(v["snippet"].get("publishedAt", ""))
+        if ts and time.time() - ts < 5400 and v["snippet"].get("title", "").strip().lower() == str(title).strip().lower():
+            return v
+    return None
+
+
 def do_upload(job):
+    if not job.get("dup_ok"):
+        try:
+            dup = find_recent_dup(yt_token(), job["title"])
+        except Exception as e:
+            dup = None
+            print("dup check:", clean(e)[:100])
+        if dup:
+            job["stage"] = "confirm"
+            job["dup_id"] = dup["id"]
+            return send("✋ A video with this exact title is already on your channel, uploaded less than 90 minutes ago:\n"
+                        f"https://youtu.be/{dup['id']}\nProbably an earlier upload that went through. I did not upload again.",
+                        [[btn("👍 That is it, do not upload again", job["id"], "dn")],
+                         [btn("⬆️ Upload again anyway", job["id"], "dy")]])
     job["stage"] = "uploading"
     send("Uploading as private... (a minute or two)")
     with tempfile.TemporaryDirectory() as d:
@@ -1501,7 +1581,7 @@ def do_upload(job):
           [btn("I will publish it myself", job["id"], "k")]])
     if auto_msg:
         try:
-            auto_schedule(ST, vid, job["title"], tok)
+            auto_schedule(ST, vid, job["title"], tok, job.get("plan"))
         except Exception as e:
             print("auto schedule:", clean(e)[:120])
             send("I could not pick a publish time just now. Send /schedule when you are ready.")
@@ -3230,9 +3310,11 @@ def auto_schedule_on():
     return mem().get("auto_schedule", True)
 
 
-def auto_schedule(st, vid, title, tok):
-    """Right after an upload that the owner approved: pick the best US-time slot and schedule it, no extra tap."""
+def auto_schedule(st, vid, title, tok, plan=None):
+    """Right after an upload that the owner approved: schedule the time that was shown on the confirm screen (or pick the best one)."""
     slots = best_slots(tok)
+    if plan and plan.get("slot") and plan["slot"][0] - time.time() > 1800:
+        slots = [tuple(plan["slot"])] + [x for x in slots if abs(x[0] - plan["slot"][0]) > 60][:2]
     if not slots:
         return send("I could not find a publish time. Send /schedule when you are ready.")
     pid = new_pid(st)
@@ -4970,8 +5052,14 @@ def cmd_update(msg):
          "Send /health then to check. A copy of the old file is saved as bot_prev.py in your repo.")
 
 
+def sender_ok(obj):
+    """In your private chat the sender is you. If the bot were ever put in a group, other members must not be able to use it."""
+    f = (obj.get("from") or {}).get("id")
+    return f is None or CHAT.startswith("-") or str(f) == CHAT
+
+
 def on_message(msg, st):
-    if str(msg.get("chat", {}).get("id")) != CHAT:
+    if str(msg.get("chat", {}).get("id")) != CHAT or not sender_ok(msg):
         return
     doc = msg.get("document") or {}
     if str(doc.get("file_name", "")).lower().endswith(".py"):
@@ -5129,7 +5217,7 @@ def on_message(msg, st):
 
 def on_callback(cb, st):
     msg = cb["message"]
-    if str(msg["chat"]["id"]) != CHAT:
+    if str(msg["chat"]["id"]) != CHAT or not sender_ok(cb):
         return
     try:
         tg("answerCallbackQuery", callback_query_id=cb["id"])
@@ -5199,6 +5287,15 @@ def on_callback(cb, st):
                         [[btn("🔁 Check again", jid, "u")], [btn("⬆️ Upload private anyway", jid, "ug")], [btn("Cancel", jid, "x")]])
         if bad:
             return      # factcheck_job showed the flagged lines with its own buttons
+        return do_upload(job)
+    if act == "dn" and stage == "confirm" and job.get("dup_id"):
+        vid = job["dup_id"]
+        mem()["videos"].setdefault(vid, {"uploaded": time.time(), "title": job["title"], "file_id": job.get("file_id", ""),
+                                         "summary": job["review"].get("summary", ""), "checked": False})
+        job["stage"] = "cancelled"
+        return send("Good, nothing uploaded twice. The existing video is kept. Send /schedule to pick its publish time or /series for a playlist.")
+    if act == "dy" and stage == "confirm":
+        job["dup_ok"] = True
         return do_upload(job)
     if act == "ug" and stage == "confirm":
         return do_upload(job)
