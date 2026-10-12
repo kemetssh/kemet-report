@@ -6,6 +6,8 @@ pick thumbnail -> upload (private) -> optional "try to make public".
 Nothing is uploaded or published without a tap from you.
 """
 import base64
+import calendar
+import datetime
 import hashlib
 import json
 import os
@@ -35,7 +37,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.33"
+BOT_VERSION = "v10.36"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -569,7 +571,45 @@ def review_video(path, dur, w, h):
     data["thumb_times"] = times
     data["ai_visuals"] = bool(data.get("ai_visuals"))
     data["policy_notes"] = [str(x)[:200] for x in data.get("policy_notes", [])][:4]
+    try:
+        precheck_options(data)
+    except Exception as e:
+        print("precheck:", clean(e)[:120])
     return data
+
+
+def precheck_options(data):
+    """Fact-check the suggested titles and descriptions BEFORE the owner sees them, and swap in the corrected wording,
+    so nothing offered at the start is later flagged at upload."""
+    titles, descs = data.get("titles") or [], data.get("descriptions") or []
+    claims = [f"Title: {t}" for t in titles] + [f"Description: {d[:300]}" for d in descs]
+    if not claims:
+        return
+    text, _ = gemini_text(FACT_PROMPT.format(claims=json.dumps(claims[:6])), search=True, topic=titles[0] if titles else None)
+    if "NOT verified" in text:
+        return
+    n = 0
+    for r in parse_obj(text).get("results", []):
+        if str(r.get("status", "")).lower() == "solid":
+            continue
+        claim, fix = str(r.get("claim", "")), str(r.get("fix") or "").strip().strip('"\u201c\u201d')
+        if not fix:
+            continue
+        if claim.startswith("Title:"):
+            old_t = claim[6:].strip()
+            for i, t in enumerate(titles):
+                if t.strip() == old_t or t.strip()[:30] == old_t[:30]:
+                    titles[i] = re.sub(r"^Title:\s*", "", fix)[:100]
+                    n += 1
+                    break
+        elif claim.startswith("Description:"):
+            old_d = claim[12:].strip()
+            for i, d in enumerate(descs):
+                if d.strip()[:60] == old_d[:60]:
+                    descs[i] = re.sub(r"^Description:\s*", "", fix)[:4500]
+                    n += 1
+                    break
+    data["precheck_fixed"] = n
 
 
 def more_titles(job):
@@ -1336,6 +1376,8 @@ def do_upload(job):
     ST["props"][pid_pl] = {"type": "plgen", "video_id": vid, "created": time.time()}
     pid_x = new_pid(ST)
     ST["props"][pid_x] = {"type": "xgen", "video_id": vid, "created": time.time()}
+    pid_s = new_pid(ST)
+    ST["props"][pid_s] = {"type": "schedgen", "video_id": vid, "created": time.time()}
     kit = mem().get("last_kit") or {}
     pid_c = None
     kit_note = ""
@@ -1347,13 +1389,21 @@ def do_upload(job):
         else:
             kit_note = ("\n\n📌 Pinned comment for later: " + kit["pinned"] +
                         "\n(YouTube only accepts comments on a public video. When it goes public I will offer a button to post it.)")
-    send(f"✅ Uploaded. {thumb_note}{label_note}Status: {status.upper()}\nhttps://youtu.be/{vid}{kit_note}\n\n{NOTICE}",
+    auto_msg = auto_schedule_on() and status == "private"
+    send(f"✅ Uploaded. {thumb_note}{label_note}Status: {status.upper()}\nhttps://youtu.be/{vid}{kit_note}" + ("" if auto_msg else f"\n\n{NOTICE}"),
          ([[btn("📌 Post my comment (then pin it)", pid_c, "pc")]] if pid_c else []) +
          [[btn("Try to make it public", job["id"], "p")],
+          [btn("🕒 Schedule at the best time", pid_s, "sh")],
           [btn("Add subtitles (English + Arabic)", pid, "sg")],
           [btn("Add to a playlist", pid_pl, "pg")],
           [btn("Cross-post kit (TikTok, Reels, Facebook)", pid_x, "xg")],
           [btn("I will publish it myself", job["id"], "k")]])
+    if auto_msg:
+        try:
+            auto_schedule(ST, vid, job["title"], tok)
+        except Exception as e:
+            print("auto schedule:", clean(e)[:120])
+            send("I could not pick a publish time just now. Send /schedule when you are ready.")
 
 
 def do_publish(job):
@@ -1744,6 +1794,14 @@ def on_prop(jid, act, st):
             mem()["dismissed"] = (mem().get("dismissed", []) + [prop.get("key", prop["parent"])])[-1500:]
         st["props"].pop(jid, None)
         return send("Skipped.")
+    if act == "sh" and kind == "schedgen":
+        st["props"].pop(jid, None)
+        return cmd_schedule(st, prop["video_id"])
+    if act == "su" and kind == "unsched":
+        st["props"].pop(jid, None)
+        return cmd_unschedule(st, prop["video_id"])
+    if act == "sy" and kind == "sched":
+        return do_schedule(st, jid, st.get("_val"))
     if act == "ta" and kind == "title":
         why = exp_blocker(prop["video_id"], prop.get("published", ""))
         if why:
@@ -2383,6 +2441,7 @@ Return JSON only: {{"verdict": "SUPPORTED" or "MOSTLY SUPPORTED" or "DISPUTED" o
 FACT_PROMPT = """Use web search. Fact-check these claims taken from a short Ancient Egypt video. Be strict and honest; never invent sources.
 Claims: {claims}
 For a claim that starts with "Title:" or "Description:", "fix" must be ONLY the full replacement text (a title under 70 characters, or the whole corrected description), ready to paste, with no label in front.
+For "Title:" and "Description:" claims, flag ONLY a factual error or wording that would mislead viewers about the history. Never flag style, tone, drama or wording preferences, and a question in a title is not a claim.
 Return JSON only: {{"results": [{{"claim": "...", "status": "solid" or "shaky" or "wrong", "note": "short reason", "fix": "how to say it correctly, or empty"}}]}}"""
 
 VERDICT_ICON = {"SUPPORTED": "✅", "MOSTLY SUPPORTED": "🟢", "DISPUTED": "🟡", "UNSUPPORTED": "🟠", "CONTRADICTED": "❌"}
@@ -2845,6 +2904,260 @@ def cmd_besttime(st):
     send("\n".join(lines)[:4000])
 
 
+def cairo_zone():
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo("Africa/Cairo")
+    except Exception:
+        return datetime.timezone(datetime.timedelta(hours=3))
+
+
+def us_zone():
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo("America/New_York")
+    except Exception:
+        return datetime.timezone(datetime.timedelta(hours=-4))
+
+
+DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+US_DEFAULT_HOUR = 17.0          # US Eastern: 1-2 hours before the evening on the East and Central coasts, still afternoon on the West coast
+HOUR_BUCKETS = {"morning": (6, 11, 9.0), "afternoon": (12, 16, 14.0), "evening": (17, 21, 18.0)}
+
+
+def learn_hour(tok):
+    """Learn the best US Eastern publish hour from the owner's OWN videos (needs 12+ videos older than 3 days and a clear winner)."""
+    c = mem().get("sched_learn") or {}
+    if time.time() - c.get("ts", 0) < 3 * 86400:
+        return c.get("hour")
+    z = us_zone()
+    vids, _ = latest_vids(tok, 50)
+    rows = []
+    for v in vids:
+        pub = iso_ts(v["snippet"].get("publishedAt", ""))
+        age = (time.time() - pub) / 86400 if pub else 0
+        if age >= 3:
+            rows.append((datetime.datetime.fromtimestamp(pub, z).hour, int(v.get("statistics", {}).get("viewCount", 0)) / age))
+    hour, note = None, ""
+    if len(rows) >= 12:
+        means = {}
+        for name, (lo, hi, _c) in HOUR_BUCKETS.items():
+            g = [x for h, x in rows if lo <= h <= hi]
+            if len(g) >= 3:
+                means[name] = (sum(g) / len(g), len(g))
+        if means:
+            best = max(means, key=lambda k: means[k][0])
+            rest = [x for h, x in rows if not HOUR_BUCKETS[best][0] <= h <= HOUR_BUCKETS[best][1]]
+            if rest and sum(rest) > 0 and means[best][0] / (sum(rest) / len(rest)) >= 1.4:
+                hour = HOUR_BUCKETS[best][2]
+                note = f"your {best} US-Eastern uploads got the most views per day ({means[best][1]} videos)"
+    mem()["sched_learn"] = {"ts": time.time(), "hour": hour, "note": note, "n": len(rows)}
+    return hour
+
+
+def best_slots(tok, n=3, now=None):
+    """Up to n publish times (epoch, label, reason), best first. Target: US Eastern evening-ish hour (the owner's audience is
+    mostly in the USA), refined by his own results; day: his strongest weekdays when 3+ weeks of data exist, else the earliest slot."""
+    zu, zc = us_zone(), cairo_zone()
+    now = now or time.time()
+    hour, why_h = None, ""
+    if mem().get("best_hour") is not None:
+        hour, why_h = float(mem()["best_hour"]), "the US Eastern hour you told me"
+    if hour is None:
+        try:
+            hour = learn_hour(tok)
+            why_h = (mem().get("sched_learn") or {}).get("note", "") if hour is not None else ""
+        except Exception as e:
+            print("learn hour:", clean(e)[:80])
+    if hour is None:
+        hour, why_h = US_DEFAULT_HOUR, "1-2 hours before the American evening (still afternoon on the West coast); I adjust it as your own results show a better hour"
+    ranks, why_d = {}, {}
+    try:
+        rows = an_dim(tok, "views", "day", 56)
+        wd = {}
+        for d, v in rows:
+            try:
+                w = (calendar.timegm(time.strptime(d, "%Y-%m-%d")) // 86400 + 3) % 7      # Monday = 0
+            except Exception:
+                continue
+            wd.setdefault(w, []).append(v)
+        if len(rows) >= 21 and len(wd) == 7:
+            avg = {w: sum(v) / len(v) for w, v in wd.items()}
+            order = sorted(avg, key=lambda w: -avg[w])
+            ranks = {w: i for i, w in enumerate(order)}
+            why_d = {w: f"{DAY_NAMES[w]} is one of your stronger days ({avg[w]:.0f} views/day)" for w in order[:3]}
+    except Exception as e:
+        print("slots days:", clean(e)[:80])
+    us_note = ""
+    try:
+        crows = an_dim(tok, "views", "country", 28, {"sort": "-views", "maxResults": 8})
+        tot = sum(v for _, v in crows) or 0
+        us = sum(v for c, v in crows if c == "US")
+        if tot:
+            us_note = f"The USA is {us / tot:.0%} of your views in the last 28 days. "
+    except Exception:
+        pass
+    hour = round(hour * 2) / 2
+    h, mi = int(hour) % 24, int((hour % 1) * 60)
+    base = datetime.datetime.fromtimestamp(now, zu)
+    cands = []
+    for k in range(0, 9):
+        d = (base + datetime.timedelta(days=k)).replace(hour=h, minute=mi, second=0, microsecond=0)
+        if d.timestamp() - now >= 90 * 60:
+            cands.append(d)
+    cands = cands[:5]
+    if ranks:
+        top = [d for d in cands if ranks.get(d.weekday(), 9) <= 2] or cands
+        rest = [d for d in cands if d not in top]
+        chosen = (sorted(top, key=lambda d: ranks.get(d.weekday(), 9)) + rest)[:n]
+    else:
+        chosen = cands[:n]
+    out = []
+    for d in chosen:
+        reason = us_note + (why_d.get(d.weekday(), "") + "; " if d.weekday() in why_d else "") + why_h[:1].upper() + why_h[1:]
+        lab = d.strftime("%a %d %b, %H:%M") + " US Eastern (" + datetime.datetime.fromtimestamp(d.timestamp(), zc).strftime("%H:%M") + " Cairo)"
+        out.append((d.timestamp(), lab, reason))
+    return out
+
+
+def yt_schedule(vid, tok, when):
+    iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(when))
+    r = S.put(f"{YT}/youtube/v3/videos?part=status", headers={"Authorization": f"Bearer {tok}"},
+              json={"id": vid, "status": {"privacyStatus": "private", "publishAt": iso, "selfDeclaredMadeForKids": False}}, timeout=60)
+    r.raise_for_status()
+    g = yt_get("videos", tok, part="status", id=vid)
+    items = g.get("items") or []
+    pa = (items[0].get("status") or {}).get("publishAt") if items else None
+    return bool(pa)
+
+
+def cmd_schedule(st, video_id=None):
+    tok = yt_token()
+    vids = mem().get("videos") or {}
+    if not video_id:
+        for v, rec in sorted(vids.items(), key=lambda kv: -kv[1].get("uploaded", 0)):
+            if rec.get("scheduled"):
+                continue
+            try:
+                if yt_privacy(v, tok) == "private":
+                    video_id = v
+            except Exception:
+                pass
+            break
+    if not video_id:
+        return send("I see no private video of yours that waits for a publish time. Upload one first, or it is already public or scheduled.")
+    rec = vids.get(video_id) or {}
+    slots = best_slots(tok)
+    if not slots:
+        return send("I could not find a free time slot. Try again in a moment.")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "sched", "video_id": video_id, "title": rec.get("title", ""), "slots": [list(x) for x in slots],
+                        "created": time.time()}
+    t0, l0, r0 = slots[0]
+    rows = [[btn("✅ Schedule: " + l0, pid, "sy", "0")]]
+    for i, (_, lab, _r) in enumerate(slots[1:], 1):
+        rows.append([btn("Or " + lab, pid, "sy", str(i))])
+    rows.append([btn("Not now", pid, "cs")])
+    send(f"🕒 Best time to publish \"{rec.get('title', video_id)}\":\n\n{l0}\nWhy: {r0}.\n\n"
+         "The video stays PRIVATE and YouTube makes it public at that minute.", rows)
+
+
+def do_schedule(st, jid, idx, auto=False):
+    prop = st["props"].get(jid)
+    if not prop:
+        return send("That suggestion is too old. Send /schedule again.")
+    try:
+        when, label, why = prop["slots"][int(idx or 0)]
+    except Exception:
+        return send("I could not read that choice. Send /schedule again.")
+    tok = yt_token()
+    ok, err = False, ""
+    try:
+        ok = yt_schedule(prop["video_id"], tok, when)
+    except Exception as e:
+        err = clean(e)[:120]
+    url = "https://youtu.be/" + prop["video_id"]
+    if ok:
+        rec = mem()["videos"].get(prop["video_id"])
+        if rec is not None:
+            rec["scheduled"] = when
+        st["props"].pop(jid, None)
+        pc, pu = new_pid(st), new_pid(st)
+        st["props"][pc] = {"type": "schedgen", "video_id": prop["video_id"], "created": time.time()}
+        st["props"][pu] = {"type": "unsched", "video_id": prop["video_id"], "created": time.time()}
+        return send(f"🕒 Scheduled: \"{prop['title']}\" goes public on {label}.\nWhy this time: {why}.\n{url}",
+                    [[btn("Choose another time", pc, "sh")], [btn("↩️ Cancel the schedule", pu, "su")]])
+    mem().setdefault("remind", []).append({"ts": when, "text": f"⏰ Publish time for \"{prop['title']}\": {url}\nYouTube app → Profile → Your videos → open it → Edit → "
+                                           "Visibility → Public.", "vid": prop["video_id"]})
+    st["props"].pop(jid, None)
+    send("YouTube did not accept a schedule from me" + (f" ({err})" if err else "") + ". New API projects are often locked to private until Google audits them, "
+         f"so I cannot schedule by code.\n\nDo it once by hand (30 seconds): YouTube app → Profile → Your videos → open it → Edit → Visibility → "
+         f"Schedule → {label}.\n{url}\n\nI will also remind you here at that time.")
+
+
+def auto_schedule_on():
+    return mem().get("auto_schedule", True)
+
+
+def auto_schedule(st, vid, title, tok):
+    """Right after an upload that the owner approved: pick the best US-time slot and schedule it, no extra tap."""
+    slots = best_slots(tok)
+    if not slots:
+        return send("I could not find a publish time. Send /schedule when you are ready.")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "sched", "video_id": vid, "title": title, "slots": [list(x) for x in slots], "created": time.time(), "auto": True}
+    do_schedule(st, pid, 0, auto=True)
+
+
+def cmd_autoschedule(st, raw):
+    parts = raw.split()
+    if len(parts) > 1 and parts[1].lower() in ("on", "off"):
+        mem()["auto_schedule"] = parts[1].lower() == "on"
+    send("Auto-scheduling is " + ("ON: after every upload I pick the best US-time slot and schedule it (you can change or cancel it from the message)."
+                                  if auto_schedule_on() else "OFF: videos stay private until you send /schedule or publish them yourself.") +
+         "\nSwitch with /autoschedule on or /autoschedule off. Hour: /besthour 17 (US Eastern) or /besthour auto.")
+
+
+def cmd_unschedule(st, video_id):
+    tok = yt_token()
+    r = S.put(f"{YT}/youtube/v3/videos?part=status", headers={"Authorization": f"Bearer {tok}"},
+              json={"id": video_id, "status": {"privacyStatus": "private", "selfDeclaredMadeForKids": False}}, timeout=60)
+    r.raise_for_status()
+    rec = mem()["videos"].get(video_id)
+    if rec is not None:
+        rec.pop("scheduled", None)
+    mem()["remind"] = [x for x in (mem().get("remind") or []) if x.get("vid") != video_id]
+    send("↩️ Schedule cancelled. The video stays private. Send /schedule when you want a new time.")
+
+
+def cmd_besthour(st, raw):
+    parts = raw.split()
+    if len(parts) > 1 and parts[1].lower() == "auto":
+        mem().pop("best_hour", None)
+        return send("✅ Back to automatic: I choose the hour myself and adjust it from your results.")
+    try:
+        h = float(parts[1].replace(":", ".").replace(",", ".")) if len(parts) > 1 else None
+        if h is None or not 0 <= h < 24:
+            raise ValueError
+    except Exception:
+        cur = mem().get("best_hour")
+        return send("Tell me the US Eastern hour you want videos to go public, like /besthour 17 (or 17.5 for 17:30). "
+                    "/besthour auto goes back to letting me learn it from your results." +
+                    (f" Now I use {cur}:00 Eastern." if cur is not None else ""))
+    mem()["best_hour"] = h
+    send(f"✅ Saved. I will schedule your videos for {int(h)}:{int((h % 1) * 60):02d} US Eastern time.")
+
+
+def send_due_reminders():
+    rem = mem().get("remind") or []
+    due = [r for r in rem if r.get("ts", 0) - 600 <= time.time()]
+    if not due:
+        return
+    mem()["remind"] = [r for r in rem if r not in due]
+    for r in due:
+        send(r.get("text", "⏰ Publish time."))
+
+
 def cmd_thumbtest(st):
     vids = mem()["videos"]
     cand = [(v, r) for v, r in vids.items() if r.get("file_id")]
@@ -2981,6 +3294,10 @@ def housekeeping(st):
         return
     m = mem()
     now = time.time()
+    try:
+        send_due_reminders()
+    except Exception as e:
+        print("reminders:", clean(e)[:100])
     if now - m["last_check"] > 1800:
         m["last_check"] = now
         for step in (lambda: run_results(False), lambda: run_exps(st)):
@@ -4300,7 +4617,7 @@ Choose the action. Actions: idea (wants video ideas), script (gave a topic to wr
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes), sources (add sources to the descriptions of older videos), patterns (what the owner's own numbers show about titles and formats), brief (a summary of everything that needs him),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
-funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), lessons (what you have learned), health (is everything working),
+funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), lessons (what you have learned), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -4322,6 +4639,8 @@ def run_action(action, topic, st, text=""):
         return cmd_funnel(st)
     if action == "besttime":
         return cmd_besttime(st)
+    if action == "schedule":
+        return cmd_schedule(st)
     if action == "trends":
         return cmd_trends(st)
     if action == "thumbtest":
@@ -4437,6 +4756,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/review - weekly self-review now (also runs by itself on Sundays)\n"
         "/funnel - point your Shorts viewers to a long video\n"
         "/besttime - when to post, from your own data\n"
+        "/schedule - pick a publish time for your private video; /autoschedule on|off; /besthour 17 sets the US Eastern hour\n"
         "/trends - what is hot now in the niche (tags, topics)\n"
         "/thumbtest - 3 thumbnail options and how to test them\n"
         "/post - 3 Community posts (poll, fact, teaser) to paste into YouTube\n"
@@ -4588,6 +4908,12 @@ def on_message(msg, st):
         cmd_funnel(st)
     elif text == "/besttime":
         cmd_besttime(st)
+    elif text == "/schedule":
+        cmd_schedule(st)
+    elif text.startswith("/autoschedule"):
+        cmd_autoschedule(st, raw)
+    elif text.startswith("/besthour"):
+        cmd_besthour(st, raw)
     elif text == "/trends":
         cmd_trends(st)
     elif text == "/thumbtest":
@@ -4679,7 +5005,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -4813,6 +5139,8 @@ def main():
             {"command": "review", "description": "Weekly self-review"},
             {"command": "funnel", "description": "Send Shorts viewers to a long video"},
             {"command": "besttime", "description": "When to post"},
+            {"command": "schedule", "description": "Schedule the latest video at the best time"},
+            {"command": "autoschedule", "description": "Auto-schedule uploads on or off"},
             {"command": "trends", "description": "What is trending now"},
             {"command": "thumbtest", "description": "Thumbnail options and test"},
             {"command": "post", "description": "Community posts to paste"},
