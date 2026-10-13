@@ -37,7 +37,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.45"
+BOT_VERSION = "v10.46"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2785,11 +2785,11 @@ def iso_seconds(d):
     return h * 3600 + mi * 60 + se
 
 
-def scout_market(tok):
+def scout_market(tok, queries=None):
     own = yt_get("channels", tok, part="id", mine="true")["items"][0]["id"]
     after = time.strftime("%Y-%m-%dT00:00:00Z", time.gmtime(time.time() - 120 * 86400))
     ids = []
-    for q in SCOUT_QUERIES:
+    for q in (queries or SCOUT_QUERIES):
         try:
             res = yt_get("search", tok, part="snippet", q=q, type="video", order="viewCount",
                          publishedAfter=after, maxResults=10, relevanceLanguage="en")
@@ -4009,7 +4009,7 @@ Comments:
 def nb():
     n = mem().setdefault("notebook", {})
     for k, v in (("obs", {}), ("facts", []), ("asks", []), ("muted", []), ("last", 0), ("off", False), ("last_comments", 0),
-                 ("preds", {}), ("acc", {}), ("score", [0, 0]), ("last_report", ""), ("rep_keys", [])):
+                 ("demand", {}), ("news", {}), ("comp", {}), ("preds", {}), ("acc", {}), ("score", [0, 0]), ("last_report", ""), ("rep_keys", [])):
         n.setdefault(k, v)
     return n
 
@@ -4105,6 +4105,7 @@ def nb_scan(st, force=False):
     fresh = [f for f in n["facts"] if f["key"] not in old]
     if fresh and not first:
         send("🧠 I noticed something new in your numbers (" + fresh[0]["conf"] + "): " + fresh[0]["text"] + "\nSend /learned to see everything I have learned.")
+    nb_feeds(st, tok, force)
     if now - n["last_comments"] > 3 * 86400:
         n["last_comments"] = now
         try:
@@ -4209,6 +4210,94 @@ def nb_report(st, force=False):
     send("\n".join(lines))
 
 
+# ---------------- learning feeds: what people search for, the news, and big channels (read-only, public data) ----------------
+COMP_QUERIES = ["ancient history documentary", "archaeology discoveries explained", "history mysteries explained", "ancient civilizations explained"]
+
+COMP_PROMPT = """You study big and fast-growing American history and documentary channels (public data only) to help a small channel "Kemet | Ancient Egypt" (calm, evidence-first, short and long videos, audience mostly in the USA).
+Below are recent videos that beat their own channel's size (views_per_sub is high when a video outperformed its channel):
+{rows}
+Return JSON only: {{"patterns": ["3 to 4 short, concrete patterns in titles, length or topics that seem to work for these videos"]}}
+Say "seems" when the data is thin: this is a small sample. Do not copy any title."""
+
+
+def nb_demand(tok):
+    """What people type into YouTube search about Ancient Egypt, and how weak the competition is. Pure data, no guessing."""
+    seeds = ["ancient egypt", "pharaoh", "egyptian god", "pyramid", "mummy", "egyptian history"]
+    sugg = []
+    for s_ in seeds:
+        got = suggest(s_)
+        if not got and not sugg:
+            raise RuntimeError("YouTube search suggestions not reachable")
+        for x in got:
+            if x not in sugg and len(x) > 6:
+                sugg.append(x)
+    rows = []
+    for q in sugg[:8]:
+        try:
+            found = yt_get("search", tok, part="snippet", type="video", q=q, maxResults=5)["items"]
+            ids = [i["id"]["videoId"] for i in found if i.get("id", {}).get("videoId")]
+            views = sorted(int(v.get("statistics", {}).get("viewCount", 0)) for v in
+                           yt_get("videos", tok, part="statistics", id=",".join(ids))["items"]) if ids else []
+        except Exception as e:
+            if not rows:
+                raise
+            break
+        rows.append({"q": q, "comp": views[len(views) // 2] if views else 0})
+    rows.sort(key=lambda r: r["comp"])
+    return {"ts": time.time(), "rows": rows[:8]}
+
+
+def nb_news(st):
+    n = nb()
+    tok = yt_token()
+    vids, _ = my_videos(tok, 15)
+    text, sources = gemini_text(NEWS_PROMPT.format(titles=json.dumps([v["snippet"]["title"] for v in vids])), search=True)
+    a, b = text.find("{"), text.rfind("}")
+    items = json.loads(text[a:b + 1]).get("items", [])
+    items = drop_made([i for i in items if i.get("idea")], "idea")[:4]
+    return {"ts": time.time(), "items": [{"headline": str(i.get("headline", ""))[:140], "idea": str(i["idea"])[:90]} for i in items],
+            "sources": [u for _, u in sources[:3]]}
+
+
+def nb_comp(tok):
+    rows = scout_market(tok, COMP_QUERIES)
+    if len(rows) < 3:
+        return None
+    out = gemini([{"text": COMP_PROMPT.format(rows=json.dumps(
+        [{k: r[k] for k in ("title", "channel", "views", "subs", "age_days", "minutes", "views_per_sub")} for r in rows[:10]]))}])
+    pats = [str(p)[:200] for p in out.get("patterns", [])][:4]
+    asks = []
+    try:                                           # public comments on the three strongest videos: what viewers of big channels ask
+        pseudo = [{"id": r["id"], "snippet": {"title": r["title"]}} for r in rows[:3]]
+        com = viewer_comments(tok, pseudo, "", per=20)
+        if com:
+            o = gemini([{"text": NB_ASKS_PROMPT.format(comments="\n".join("- " + c["comment"][:240] for c in com[:60]))}])
+            asks = [str(a.get("ask", ""))[:140] for a in (o.get("asks") or [])[:6] if len(str(a.get("ask", ""))) >= 8]
+    except Exception as e:
+        print("competitor comments:", clean(e)[:80])
+    return {"ts": time.time(), "patterns": pats, "asks": asks,
+            "top": [{"title": r["title"], "channel": r["channel"], "views": r["views"]} for r in rows[:3]]}
+
+
+def nb_feeds(st, tok, force=False):
+    n = nb()
+    now = time.time()
+    if os.getenv("NB_NO_FEEDS"):
+        return
+    for key, every, fn in (("demand", 3, lambda: nb_demand(tok)), ("news", 7, lambda: nb_news(st)), ("comp", 7, lambda: nb_comp(tok))):
+        if not force and now - (n.get(key) or {}).get("ts", 0) < every * 86400 - 3600:
+            continue
+        try:
+            got = fn()
+            if got:
+                n[key] = got
+        except Exception as e:
+            n.setdefault(key, {})
+            if not n[key].get("ts"):
+                n[key] = {}
+            print(f"notebook {key}:", clean(e)[:100])
+
+
 def nb_block():
     n = mem().get("notebook") or {}
     if n.get("off"):
@@ -4220,6 +4309,19 @@ def nb_block():
     if n.get("asks"):
         parts.append("What viewers keep asking for in comments (real requests, good video topics):\n" +
                      "\n".join(f"- {a['ask']}" + (f" (asked {a['count']} times)" if a.get("count", 1) > 1 else "") for a in n["asks"][:8]))
+    d = n.get("demand") or {}
+    if d.get("rows"):
+        parts.append("What people type into YouTube search about Ancient Egypt, weakest competition first (median views of the top 5 results):\n" +
+                     "\n".join(f"- {r['q']} (competition {r['comp']:,} views)" for r in d["rows"][:6]))
+    nw = n.get("news") or {}
+    if nw.get("items") and time.time() - nw.get("ts", 0) < 21 * 86400:
+        parts.append("Recent Ancient Egypt news (not verified by the owner, check sources before using):\n" +
+                     "\n".join(f"- {i['headline']}" for i in nw["items"][:4]))
+    cp = n.get("comp") or {}
+    if cp.get("patterns"):
+        parts.append("What seems to work on big American history channels (small sample, hints only):\n" + "\n".join("- " + p for p in cp["patterns"]))
+    if cp.get("asks"):
+        parts.append("What viewers of big history channels ask in public comments:\n" + "\n".join("- " + a for a in cp["asks"]))
     return "\n".join(parts)
 
 
@@ -4255,6 +4357,20 @@ def cmd_learned(st, arg=""):
     if n["asks"]:
         lines.append("\nViewers keep asking:")
         lines += [f"- {a['ask']}" + (f" (x{a['count']})" if a.get("count", 1) > 1 else "") for a in n["asks"][:8]]
+    d = n.get("demand") or {}
+    if d.get("rows"):
+        lines.append("\nWhat people search for (weak competition first):")
+        lines += [f"- {r['q']} (top results: {r['comp']:,} views)" for r in d["rows"][:5]]
+    nw = n.get("news") or {}
+    if nw.get("items"):
+        lines.append("\nIn the news (check the source before you film):")
+        lines += ["- " + i["headline"] for i in nw["items"][:4]]
+    cp = n.get("comp") or {}
+    if cp.get("patterns"):
+        lines.append("\nWhat seems to work on big American history channels:")
+        lines += ["- " + p for p in cp["patterns"][:4]]
+    if cp.get("asks"):
+        lines.append("What their viewers ask: " + "; ".join(cp["asks"][:4]))
     lines.append("\n" + nb_accuracy_line(n))
     m = mem()
     if m.get("reasons"):
