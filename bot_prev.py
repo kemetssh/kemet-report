@@ -37,7 +37,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.43"
+BOT_VERSION = "v10.45"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -404,6 +404,8 @@ def learned():
         parts.append("Titles the owner CHOSE (his taste):\n" + "\n".join("- " + x for x in m["picks"][-8:]))
     if m["skips"]:
         parts.append("Titles the owner REJECTED:\n" + "\n".join("- " + x for x in m["skips"][-8:]))
+    if m.get("reasons"):
+        parts.append("Why the owner rejected titles (avoid these faults):\n" + "\n".join(f"- \"{r['title']}\": {r['why']}" for r in m["reasons"][-8:]))
     sc = m.get("scout")
     if sc and sc.get("patterns"):
         parts.append("Market scan of other channels (small sample, hints only):\n" + "\n".join("- " + x for x in sc["patterns"][:4]))
@@ -417,6 +419,12 @@ def learned():
     if gt and gt.get("buzz") and time.time() - gt.get("ts", 0) < 7 * 86400:
         parts.append("What is viral WORLDWIDE right now (any niche): " + gt["buzz"][:500] +
                      "\nUse a global trend only when it truthfully connects to Ancient Egypt (a format, a question people ask, a news hook). Never force it or mislead.")
+    try:
+        nbb = nb_block()
+    except Exception:
+        nbb = ""
+    if nbb:
+        parts.append(nbb)
     pat = (m.get("patterns") or {}).get("lines")
     if pat:
         parts.append("What the owner's own numbers show (small sample, hints only):\n" + "\n".join("- " + x for x in pat))
@@ -1890,6 +1898,12 @@ def do_upload(job):
                       "I could not set the AI label by code: switch it on in YouTube Studio. ")
     mem()["videos"][vid] = {"uploaded": time.time(), "title": job["title"], "file_id": job["file_id"],
                             "summary": job["review"].get("summary", ""), "checked": False, "next": job.get("next_id", "")}
+    try:
+        pr = nb_predict(job["title"], job.get("dur", 0))
+        if pr:
+            nb()["preds"][vid] = pr
+    except Exception as e:
+        print("prediction:", clean(e)[:80])
     pid = new_pid(ST)
     ST["props"][pid] = {"type": "subgen", "video_id": vid, "created": time.time()}
     pid_pl = new_pid(ST)
@@ -2317,7 +2331,18 @@ def on_prop(jid, act, st):
         if kind == "comment":
             mem()["dismissed"] = (mem().get("dismissed", []) + [prop.get("key", prop["parent"])])[-1500:]
         st["props"].pop(jid, None)
+        if kind == "title":
+            wp = new_pid(st)
+            st["props"][wp] = {"type": "why", "title": prop["new"], "created": time.time()}
+            return send("Skipped. One tap, if you like, helps me learn your taste: why not?",
+                        [[btn("Too long", wp, "wy", "too long"), btn("Not accurate", wp, "wy", "not accurate")],
+                         [btn("Wrong tone", wp, "wy", "wrong tone"), btn("Not my style", wp, "wy", "not my style")]])
         return send("Skipped.")
+    if kind == "why" and act == "wy":
+        st["props"].pop(jid, None)
+        m_ = mem()
+        m_["reasons"] = (m_.get("reasons", []) + [{"title": prop["title"][:120], "why": str(st.get("_val", ""))[:40]}])[-30:]
+        return send("Noted. I will take that into account.")
     if act == "sh" and kind == "schedgen":
         st["props"].pop(jid, None)
         return cmd_schedule(st, prop["video_id"])
@@ -2329,6 +2354,18 @@ def on_prop(jid, act, st):
     if kind == "rck" and act == "rl":
         st["props"].pop(jid, None)
         return cmd_series(st, prop["video_id"])
+    if kind == "nbk" and act == "nd":
+        try:
+            key = prop["keys"][int(st.get("_val", "0"))]
+        except Exception:
+            return send("That list is too old. Send /learned again.")
+        n = nb()
+        n["muted"] = (n["muted"] + [key])[-100:]
+        n["facts"] = [f for f in n["facts"] if f["key"] != key]
+        return send("🗑 Forgotten. I will not bring that pattern up again.")
+    if kind == "nbk" and act == "np":
+        st["props"].pop(jid, None)
+        return cmd_learned(st, "on" if nb()["off"] else "off")
     if kind == "rcnext" and act == "rn":
         st["props"].pop(jid, None)
         return rc_batch(st)
@@ -3900,6 +3937,10 @@ def housekeeping(st):
             rc_batch(st)
     except Exception as e:
         print("recheck auto:", clean(e)[:100])
+    try:
+        nb_scan(st)
+    except Exception as e:
+        print("notebook:", clean(e)[:100])
     if now - m["last_check"] > 1800:
         m["last_check"] = now
         for step in (lambda: run_results(False), lambda: run_exps(st)):
@@ -3937,6 +3978,11 @@ def housekeeping(st):
             cmd_audit(st)
         except Exception as e:
             print("audited monday:", clean(e))
+    if g.tm_wday == 6 and g.tm_hour >= 17:
+        try:
+            nb_report(st)
+        except Exception as e:
+            print("learning report:", clean(e)[:100])
     if g.tm_wday == 6 and g.tm_hour >= 16 and m.get("last_review") != week:
         m["last_review"] = week
         try:
@@ -3949,6 +3995,280 @@ def housekeeping(st):
             do_plan(st)
         except Exception as e:
             print("plan:", clean(e))
+
+
+# ---------------- learning notebook (it studies everything by itself; only YOU decide what gets changed) ----------------
+NB_ASKS_PROMPT = """Below are real viewer comments on the YouTube history channel "Kemet | Ancient Egypt".
+Find what viewers ask or request: questions about Ancient Egypt, topics they want covered, things they say they are confused about.
+Ignore praise, spam and anything unrelated. Group similar ones. Never invent a request that is not in the comments.
+Return JSON only: {{"asks": [{{"ask": "short question or topic in plain English", "count": 1}}]}}
+Comments:
+{comments}"""
+
+
+def nb():
+    n = mem().setdefault("notebook", {})
+    for k, v in (("obs", {}), ("facts", []), ("asks", []), ("muted", []), ("last", 0), ("off", False), ("last_comments", 0),
+                 ("preds", {}), ("acc", {}), ("score", [0, 0]), ("last_report", ""), ("rep_keys", [])):
+        n.setdefault(k, v)
+    return n
+
+
+def nb_features(o):
+    f = dict(title_features(o.get("title", "")))
+    f["a Short (60 seconds or less)"] = 0 < o.get("secs", 0) <= 60
+    if o.get("hour") is not None:
+        f["posted in the US evening (4 PM Eastern or later)"] = o["hour"] >= 16
+    f["3 or more hashtags"] = o.get("tags", 0) >= 3
+    f["a Watch-next link in the description"] = bool(o.get("wn"))
+    return f
+
+
+def nb_lessons(obs):
+    """Plain-language findings from the channel's own numbers. Honest about small samples: needs 8+ videos and 3+ on each side."""
+    rows = [o for o in obs.values() if o.get("age", 0) >= 3 and o.get("views") is not None]
+    if len(rows) < 8:
+        return []
+    for o in rows:
+        o["vpd"] = o["views"] / max(o["age"], 1)
+        o["f"] = nb_features(o)
+    out = []
+    for name in sorted({k for o in rows for k in o["f"]}):
+        a = [o for o in rows if o["f"].get(name)]
+        b = [o for o in rows if not o["f"].get(name)]
+        if min(len(a), len(b)) < 3:
+            continue
+        conf = "repeating pattern" if min(len(a), len(b)) >= 5 else "early hint"
+        ma, mb = sum(o["vpd"] for o in a) / len(a), sum(o["vpd"] for o in b) / len(b)
+        if mb > 0:
+            ratio = ma / mb
+            if ratio >= 1.5 or ratio <= 0.67:
+                out.append({"key": "v|" + name, "conf": conf, "n": len(rows), "dir": 1 if ratio >= 1.5 else -1,
+                            "text": f"Videos with {name} get about {ratio:.1f}x the daily views of the others ({len(a)} vs {len(b)} videos)"})
+        pa = [o["pct"] for o in a if o.get("pct")]
+        pb = [o["pct"] for o in b if o.get("pct")]
+        if min(len(pa), len(pb)) >= 3:
+            d = sum(pa) / len(pa) - sum(pb) / len(pb)
+            if abs(d) >= 8:
+                out.append({"key": "p|" + name, "conf": "repeating pattern" if min(len(pa), len(pb)) >= 5 else "early hint", "n": len(pa) + len(pb),
+                            "text": f"Videos with {name} are watched {abs(d):.0f} points {'more' if d > 0 else 'less'} of the way through"})
+    return out[:8]
+
+
+def nb_scan(st, force=False):
+    n = nb()
+    if n["off"] or (not force and time.time() - n["last"] < 20 * 3600):
+        return None
+    now = time.time()
+    n["last"] = now
+    first = not n["obs"]
+    tok = yt_token()
+    vids, chid = latest_vids(tok, 50)
+    secs = {}
+    ids = [v["id"] for v in vids]
+    if ids:
+        for it in yt_get("videos", tok, part="contentDetails", id=",".join(ids)).get("items", []):
+            secs[it.get("id")] = iso_seconds((it.get("contentDetails") or {}).get("duration"))
+    calls = 0
+    for v in vids:
+        sn = v["snippet"]
+        pub = iso_ts(sn.get("publishedAt", ""))
+        if not pub or (now - pub) / 86400 < 3:
+            continue
+        o = n["obs"].setdefault(v["id"], {})
+        desc = sn.get("description", "")
+        try:
+            hour = datetime.datetime.fromtimestamp(pub, us_zone()).hour
+        except Exception:
+            hour = None
+        o.update({"title": sn.get("title", ""), "secs": secs.get(v["id"], 0), "hour": hour, "tags": len(current_hashtags(desc)),
+                  "wn": has_watch_next(desc), "views": int(v["statistics"].get("viewCount", 0)), "age": round((now - pub) / 86400, 1)})
+        if calls < 12 and now - o.get("pct_ts", 0) > 7 * 86400:
+            calls += 1
+            try:
+                pct, subs, views = an_query(tok, "averageViewPercentage,subscribersGained,views", 90, "video==" + v["id"])
+                o["pct_ts"] = now
+                if views:
+                    o["pct"] = round(pct, 1)
+                    o["subs"] = subs
+            except Exception as e:
+                print("notebook analytics:", clean(e)[:80])
+    old = {f["key"] for f in n["facts"]}
+    nb_score(n)
+    n["facts"] = [f for f in nb_lessons(n["obs"]) if f["key"] not in n["muted"]]
+    for f in n["facts"]:
+        a = n["acc"].get(f["key"])
+        if a and a[1] >= 3:
+            f["hit"] = f"{a[0]}/{a[1]}"
+            if a[0] / a[1] < 0.4:
+                f["conf"] = "unreliable"
+    fresh = [f for f in n["facts"] if f["key"] not in old]
+    if fresh and not first:
+        send("🧠 I noticed something new in your numbers (" + fresh[0]["conf"] + "): " + fresh[0]["text"] + "\nSend /learned to see everything I have learned.")
+    if now - n["last_comments"] > 3 * 86400:
+        n["last_comments"] = now
+        try:
+            rows = viewer_comments(tok, vids[:8], chid, per=20)
+            if rows:
+                out = gemini([{"text": NB_ASKS_PROMPT.format(comments="\n".join("- " + r["comment"][:240] for r in rows[:60]))}])
+                have = {a["ask"].lower(): a for a in n["asks"]}
+                for a in (out.get("asks") or [])[:10]:
+                    t = str(a.get("ask", "")).strip()[:140]
+                    if len(t) < 8:
+                        continue
+                    if t.lower() in have:
+                        have[t.lower()]["count"] = have[t.lower()].get("count", 1) + 1
+                    else:
+                        n["asks"].append({"ask": t, "count": int(a.get("count", 1) or 1), "ts": now})
+                n["asks"] = sorted(n["asks"], key=lambda a: (-a.get("count", 1), -a.get("ts", 0)))[:12]
+        except Exception as e:
+            print("notebook comments:", clean(e)[:100])
+    return len(n["obs"])
+
+
+def nb_predict(title, secs=0):
+    """Before an upload: write down a guess from the patterns learned so far. Scored a week later."""
+    n = nb()
+    if n["off"]:
+        return None
+    f = nb_features({"title": title, "secs": secs, "hour": None, "tags": 0})
+    keys, score = [], 0
+    for fa in n["facts"]:
+        if fa["key"].startswith("v|") and fa.get("conf") != "unreliable" and f.get(fa["key"][2:]) and fa.get("dir"):
+            keys.append(fa["key"])
+            score += fa["dir"]
+    if not keys:
+        return None
+    guess = "above" if score > 0 else ("below" if score < 0 else "typical")
+    return {"guess": guess, "keys": keys, "ts": time.time()}
+
+
+def nb_score(n):
+    """Compare each week-old guess with what happened; patterns whose guesses keep missing lose trust."""
+    rows = [o for o in n["obs"].values() if o.get("views") is not None and o.get("age", 0) >= 3]
+    if len(rows) < 4:
+        return
+    vpd = {k: o["views"] / max(o["age"], 1) for k, o in n["obs"].items() if o.get("views") is not None and o.get("age", 0) >= 3}
+    for vid, p in n["preds"].items():
+        o = n["obs"].get(vid)
+        if p.get("scored") or not o or o.get("age", 0) < 7 or vid not in vpd:
+            continue
+        others = sorted(v for k, v in vpd.items() if k != vid)
+        if not others:
+            continue
+        med = others[len(others) // 2]
+        if med <= 0:
+            continue
+        r = vpd[vid] / med
+        actual = "above" if r > 1.25 else ("below" if r < 0.8 else "typical")
+        hit = actual == p["guess"]
+        p["scored"], p["actual"], p["hit"] = True, actual, hit
+        n["score"][1] += 1
+        n["score"][0] += 1 if hit else 0
+        for k in p["keys"]:
+            a = n["acc"].setdefault(k, [0, 0])
+            a[1] += 1
+            a[0] += 1 if hit else 0
+
+
+def nb_accuracy_line(n):
+    h, t = n["score"]
+    return f"My guesses before upload: {h} of {t} were right." if t else "My guesses before upload: none scored yet (I score each one a week after the video goes up)."
+
+
+def nb_report(st, force=False):
+    n = nb()
+    week = time.strftime("%G-%V", time.gmtime())
+    if n["off"] or (not force and n["last_report"] == week):
+        return
+    n["last_report"] = week
+    keys = {f["key"] for f in n["facts"]}
+    new = [f for f in n["facts"] if f["key"] not in n["rep_keys"]]
+    gone = [k for k in n["rep_keys"] if k not in keys]
+    n["rep_keys"] = sorted(keys)
+    lines = [f"🧠 Learning report for the week - {len(n['obs'])} videos studied"]
+    lines.append(nb_accuracy_line(n))
+    if new:
+        lines += ["New this week:"] + [f"- {f['text']} [{f['conf']}]" for f in new[:3]]
+    if gone:
+        lines.append(f"{len(gone)} earlier pattern(s) no longer hold with newer videos, so I dropped them.")
+    weak = [f for f in n["facts"] if f["conf"] != "repeating pattern"]
+    if weak:
+        lines.append("Still unsure (needs more videos): " + "; ".join(f["text"].split(" get about")[0].split(" are watched")[0].replace("Videos with ", "") for f in weak[:3]))
+    elif not n["facts"]:
+        lines.append("No solid pattern yet. I need more videos before I will call anything a pattern.")
+    unrel = [f for f in n["facts"] if f["conf"] == "unreliable"]
+    if unrel:
+        lines.append(f"{len(unrel)} pattern(s) are marked unreliable because my guesses from them were often wrong. I no longer use them.")
+    if n["asks"]:
+        lines.append("Viewers ask most: " + "; ".join(a["ask"] for a in n["asks"][:3]))
+    reasons = mem().get("reasons") or []
+    if reasons:
+        lines.append(f"Your reasons for rejecting titles ({len(reasons)} so far) are shaping my next suggestions.")
+    lines.append("Send /learned to correct anything. I only learn: every change still needs your tap.")
+    send("\n".join(lines))
+
+
+def nb_block():
+    n = mem().get("notebook") or {}
+    if n.get("off"):
+        return ""
+    parts = []
+    if [f for f in n.get("facts", []) if f["conf"] != "unreliable"]:
+        parts.append("Patterns found in the channel's own numbers (" + str(len(n.get("obs", {}))) + " videos studied; treat 'early hint' as weak):\n" +
+                     "\n".join(f"- {f['text']} [{f['conf']}]" for f in n["facts"] if f["conf"] != "unreliable")[:1500] or "")
+    if n.get("asks"):
+        parts.append("What viewers keep asking for in comments (real requests, good video topics):\n" +
+                     "\n".join(f"- {a['ask']}" + (f" (asked {a['count']} times)" if a.get("count", 1) > 1 else "") for a in n["asks"][:8]))
+    return "\n".join(parts)
+
+
+def cmd_learned(st, arg=""):
+    n = nb()
+    arg = (arg or "").strip().lower()
+    if arg == "off":
+        n["off"] = True
+        return send("⏸ Learning paused. I keep what I know but stop studying new numbers and comments. Send /learned on to resume.")
+    if arg == "on":
+        n["off"] = False
+        n["last"] = 0
+        return send("▶️ Learning is on again. I study your numbers and comments by myself about once a day.")
+    if arg == "report":
+        return nb_report(st, force=True)
+    if arg == "now" or (not n["obs"] and not n["off"]):
+        try:
+            nb_scan(st, force=True)
+        except Exception as e:
+            send("I could not study the channel just now: " + clean(e)[:120])
+    lines = ["🧠 What I have learned" + (" (paused)" if n["off"] else "") + f" - {len(n['obs'])} videos studied"]
+    rows = []
+    pid = new_pid(st)
+    keys = []
+    if n["facts"]:
+        lines.append("\nFrom your numbers:")
+        for i, f in enumerate(n["facts"][:6]):
+            lines.append(f"{i + 1}. {f['text']} [{f['conf']}" + (f"; my guesses from it: {f['hit']} right" if f.get("hit") else "") + "]")
+            keys.append(f["key"])
+            rows.append([btn(f"🗑 Forget #{i + 1}", pid, "nd", str(i))])
+    else:
+        lines.append("\nFrom your numbers: nothing solid yet. I need at least 8 videos older than 3 days, and 3 on each side of a comparison, before I call anything a pattern. I would rather say 'too early' than guess.")
+    if n["asks"]:
+        lines.append("\nViewers keep asking:")
+        lines += [f"- {a['ask']}" + (f" (x{a['count']})" if a.get("count", 1) > 1 else "") for a in n["asks"][:8]]
+    lines.append("\n" + nb_accuracy_line(n))
+    m = mem()
+    if m.get("reasons"):
+        lines.append("Why you rejected titles: " + "; ".join(r["why"] for r in m["reasons"][-4:]))
+    if m["lessons"]:
+        lines.append("\nAfter each video's results I also noted:")
+        lines += ["- " + x for x in m["lessons"][-4:]]
+    if m["picks"] or m["skips"]:
+        lines.append(f"\nYour taste: {len(m['picks'])} titles you chose, {len(m['skips'])} you rejected. I use them when I write new titles.")
+    lines.append("\nI only learn. I never publish or change anything by myself: every change still needs your tap.")
+    rows.append([btn("▶️ Resume learning" if n["off"] else "⏸ Pause learning", pid, "np")])
+    st["props"][pid] = {"type": "nbk", "keys": keys, "created": time.time()}
+    send("\n".join(lines), rows)
+
 
 
 def show_lessons():
@@ -4824,6 +5144,11 @@ def cmd_health(st):
         chk("Tavily web search", lambda: "working" if web_search("Karnak temple Luxor") else "no answer or key refused (send /searchkey again)")
     else:
         lines.append("Tavily web search: not set (send /searchkey tvly-... to stop depending on Google's free limit)")
+    try:
+        _n = nb()
+        lines.append(f"✓ Learning notebook: {len(_n['obs'])} videos studied, {len(_n['facts'])} patterns, {len(_n['asks'])} viewer requests" + (" (paused)" if _n["off"] else ""))
+    except Exception:
+        pass
     chk("YouTube login", login)
     if "t" in tok:
         chk("YouTube channel", lambda: yt_get("channels", tok["t"], part="snippet", mine="true")["items"][0]["snippet"]["title"])
@@ -5276,7 +5601,7 @@ Choose the action. Actions: idea (wants video ideas), script (gave a topic to wr
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes), sources (add sources to the descriptions of older videos), patterns (what the owner's own numbers show about titles and formats), brief (a summary of everything that needs him),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
-funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), lessons (what you have learned), health (is everything working),
+funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), learned (everything the bot has learned from your numbers and viewers' comments, and pause/forget it), lessons (short list of past lessons), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -5356,6 +5681,8 @@ def run_action(action, topic, st, text=""):
         if action == "goal":
             return cmd_goal(st, "/goal " + (topic or ""))
         return globals()["cmd_" + action](st)
+    if action == "learned":
+        return cmd_learned(st)
     if action == "lessons":
         return show_lessons()
     if action == "health":
@@ -5423,6 +5750,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/besttime - when to post, from your own data\n"
         "/watchnext - add 'Watch next' links to old descriptions\n"
         "/hashtags - refresh old hashtags from what is trending now\n"
+        "/learned - what I learned from your numbers and viewers' comments (forget or pause any time)\n"
         "/recheck - full checkup of all my videos (facts, sources, hashtags, Watch-next, playlist)\n"
         "/schedule - pick a publish time for your private video; /autoschedule on|off; /besthour 17 sets the US Eastern hour\n"
         "/trends - what is hot now in the niche (tags, topics)\n"
@@ -5554,6 +5882,8 @@ def on_message(msg, st):
             make_subtitles({"video_id": vid}, st)
     elif text == "/lessons":
         show_lessons()
+    elif text.startswith("/learned"):
+        cmd_learned(st, text[8:])
     elif text == "/progress":
         cmd_progress(st)
     elif text == "/retention":
@@ -5695,7 +6025,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -5842,6 +6172,7 @@ def main():
             {"command": "watchnext", "description": "Add Watch-next links to old videos"},
             {"command": "hashtags", "description": "Refresh hashtags from what is trending"},
             {"command": "recheck", "description": "Full checkup of all my videos"},
+            {"command": "learned", "description": "What the bot has learned"},
             {"command": "autoschedule", "description": "Auto-schedule uploads on or off"},
             {"command": "trends", "description": "What is trending now"},
             {"command": "thumbtest", "description": "Thumbnail options and test"},
