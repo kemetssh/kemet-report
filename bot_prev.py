@@ -37,7 +37,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.50"
+BOT_VERSION = "v10.51"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2393,6 +2393,8 @@ def on_prop(jid, act, st):
         mem()["best_hour"] = float(prop["h"])
         st["props"].pop(jid, None)
         return send(f"✅ Saved. I will schedule your videos for {int(prop['h'])}:00 US Eastern time.")
+    if kind == "nbk" and act == "nr":
+        return cmd_fullrefresh(st)
     if kind == "nbk" and act == "ns":
         return nb_section(st, str(st.get("_val", "")))
     if kind == "nbk" and act == "nl":
@@ -4629,6 +4631,7 @@ def cmd_learned(st, arg=""):
             [btn("🌍 Search, news, big channels", pid, "ns", "world")],
             [btn("📝 Older lessons (forget)", pid, "ns", "lessons")],
             [btn("📚 Everything I know", pid, "ns", "library")],
+            [btn("🔄 Refresh everything now", pid, "nr")],
             [btn("▶️ Resume learning" if n["off"] else "⏸ Pause learning", pid, "np")]]
     send("\n".join(lines), rows)
 
@@ -4922,6 +4925,50 @@ def cmd_script(st, raw):
     if len(topic) < 6:
         return send("Tell me the topic, for example:\n/script Why did Akhenaten change Egypt's religion?\nI write a fact-checked 45-60 second script in your style. You record it in your own voice.")
     write_script({"title": topic, "hook": ""})
+
+
+def cmd_fullrefresh(st):
+    """One tap: study everything again with the newest data. Read-only: it learns and proposes, and changes nothing on YouTube."""
+    n = nb()
+    send("🔄 Refreshing everything with the newest data (1-3 minutes)...")
+    t0 = time.time()
+    before = {"obs": len(n["obs"]), "lib": sum(lib_counts(n)), "asks": len(n["asks"]), "keys": {f["key"] for f in n["facts"]}, "score": n["score"][1]}
+    done, failed = [], []
+
+    def step(name, fn):
+        try:
+            fn()
+            done.append(name)
+        except Exception as e:
+            failed.append(f"{name} ({clean(e)[:70]})")
+
+    if n["off"]:
+        failed.append("numbers and comments (learning is paused: send /learned on)")
+    else:
+        step("your numbers, comments and past guesses", lambda: nb_scan(st, force=True))
+    step("niche trends and hashtags", lambda: trend_pack(force=True))
+    step("what is viral worldwide", lambda: global_pack(force=True))
+    step("patterns in your channel", lambda: refresh_patterns(force=True))
+    if not os.getenv("NB_NO_WATCH"):
+        step("problem watch", lambda: nb_watch(st, force=True))
+    n = nb()
+    lp, lw = lib_counts(n)
+    new_pat = [f for f in n["facts"] if f["key"] not in before["keys"]]
+    lines = [f"✅ Everything is refreshed ({int(time.time() - t0)} s)", ""]
+    lines.append("Done: " + "; ".join(done) + "." if done else "Nothing could be refreshed.")
+    lines.append("")
+    lines.append(f"• Videos studied: {len(n['obs'])} ({len(n['obs']) - before['obs']:+d})")
+    lines.append(f"• Library kept for good: {lp} patterns, {lw} outside findings ({sum(lib_counts(n)) - before['lib']:+d})")
+    lines.append(f"• Viewer requests: {len(n['asks'])} ({len(n['asks']) - before['asks']:+d})")
+    lines.append(f"• Patterns in your numbers: {len([f for f in n['facts'] if f['conf'] != 'unreliable'])}" +
+                 (f", {len(new_pat)} new: " + "; ".join(f["text"].split(" get about")[0].replace("Videos with ", "") for f in new_pat[:3]) if new_pat else ""))
+    lines.append(f"• My guesses scored so far: {n['score'][0]} of {n['score'][1]} right")
+    if failed:
+        lines.append("\n⚠️ Could not refresh: " + "; ".join(failed) + ". Everything else is up to date.")
+    lines.append("\nFrom this moment my ideas, titles, scripts and plans use all of it. Nothing on your channel was changed.")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "nbk", "created": time.time()}
+    send("\n".join(lines), [[btn("🔎 Patterns (fix)", pid, "ns", "patterns"), btn("📚 Everything I know", pid, "ns", "library")]])
 
 
 def show_lessons():
@@ -6268,7 +6315,7 @@ Choose the action. Actions: idea (wants video ideas), script (gave a topic to wr
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes), sources (add sources to the descriptions of older videos), patterns (what the owner's own numbers show about titles and formats), brief (a summary of everything that needs him),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
-funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), script (write a fact-checked Shorts script on a topic in the owner's style; topic is the subject), affiliate (find real affiliate programs and sponsors that fit the channel), translate (translated subtitles in Spanish, Portuguese, Hindi), shortcuts (the best moments of a long video to cut into Shorts), playlists (build themed playlists), watch (check the channel for problems), learned (everything the bot has learned from your numbers and viewers' comments, and pause/forget it), lessons (short list of past lessons), health (is everything working),
+funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), fullrefresh (refresh everything the bot knows with the newest data in one go), script (write a fact-checked Shorts script on a topic in the owner's style; topic is the subject), affiliate (find real affiliate programs and sponsors that fit the channel), translate (translated subtitles in Spanish, Portuguese, Hindi), shortcuts (the best moments of a long video to cut into Shorts), playlists (build themed playlists), watch (check the channel for problems), learned (everything the bot has learned from your numbers and viewers' comments, and pause/forget it), lessons (short list of past lessons), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -6284,6 +6331,8 @@ Never promise views or growth."""
 def run_action(action, topic, st, text=""):
     if action == "idea":
         return cmd_idea(st)
+    if action == "fullrefresh":
+        return cmd_fullrefresh(st)
     if action == "script":
         return write_script({"title": topic or text, "hook": ""})
     if action == "funnel":
@@ -6432,6 +6481,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/watchnext - add 'Watch next' links to old descriptions\n"
         "/hashtags - refresh old hashtags from what is trending now\n"
         "/learned - what I learned from your numbers and viewers' comments (forget or pause any time)\n"
+        "/fullrefresh - one tap: refresh everything I know with the newest data\n"
         "/script - write a fact-checked script on a topic you give me, in your style\n"
         "/affiliate - find real affiliate programs and sponsors that fit the channel\n"
         "/translate - Spanish, Portuguese and Hindi subtitles for my latest video\n"
@@ -6573,6 +6623,8 @@ def on_message(msg, st):
         cmd_affiliate(st)
     elif text.startswith("/script"):
         cmd_script(st, text)
+    elif text == "/fullrefresh":
+        cmd_fullrefresh(st)
     elif text == "/translate":
         cmd_translate(st)
     elif text == "/shortcuts":
@@ -6724,7 +6776,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -6903,6 +6955,7 @@ def main():
             {"command": "comments", "description": "Draft replies to comments"},
             {"command": "report", "description": "Daily channel report now"},
             {"command": "status", "description": "Videos waiting for you"},
+            {"command": "fullrefresh", "description": "Refresh everything with the newest data"},
             {"command": "script", "description": "Write a script on a topic, in my style"},
             {"command": "affiliate", "description": "Find affiliate programs and sponsors"},
             {"command": "translate", "description": "Translated subtitles (Spanish, Portuguese, Hindi)"},
