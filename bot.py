@@ -37,7 +37,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.48"
+BOT_VERSION = "v10.49"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -172,11 +172,14 @@ def mem():
     return m
 
 
+REMEMBER_LIMIT = {"picks": 300, "skips": 300, "lessons": 100}      # his taste history is kept long; the prompts only use the latest few
+
+
 def remember(kind, item):
     m = mem()
     if item and item not in m[kind]:
         m[kind].append(item)
-    m[kind] = m[kind][-30:]
+    m[kind] = m[kind][-REMEMBER_LIMIT.get(kind, 30):]
 
 
 HOUSE_STYLE = """The owner's standing style rules (always follow them):
@@ -2023,8 +2026,8 @@ never repeat what was already said, keep it to 1-2 sentences, and if they insist
 Comments: """
 
 
-def cmd_titles(st):
-    send("Looking at your videos...")
+def cmd_titles(st, focus=None):
+    send("Looking at your videos..." if not focus else "Looking for old titles this pattern can improve...")
     tok = yt_token()
     vids, _ = my_videos(tok)
     if not vids:
@@ -2040,7 +2043,15 @@ def cmd_titles(st):
     if not data:
         return send(f"All your videos are under {EXP_MIN_AGE_DAYS} days old. I leave fresh videos alone: "
                     "their views are still settling. Ask again later.")
-    out = gemini([{"text": "What you know about the owner's taste:\n" + learned() + "\n\n" + TITLES_PROMPT + json.dumps(data)}])
+    extra = ""
+    if focus:
+        name, want = focus["name"], focus["dir"] > 0
+        data = [d for d in data if bool(title_features(d["title"]).get(name)) != want][:25]
+        if not data:
+            return send(f"Every older title already follows this pattern ({name}), so there is nothing to fix there. 👍")
+        extra = (f"\nPATTERN TO APPLY: in this channel's own numbers, videos with {name} do {'better' if want else 'worse'}. "
+                 f"Propose titles that {'have' if want else 'avoid'} {name}, but ONLY where it stays 100% true to the video and natural. Skip a video if it would need a stretch.\n")
+    out = gemini([{"text": "What you know about the owner's taste:\n" + learned() + "\n" + extra + "\n" + TITLES_PROMPT + json.dumps(data)}])
     byid = {v["id"]: v for v in vids}
     shown = 0
     for p in out.get("proposals", [])[:3]:
@@ -2060,7 +2071,7 @@ def cmd_titles(st):
              [[btn("✅ Apply", pid, "ta"), btn("Skip", pid, "ts")]])
         shown += 1
     if not shown:
-        send("Your titles look fine. Nothing to change right now.")
+        send("Your titles look fine. Nothing to change right now." if not focus else "I found no old title where this pattern fits naturally and stays true to the video, so I changed nothing.")
 
 
 EXP_MIN_AGE_DAYS = 14      # never test titles on fresh videos
@@ -2371,6 +2382,16 @@ def on_prop(jid, act, st):
         return send("🗑 Forgotten. I will not bring that pattern up again.")
     if kind == "plall" and act == "pq":
         return do_playlists(st, jid, prop)
+    if kind == "nbk" and act == "nf":
+        try:
+            key = prop["keys"][int(st.get("_val", "0"))]
+        except Exception:
+            return send("That list is too old. Send /learned again.")
+        return nb_fix(st, key)
+    if kind == "hour" and act == "hq":
+        mem()["best_hour"] = float(prop["h"])
+        st["props"].pop(jid, None)
+        return send(f"✅ Saved. I will schedule your videos for {int(prop['h'])}:00 US Eastern time.")
     if kind == "nbk" and act == "ns":
         return nb_section(st, str(st.get("_val", "")))
     if kind == "nbk" and act == "nl":
@@ -4100,7 +4121,7 @@ def nb_lessons(obs):
         if min(len(pa), len(pb)) >= 3:
             d = sum(pa) / len(pa) - sum(pb) / len(pb)
             if abs(d) >= 8:
-                out.append({"key": "p|" + name, "conf": "repeating pattern" if min(len(pa), len(pb)) >= 5 else "early hint", "n": len(pa) + len(pb),
+                out.append({"key": "p|" + name, "conf": "repeating pattern" if min(len(pa), len(pb)) >= 5 else "early hint", "n": len(pa) + len(pb), "dir": 1 if d > 0 else -1,
                             "text": f"Videos with {name} are watched {abs(d):.0f} points {'more' if d > 0 else 'less'} of the way through"})
     return out[:8]
 
@@ -4155,6 +4176,11 @@ def nb_scan(st, force=False):
     fresh = [f for f in n["facts"] if f["key"] not in old]
     if fresh and not first:
         send("🧠 I noticed something new in your numbers (" + fresh[0]["conf"] + "): " + fresh[0]["text"] + "\nSend /learned to see everything I have learned.")
+        if fresh[0]["conf"] != "early hint":                  # weak hints are shown but not acted on
+            try:
+                nb_fix(st, fresh[0]["key"])
+            except Exception as e:
+                print("auto fix:", clean(e)[:100])
     nb_feeds(st, tok, force)
     if now - n["last_comments"] > 3 * 86400:
         n["last_comments"] = now
@@ -4395,6 +4421,42 @@ def nb_block():
     return "\n".join(parts)
 
 
+def nb_fix(st, key):
+    """A pattern was found: turn it into a concrete fix. Everything is a proposal; every change still needs the owner's tap."""
+    n = nb()
+    f = next((x for x in n["facts"] if x["key"] == key), None)
+    if not f:
+        return send("That pattern is no longer in my notebook. Send /learned to see the current ones.")
+    kind, name = key.split("|", 1)
+    d = f.get("dir") or 0
+    good = d > 0
+    if kind == "v" and name in title_features(""):
+        send(("🛠 Fixing: " + f["text"] + "\\nNothing changes until you tap Apply on each proposal. From now on my new ideas and scripts also lean this way."))
+        return cmd_titles(st, {"name": name, "dir": d or 1})
+    if kind == "v" and name.startswith("posted in the US evening"):
+        h = 18.0 if good else 13.0
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "hour", "h": h, "created": time.time()}
+        return send(f"🛠 Fixing: {f['text']}\\nI can make {int(h)}:00 US Eastern your default publish hour. Your next scheduled videos would use it.",
+                    [[btn(f"✅ Use {int(h)}:00 US Eastern", pid, "hq"), btn("Skip", pid, "cs")]])
+    if kind == "v" and name == "3 or more hashtags":
+        if good:
+            send("🛠 Fixing: " + f["text"] + "\\nI will refresh the hashtags of your older videos. Nothing changes until you tap.")
+            return cmd_hashtags(st)
+        return send("🛠 " + f["text"] + "\\nSo I will keep new videos at 3 to 4 hashtags, not more. Nothing on your old videos needs changing.")
+    if kind == "v" and name.startswith("a Watch-next link"):
+        if good:
+            send("🛠 Fixing: " + f["text"] + "\\nI will look for older videos without a Watch-next link. Nothing changes until you tap.")
+            return cmd_watchnext(st)
+        return send("🛠 " + f["text"] + "\\nI will leave your Watch-next links as they are and keep watching this.")
+    if kind == "v" and name.startswith("a Short"):
+        return send("🛠 " + f["text"] + "\\nNothing to fix on old videos. From now on my weekly plan and ideas lean " +
+                    ("toward Shorts" if good else "toward long videos") + ", and I will keep checking whether it holds.")
+    if kind == "v" and name.startswith("a thumbnail taken"):
+        return send("🛠 " + f["text"] + "\\nWhen you upload, I will point out the thumbnail option that " + ("comes from the opening of the video." if good else "does not come from the opening."))
+    send("🛠 " + f["text"] + "\\nThis one is about how viewers watch, so it cannot be fixed on an old video. My scripts and ideas now take it into account.")
+
+
 def nb_section(st, name):
     n = nb()
     m = mem()
@@ -4407,7 +4469,7 @@ def nb_section(st, name):
             for i, f in enumerate(n["facts"][:6]):
                 lines.append(f"{i + 1}. {f['text']} [{f['conf']}" + (f"; my guesses from it: {f['hit']} right" if f.get("hit") else "") + "]")
                 keys.append(f["key"])
-                rows.append([btn(f"🗑 Forget #{i + 1}", pid, "nd", str(i))])
+                rows.append([btn(f"🛠 Fix #{i + 1}", pid, "nf", str(i)), btn(f"🗑 Forget #{i + 1}", pid, "nd", str(i))])
         else:
             lines.append("Nothing solid yet. I need at least 8 videos older than 3 days, and 3 on each side of a comparison. I would rather say 'too early' than guess.")
         lines.append(nb_accuracy_line(n))
@@ -6577,7 +6639,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
