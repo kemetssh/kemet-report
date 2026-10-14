@@ -37,7 +37,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.47"
+BOT_VERSION = "v10.48"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1900,6 +1900,11 @@ def do_upload(job):
     mem()["videos"][vid] = {"uploaded": time.time(), "title": job["title"], "file_id": job["file_id"],
                             "summary": job["review"].get("summary", ""), "checked": False, "next": job.get("next_id", "")}
     try:
+        ti, d_ = job.get("thumb", -1), job.get("dur") or 0
+        nb()["thumbs"][vid] = {"frac": round(job["review"]["thumb_times"][ti] / d_, 2) if ti >= 0 and d_ else None}
+    except Exception as e:
+        print("thumb note:", clean(e)[:80])
+    try:
         pr = nb_predict(job["title"], job.get("dur", 0))
         if pr:
             nb()["preds"][vid] = pr
@@ -2667,7 +2672,28 @@ Topic: {title}. Opening hook idea: {hook}
 Use web search to check every fact (names, dates, places). Format exactly:
 HOOK (first 3 seconds) / BEAT 1 / BEAT 2 / BEAT 3 / CLOSE (end with a question for comments).
 Under 150 spoken words. Cinematic, mysterious but accurate. English.
-After the script add a line "CHECK:" listing any claim you could not confirm, or "CHECK: none"."""
+After the script add a line "CHECK:" listing any claim you could not confirm, or "CHECK: none".
+{style}"""
+
+
+def style_notes():
+    """What the bot has learned about the owner's taste and his audience, for script drafting. Used quietly."""
+    m = mem()
+    n = m.get("notebook") or {}
+    parts = []
+    if m.get("picks"):
+        parts.append("Titles he chose (his taste): " + " | ".join(m["picks"][-5:]))
+    if m.get("reasons"):
+        parts.append("Faults he rejected titles for: " + ", ".join(sorted({r["why"] for r in m["reasons"][-10:]})))
+    solid = [f["text"] for f in (n.get("facts") or []) if f.get("conf") != "unreliable"]
+    if solid:
+        parts.append("Patterns in his own numbers: " + "; ".join(solid[:3]))
+    if n.get("asks"):
+        parts.append("Viewers ask: " + "; ".join(a["ask"] for a in n["asks"][:3]))
+    if not parts:
+        return ""
+    return ("\nStyle notes learned from the owner's own history (apply quietly, never mention them, never let them override accuracy or the rules above):\n- " +
+            "\n- ".join(parts))
 
 
 def plain(text):
@@ -3026,7 +3052,7 @@ def verified_script(title, build_prompt):
 
 def write_script(idea):
     send(f"Writing and fact-checking: {idea['title']} ...")
-    text, sources, summary = verified_script(idea["title"], lambda: SCRIPT_PROMPT.format(title=idea["title"], hook=idea.get("hook", "")))
+    text, sources, summary = verified_script(idea["title"], lambda: SCRIPT_PROMPT.format(title=idea["title"], hook=idea.get("hook", ""), style=style_notes()))
     msg = f"🎬 {idea['title']}\n\n{text}"
     if summary:
         msg += "\n\n" + summary
@@ -3407,6 +3433,11 @@ def run_exps(st):
         worse = after < before * 0.85
         verdict = ("faster than before" if better else "slower than before" if worse else "about the same")
         e["done"] = True
+        try:
+            nb()["tests"] = (nb()["tests"] + [{"old": e["old"][:100], "new": e["new"][:100], "before": round(before, 1), "after": round(after, 1),
+                                               "win": bool(better), "loss": bool(worse)}])[-40:]
+        except Exception as ex:
+            print("title test note:", clean(ex)[:80])
         if before > 0 and after < before * EXP_REVERT_BELOW:
             try:
                 set_title(e["video_id"], e["old"])
@@ -4026,7 +4057,7 @@ Comments:
 def nb():
     n = mem().setdefault("notebook", {})
     for k, v in (("obs", {}), ("facts", []), ("asks", []), ("muted", []), ("last", 0), ("off", False), ("last_comments", 0),
-                 ("demand", {}), ("news", {}), ("comp", {}), ("preds", {}), ("acc", {}), ("score", [0, 0]), ("last_report", ""), ("rep_keys", [])):
+                 ("thumbs", {}), ("tests", []), ("demand", {}), ("news", {}), ("comp", {}), ("preds", {}), ("acc", {}), ("score", [0, 0]), ("last_report", ""), ("rep_keys", [])):
         n.setdefault(k, v)
     return n
 
@@ -4036,6 +4067,8 @@ def nb_features(o):
     f["a Short (60 seconds or less)"] = 0 < o.get("secs", 0) <= 60
     if o.get("hour") is not None:
         f["posted in the US evening (4 PM Eastern or later)"] = o["hour"] >= 16
+    if o.get("tfrac") is not None:
+        f["a thumbnail taken from the opening 20% of the video"] = o["tfrac"] <= 0.2
     f["3 or more hashtags"] = o.get("tags", 0) >= 3
     f["a Watch-next link in the description"] = bool(o.get("wn"))
     return f
@@ -4052,7 +4085,7 @@ def nb_lessons(obs):
     out = []
     for name in sorted({k for o in rows for k in o["f"]}):
         a = [o for o in rows if o["f"].get(name)]
-        b = [o for o in rows if not o["f"].get(name)]
+        b = [o for o in rows if name in o["f"] and not o["f"][name]]
         if min(len(a), len(b)) < 3:
             continue
         conf = "repeating pattern" if min(len(a), len(b)) >= 5 else "early hint"
@@ -4099,7 +4132,7 @@ def nb_scan(st, force=False):
         except Exception:
             hour = None
         o.update({"title": sn.get("title", ""), "secs": secs.get(v["id"], 0), "hour": hour, "tags": len(current_hashtags(desc)),
-                  "wn": has_watch_next(desc), "views": int(v["statistics"].get("viewCount", 0)), "age": round((now - pub) / 86400, 1)})
+                  "wn": has_watch_next(desc), "tfrac": (n["thumbs"].get(v["id"]) or {}).get("frac"), "views": int(v["statistics"].get("viewCount", 0)), "age": round((now - pub) / 86400, 1)})
         if calls < 12 and now - o.get("pct_ts", 0) > 7 * 86400:
             calls += 1
             try:
@@ -4315,6 +4348,23 @@ def nb_feeds(st, tok, force=False):
             print(f"notebook {key}:", clean(e)[:100])
 
 
+def nb_tests_line(n):
+    t = n.get("tests") or []
+    if not t:
+        return ""
+    w, l = [x for x in t if x["win"]], [x for x in t if x["loss"]]
+    line = f"Title tests: {len(t)} so far, {len(w)} new titles beat the old one, {len(l)} did worse, {len(t) - len(w) - len(l)} about the same"
+    best = []
+    for name in title_features("").keys():
+        a = sum(1 for x in w if title_features(x["new"])[name])
+        b = sum(1 for x in l if title_features(x["new"])[name])
+        if a >= 2 and b == 0:
+            best.append(name)
+    if best and len(t) >= 4:
+        line += ". Winning new titles often had: " + ", ".join(best[:3]) + " (small sample, a hint)"
+    return line
+
+
 def nb_block():
     n = mem().get("notebook") or {}
     if n.get("off"):
@@ -4326,6 +4376,9 @@ def nb_block():
     if n.get("asks"):
         parts.append("What viewers keep asking for in comments (real requests, good video topics):\n" +
                      "\n".join(f"- {a['ask']}" + (f" (asked {a['count']} times)" if a.get("count", 1) > 1 else "") for a in n["asks"][:8]))
+    tl = nb_tests_line(n)
+    if tl:
+        parts.append(tl)
     d = n.get("demand") or {}
     if d.get("rows"):
         parts.append("What people type into YouTube search about Ancient Egypt, weakest competition first (median views of the top 5 results):\n" +
@@ -4424,6 +4477,8 @@ def cmd_learned(st, arg=""):
     lines.append(f"• Viewer requests: {len(n['asks'])}")
     lines.append(f"• Search topics with weak competition: {len(d.get('rows', []))}; news hooks: {len(nw.get('items', []))}; big-channel patterns: {len(cp.get('patterns', []))}")
     lines.append(f"• Older lessons from results: {len(m['lessons'])}")
+    if nb_tests_line(n):
+        lines.append("• " + nb_tests_line(n).split(". Winning")[0])
     lines.append(f"• Your taste: {len(m['picks'])} titles you chose, {len(m['skips'])} you rejected" + (f"; reasons given: {len(m.get('reasons') or [])}" if m.get("reasons") else ""))
     lines.append("• " + nb_accuracy_line(n))
     lines.append("\nTap a button to see the details, or to forget something. I only learn: every change still needs your tap.")
@@ -4690,6 +4745,43 @@ def cmd_watch(st):
         send("🛡 Channel watch: nothing wrong right now (video status, privacy changes, view drops, spam comments). I check again every 6 hours. 👍")
 
 
+AFFIL_PROMPT = """Use web search. The owner of the small YouTube channel "Kemet | Ancient Egypt" (calm, evidence-first Ancient Egypt history, audience mostly in the USA, about 15-500 subscribers) wants honest ideas for earning through affiliate programs and sponsors BEFORE reaching YouTube's partner thresholds.
+Find up to 6 REAL programs or kinds of partners that fit: Egyptology and history books, documentary or learning platforms, Egypt tour and ticket marketplaces, museum shops, history courses. Only list programs you actually found on the web. Never invent a program, a commission rate or a link.
+Return JSON only: {{"programs": [{{"name": "", "what": "one short line: what it is", "fit": "one short line: why it fits this channel", "how": "how to apply, as found on its own site", "caution": "one short line: a real limit (minimum audience, terms, country rules) or 'check the terms'"}}]}}"""
+
+
+def cmd_affiliate(st):
+    send("Looking for real affiliate programs and sponsors that fit your channel (about a minute)...")
+    text, sources = gemini_text(AFFIL_PROMPT, search=True)
+    a, b = text.find("{"), text.rfind("}")
+    try:
+        progs = json.loads(text[a:b + 1]).get("programs", [])
+    except Exception:
+        progs = []
+    progs = [p for p in progs if p.get("name")][:6]
+    if not progs or not sources:
+        return send("I could not find programs I can back with real sources right now, and I will not guess. Try again later.")
+    body = "💼 Earning ideas that fit Kemet (found on the web, check each one's terms yourself):\n\n" + "\n\n".join(
+        f"{i + 1}. {str(p['name'])[:80]}\n{str(p.get('what', ''))[:140]}\nFit: {str(p.get('fit', ''))[:140]}\nHow: {str(p.get('how', ''))[:140]}\nCareful: {str(p.get('caution', 'check the terms'))[:140]}"
+        for i, p in enumerate(progs))
+    seen, links = set(), []
+    for t, u in sources:
+        if u not in seen:
+            seen.add(u)
+            links.append(f"• {t}: {u}")
+    body += "\n\nSources:\n" + "\n".join(links[:6])
+    body += ("\n\nRules that protect your channel: say clearly in the video or description that a link is an affiliate link, never promise income, "
+             "and only recommend things you would use. When a program accepts you, send me your link with /links and I will add it to your descriptions (you approve each).")
+    send(body[:4000])
+
+
+def cmd_script(st, raw):
+    topic = raw.split(None, 1)[1].strip()[:120] if len(raw.split(None, 1)) > 1 else ""
+    if len(topic) < 6:
+        return send("Tell me the topic, for example:\n/script Why did Akhenaten change Egypt's religion?\nI write a fact-checked 45-60 second script in your style. You record it in your own voice.")
+    write_script({"title": topic, "hook": ""})
+
+
 def show_lessons():
     m = mem()
     if not (m["lessons"] or m["picks"] or m["skips"]):
@@ -4746,6 +4838,15 @@ def cmd_progress(st):
         if shorts is not None:
             lines.append(f"  or Shorts views (90 days) {shorts}/{need_shorts:,} {bar(shorts, need_shorts)}")
         lines.append("")
+    try:
+        h28 = an_query(tok, "estimatedMinutesWatched", 28)[0] / 60
+        if hours is not None and h28 > 0:
+            for need in (3000, 4000):
+                if hours < need:
+                    d_ = int((need - hours) / (h28 / 28))
+                    lines.append(f"At your current pace: {need} watch hours in " + (f"about {d_} days." if d_ <= 730 else "more than 2 years: the pace has to grow first (long videos and a steady upload rhythm add hours fastest)."))
+    except Exception:
+        pass
     if gained28 is not None and gained28 > 0:
         per_day = gained28 / 28
         for target in (500, 1000):
@@ -6020,7 +6121,7 @@ Choose the action. Actions: idea (wants video ideas), script (gave a topic to wr
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes), sources (add sources to the descriptions of older videos), patterns (what the owner's own numbers show about titles and formats), brief (a summary of everything that needs him),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
-funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), translate (translated subtitles in Spanish, Portuguese, Hindi), shortcuts (the best moments of a long video to cut into Shorts), playlists (build themed playlists), watch (check the channel for problems), learned (everything the bot has learned from your numbers and viewers' comments, and pause/forget it), lessons (short list of past lessons), health (is everything working),
+funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), script (write a fact-checked Shorts script on a topic in the owner's style; topic is the subject), affiliate (find real affiliate programs and sponsors that fit the channel), translate (translated subtitles in Spanish, Portuguese, Hindi), shortcuts (the best moments of a long video to cut into Shorts), playlists (build themed playlists), watch (check the channel for problems), learned (everything the bot has learned from your numbers and viewers' comments, and pause/forget it), lessons (short list of past lessons), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -6100,7 +6201,9 @@ def run_action(action, topic, st, text=""):
         if action == "goal":
             return cmd_goal(st, "/goal " + (topic or ""))
         return globals()["cmd_" + action](st)
-    if action in ("translate", "shortcuts", "playlists", "watch"):
+    if action == "script":
+        return cmd_script(st, "/script " + (topic or ""))
+    if action in ("affiliate", "translate", "shortcuts", "playlists", "watch"):
         return globals()["cmd_" + action](st)
     if action == "learned":
         return cmd_learned(st)
@@ -6182,6 +6285,8 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/watchnext - add 'Watch next' links to old descriptions\n"
         "/hashtags - refresh old hashtags from what is trending now\n"
         "/learned - what I learned from your numbers and viewers' comments (forget or pause any time)\n"
+        "/script - write a fact-checked script on a topic you give me, in your style\n"
+        "/affiliate - find real affiliate programs and sponsors that fit the channel\n"
         "/translate - Spanish, Portuguese and Hindi subtitles for my latest video\n"
         "/shortcuts - the best moments of my latest long video to cut into Shorts\n"
         "/playlists - build themed playlists for my videos (you approve)\n"
@@ -6317,6 +6422,10 @@ def on_message(msg, st):
             make_subtitles({"video_id": vid}, st)
     elif text == "/lessons":
         show_lessons()
+    elif text == "/affiliate":
+        cmd_affiliate(st)
+    elif text.startswith("/script"):
+        cmd_script(st, text)
     elif text == "/translate":
         cmd_translate(st)
     elif text == "/shortcuts":
@@ -6647,6 +6756,8 @@ def main():
             {"command": "comments", "description": "Draft replies to comments"},
             {"command": "report", "description": "Daily channel report now"},
             {"command": "status", "description": "Videos waiting for you"},
+            {"command": "script", "description": "Write a script on a topic, in my style"},
+            {"command": "affiliate", "description": "Find affiliate programs and sponsors"},
             {"command": "translate", "description": "Translated subtitles (Spanish, Portuguese, Hindi)"},
             {"command": "shortcuts", "description": "Best moments to cut into Shorts"},
             {"command": "playlists", "description": "Build playlists for my videos"},
