@@ -37,13 +37,14 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.46"
+BOT_VERSION = "v10.47"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
 WORKER_SECRET = os.getenv("WORKER_SECRET", "")
 YTA = os.getenv("YTA_BASE", "https://youtubeanalytics.googleapis.com")
-CAPTION_LANGS = [("en", "English"), ("ar", "العربية")]
+CAPTION_LANGS = [("en", "English"), ("ar", "العربية"), ("es", "Español"), ("pt", "Português"), ("hi", "हिन्दी")]
+TRANSLATE_LANGS = [("es", "Spanish"), ("pt", "Portuguese"), ("hi", "Hindi")]
 ST = {}  # the live state, set in main()
 
 S = requests.Session()
@@ -2363,6 +2364,18 @@ def on_prop(jid, act, st):
         n["muted"] = (n["muted"] + [key])[-100:]
         n["facts"] = [f for f in n["facts"] if f["key"] != key]
         return send("🗑 Forgotten. I will not bring that pattern up again.")
+    if kind == "plall" and act == "pq":
+        return do_playlists(st, jid, prop)
+    if kind == "nbk" and act == "ns":
+        return nb_section(st, str(st.get("_val", "")))
+    if kind == "nbk" and act == "nl":
+        try:
+            t_ = prop["lessons"][int(st.get("_val", "0"))]
+        except Exception:
+            return send("That list is too old. Send /learned again.")
+        m_ = mem()
+        m_["lessons"] = [x for x in m_["lessons"] if x != t_]
+        return send("🗑 Forgotten. I will not use that lesson again.")
     if kind == "nbk" and act == "np":
         st["props"].pop(jid, None)
         return cmd_learned(st, "on" if nb()["off"] else "off")
@@ -3941,6 +3954,10 @@ def housekeeping(st):
         nb_scan(st)
     except Exception as e:
         print("notebook:", clean(e)[:100])
+    try:
+        nb_watch(st)
+    except Exception as e:
+        print("watch:", clean(e)[:100])
     if now - m["last_check"] > 1800:
         m["last_check"] = now
         for step in (lambda: run_results(False), lambda: run_exps(st)):
@@ -4325,6 +4342,59 @@ def nb_block():
     return "\n".join(parts)
 
 
+def nb_section(st, name):
+    n = nb()
+    m = mem()
+    pid = new_pid(st)
+    rows = []
+    if name == "patterns":
+        lines = ["🔎 Patterns in your numbers"]
+        keys = []
+        if n["facts"]:
+            for i, f in enumerate(n["facts"][:6]):
+                lines.append(f"{i + 1}. {f['text']} [{f['conf']}" + (f"; my guesses from it: {f['hit']} right" if f.get("hit") else "") + "]")
+                keys.append(f["key"])
+                rows.append([btn(f"🗑 Forget #{i + 1}", pid, "nd", str(i))])
+        else:
+            lines.append("Nothing solid yet. I need at least 8 videos older than 3 days, and 3 on each side of a comparison. I would rather say 'too early' than guess.")
+        lines.append(nb_accuracy_line(n))
+        st["props"][pid] = {"type": "nbk", "keys": keys, "created": time.time()}
+    elif name == "viewers":
+        lines = ["💬 What viewers ask for"]
+        lines += [f"- {a['ask']}" + (f" (x{a['count']})" if a.get("count", 1) > 1 else "") for a in n["asks"][:8]] or ["Nothing yet. I read the comments about every 3 days."]
+        cp = n.get("comp") or {}
+        if cp.get("asks"):
+            lines.append("On big history channels, viewers ask: " + "; ".join(cp["asks"][:4]))
+    elif name == "world":
+        lines = ["🌍 What I learned from outside your channel"]
+        d = n.get("demand") or {}
+        if d.get("rows"):
+            lines.append("\nWhat people search for (weak competition first):")
+            lines += [f"- {r['q']} (top results: {r['comp']:,} views)" for r in d["rows"][:5]]
+        nw = n.get("news") or {}
+        if nw.get("items"):
+            lines.append("\nIn the news (check the source before you film):")
+            lines += ["- " + i["headline"] for i in nw["items"][:4]]
+        cp = n.get("comp") or {}
+        if cp.get("patterns"):
+            lines.append("\nWhat seems to work on big American history channels:")
+            lines += ["- " + p for p in cp["patterns"][:4]]
+        if len(lines) == 1:
+            lines.append("Nothing yet. I look at search, news and big channels every few days.")
+    elif name == "lessons":
+        lines = ["📝 Older lessons (from each video's results)"]
+        texts_ = list(m["lessons"][-8:])
+        for i, t in enumerate(texts_):
+            lines.append(f"{i + 1}. {t}")
+            rows.append([btn(f"🗑 Forget #{i + 1}", pid, "nl", str(i))])
+        if not texts_:
+            lines.append("None yet.")
+        st["props"][pid] = {"type": "nbk", "lessons": texts_, "created": time.time()}
+    else:
+        return
+    send("\n".join(lines), rows or None)
+
+
 def cmd_learned(st, arg=""):
     n = nb()
     arg = (arg or "").strip().lower()
@@ -4337,54 +4407,287 @@ def cmd_learned(st, arg=""):
         return send("▶️ Learning is on again. I study your numbers and comments by myself about once a day.")
     if arg == "report":
         return nb_report(st, force=True)
+    if arg in ("patterns", "viewers", "world", "lessons"):
+        return nb_section(st, arg)
     if arg == "now" or (not n["obs"] and not n["off"]):
         try:
             nb_scan(st, force=True)
         except Exception as e:
             send("I could not study the channel just now: " + clean(e)[:120])
-    lines = ["🧠 What I have learned" + (" (paused)" if n["off"] else "") + f" - {len(n['obs'])} videos studied"]
-    rows = []
-    pid = new_pid(st)
-    keys = []
-    if n["facts"]:
-        lines.append("\nFrom your numbers:")
-        for i, f in enumerate(n["facts"][:6]):
-            lines.append(f"{i + 1}. {f['text']} [{f['conf']}" + (f"; my guesses from it: {f['hit']} right" if f.get("hit") else "") + "]")
-            keys.append(f["key"])
-            rows.append([btn(f"🗑 Forget #{i + 1}", pid, "nd", str(i))])
-    else:
-        lines.append("\nFrom your numbers: nothing solid yet. I need at least 8 videos older than 3 days, and 3 on each side of a comparison, before I call anything a pattern. I would rather say 'too early' than guess.")
-    if n["asks"]:
-        lines.append("\nViewers keep asking:")
-        lines += [f"- {a['ask']}" + (f" (x{a['count']})" if a.get("count", 1) > 1 else "") for a in n["asks"][:8]]
-    d = n.get("demand") or {}
-    if d.get("rows"):
-        lines.append("\nWhat people search for (weak competition first):")
-        lines += [f"- {r['q']} (top results: {r['comp']:,} views)" for r in d["rows"][:5]]
-    nw = n.get("news") or {}
-    if nw.get("items"):
-        lines.append("\nIn the news (check the source before you film):")
-        lines += ["- " + i["headline"] for i in nw["items"][:4]]
-    cp = n.get("comp") or {}
-    if cp.get("patterns"):
-        lines.append("\nWhat seems to work on big American history channels:")
-        lines += ["- " + p for p in cp["patterns"][:4]]
-    if cp.get("asks"):
-        lines.append("What their viewers ask: " + "; ".join(cp["asks"][:4]))
-    lines.append("\n" + nb_accuracy_line(n))
     m = mem()
-    if m.get("reasons"):
-        lines.append("Why you rejected titles: " + "; ".join(r["why"] for r in m["reasons"][-4:]))
-    if m["lessons"]:
-        lines.append("\nAfter each video's results I also noted:")
-        lines += ["- " + x for x in m["lessons"][-4:]]
-    if m["picks"] or m["skips"]:
-        lines.append(f"\nYour taste: {len(m['picks'])} titles you chose, {len(m['skips'])} you rejected. I use them when I write new titles.")
-    lines.append("\nI only learn. I never publish or change anything by myself: every change still needs your tap.")
-    rows.append([btn("▶️ Resume learning" if n["off"] else "⏸ Pause learning", pid, "np")])
-    st["props"][pid] = {"type": "nbk", "keys": keys, "created": time.time()}
+    solid = [f for f in n["facts"] if f["conf"] != "unreliable"]
+    weak = [f for f in solid if f["conf"] != "repeating pattern"]
+    d, nw, cp = n.get("demand") or {}, n.get("news") or {}, n.get("comp") or {}
+    lines = ["🧠 What I have learned" + (" (paused)" if n["off"] else "") + f" - {len(n['obs'])} videos studied", ""]
+    lines.append(f"• Patterns in your numbers: {len(solid)}" + (f" ({len(weak)} still weak)" if weak else "") if solid
+                 else "• Patterns in your numbers: none solid yet (too early, I need 8+ videos older than 3 days)")
+    lines.append(f"• Viewer requests: {len(n['asks'])}")
+    lines.append(f"• Search topics with weak competition: {len(d.get('rows', []))}; news hooks: {len(nw.get('items', []))}; big-channel patterns: {len(cp.get('patterns', []))}")
+    lines.append(f"• Older lessons from results: {len(m['lessons'])}")
+    lines.append(f"• Your taste: {len(m['picks'])} titles you chose, {len(m['skips'])} you rejected" + (f"; reasons given: {len(m.get('reasons') or [])}" if m.get("reasons") else ""))
+    lines.append("• " + nb_accuracy_line(n))
+    lines.append("\nTap a button to see the details, or to forget something. I only learn: every change still needs your tap.")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "nbk", "created": time.time()}
+    rows = [[btn("🔎 Patterns (forget)", pid, "ns", "patterns"), btn("💬 Viewer requests", pid, "ns", "viewers")],
+            [btn("🌍 Search, news, big channels", pid, "ns", "world")],
+            [btn("📝 Older lessons (forget)", pid, "ns", "lessons")],
+            [btn("▶️ Resume learning" if n["off"] else "⏸ Pause learning", pid, "np")]]
     send("\n".join(lines), rows)
 
+
+# ---------------- stage 2: translated subtitles, Shorts cuts, playlists, problem watch ----------------
+TRANSLATE_PROMPT = """Translate these English subtitles of a calm, evidence-first Ancient Egypt video into: {langs}.
+Keep EXACTLY the same cue numbers and the same timestamps. Translate only the text. Keep Ancient Egyptian names in their usual spelling for each language (Anubis, Osiris, Ma'at, Ra, Duat, Tutankhamun, Giza).
+Natural, accurate language, no additions. Return JSON only: {{"captions": [{{"lang": "es", "srt": "..."}}]}}
+Subtitles:
+{srt}"""
+
+SHORTS_PROMPT = """You help a YouTube history channel turn one long video into Shorts. Below are the video's English subtitles with timestamps{extra}.
+Pick the 3 best moments to cut into a Short of 20 to 59 seconds: a self-contained claim, reveal or story beat that makes sense on its own and starts with a strong first sentence.
+Use only moments that really are in the subtitles. Return JSON only:
+{{"cuts": [{{"start": "mm:ss", "end": "mm:ss", "title": "honest title under 60 characters", "hook": "the first spoken sentence", "why": "one short line"}}]}}
+Subtitles:
+{srt}"""
+
+PL_PROMPT = """The YouTube channel "Kemet | Ancient Egypt" has these existing playlists: {names}
+These videos are in NO playlist yet: {videos}
+Group them into themed playlists a viewer would enjoy watching in a row (for example gods, pharaohs, pyramids, myths vs evidence). Rules: each new playlist needs at least 2 videos; use only the ids given; never repeat an existing playlist's name; skip a video that fits nowhere; max 5 playlists.
+Return JSON only: {{"playlists": [{{"title": "max 60 chars", "video_ids": ["..."], "why": "one short line"}}]}}"""
+
+
+def captions_tracks(tok, vid):
+    return yt_get("captions", tok, part="snippet", videoId=vid).get("items", [])
+
+
+def caption_download(tok, cid):
+    r = S.get(f"{YT}/youtube/v3/captions/{cid}", params={"tfmt": "srt"}, headers={"Authorization": f"Bearer {tok}"}, timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}")
+    return r.text
+
+
+def english_srt(tok, vid):
+    tracks = captions_tracks(tok, vid)
+    en = [t for t in tracks if (t.get("snippet") or {}).get("language", "").startswith("en")]
+    en.sort(key=lambda t: (t["snippet"].get("trackKind") == "asr"))
+    for t in en[:2]:
+        try:
+            srt = caption_download(tok, t["id"])
+            if len(SRT_CUE.findall(srt)) >= 2:
+                return srt, {(x.get("snippet") or {}).get("language", "")[:2] for x in tracks}
+        except Exception as e:
+            print("caption download:", clean(e)[:80])
+    return None, {(x.get("snippet") or {}).get("language", "")[:2] for x in tracks}
+
+
+def latest_video_id(tok):
+    vids, _ = latest_vids(tok, 5)
+    return (vids[0]["id"], vids[0]["snippet"]["title"]) if vids else (None, "")
+
+
+def cmd_translate(st):
+    send("Translating the subtitles of your latest video (about a minute)...")
+    tok = yt_token()
+    vid, title = latest_video_id(tok)
+    if not vid:
+        return send("I could not find a video on your channel.")
+    srt, have = english_srt(tok, vid)
+    if not srt:
+        return send(f"I could not read English subtitles for \"{title}\". YouTube lets me read only subtitles that you or I uploaded. Send /subtitles first, then /translate.")
+    todo = [(c, n_) for c, n_ in TRANSLATE_LANGS if c not in have]
+    if not todo:
+        return send(f"\"{title}\" already has Spanish, Portuguese and Hindi subtitles. Nothing to do. 👍")
+    out = gemini([{"text": TRANSLATE_PROMPT.format(langs=", ".join(n_ for _, n_ in todo), srt=srt[:30000])}])
+    want = len(SRT_CUE.findall(srt))
+    caps = {}
+    for c in out.get("captions", []):
+        t_ = (c.get("srt") or "").strip()
+        if c.get("lang") in dict(todo) and len(SRT_CUE.findall(t_)) == want:
+            caps[c["lang"]] = t_
+    if not caps:
+        return send("The translation did not keep the timing intact, so I did not use it. Try again later.")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "caps", "video_id": vid, "caps": caps, "created": time.time()}
+    prev = []
+    for c, n_ in todo:
+        if c in caps:
+            prev.append(f"{n_} ({want} lines):\n" + "\n\n".join(caps[c].split("\n\n")[:2]))
+    send(f"Translated subtitles for \"{title}\". Preview:\n\n" + "\n\n".join(prev) +
+         "\n\nTranslations can slip on names and idioms. Upload them?",
+         [[btn("✅ Upload subtitles", pid, "cu"), btn("Skip", pid, "cs")]])
+
+
+def to_secs(t):
+    m_ = re.fullmatch(r"(?:(\d+):)?(\d{1,2}):(\d{2})", str(t).strip())
+    if not m_:
+        return None
+    h, mi, se = int(m_.group(1) or 0), int(m_.group(2)), int(m_.group(3))
+    return h * 3600 + mi * 60 + se
+
+
+def cmd_shortcuts(st):
+    send("Looking for the best moments in your latest long video...")
+    tok = yt_token()
+    vids, _ = latest_vids(tok, 15)
+    ids = [v["id"] for v in vids]
+    dur = {}
+    if ids:
+        for it in yt_get("videos", tok, part="contentDetails", id=",".join(ids)).get("items", []):
+            dur[it.get("id")] = iso_seconds((it.get("contentDetails") or {}).get("duration"))
+    long_ = [v for v in vids if dur.get(v["id"], 0) >= 180]
+    if not long_:
+        return send("I found no long video (3 minutes or more) among your latest videos. Shorts cuts come from long videos.")
+    v = long_[0]
+    srt, _have = english_srt(tok, v["id"])
+    if not srt:
+        return send(f"I could not read English subtitles for \"{v['snippet']['title']}\". Send /subtitles first (it needs the video file here), then /shortcuts.")
+    extra = ""
+    try:
+        d = find_drops(retention_curve(tok, v["id"], iso_ts(v["snippet"].get("publishedAt", "")) or time.time() - 30 * 86400), dur[v["id"]])
+        if d and d.get("drops"):
+            extra = "; viewers leave most around " + ", ".join(mmss(x["from"]) for x in d["drops"])
+    except Exception:
+        pass
+    out = gemini([{"text": SHORTS_PROMPT.format(extra=extra, srt=srt[:30000])}])
+    cuts = []
+    for c in out.get("cuts", []):
+        a_, b_ = to_secs(c.get("start")), to_secs(c.get("end"))
+        if a_ is None or b_ is None or not 15 <= b_ - a_ <= 60 or b_ > dur[v["id"]] + 2:
+            continue
+        cuts.append(c)
+    if not cuts:
+        return send("I could not find clean 20-59 second moments in the subtitles. Nothing to suggest.")
+    send(f"✂️ Best moments of \"{v['snippet']['title']}\" for Shorts:\n\n" + "\n\n".join(
+        f"{i + 1}. {c['start']} to {c['end']}\nTitle: {str(c.get('title', ''))[:60]}\nFirst line: {str(c.get('hook', ''))[:140]}\nWhy: {str(c.get('why', ''))[:120]}"
+        for i, c in enumerate(cuts[:3])) +
+        "\n\nI cannot cut your video myself. Cut these in your phone editor, record nothing new, and send me each Short as usual: I check it before anything goes on YouTube.")
+
+
+def cmd_playlists(st):
+    send("Looking at your playlists and videos...")
+    tok = yt_token()
+    names, placed, vids = playlist_scan(tok)
+    free = [v for v in vids if v["id"] not in placed]
+    if len(free) < 2:
+        return send("Every video is already in a playlist, or too few are left to build a new one. Nothing to do. 👍")
+    out = gemini([{"text": PL_PROMPT.format(names=json.dumps(list(names.values())),
+                                            videos=json.dumps([{"id": v["id"], "title": v["snippet"]["title"][:90]} for v in free[:40]]))}])
+    ok_ids = {v["id"]: v["snippet"]["title"] for v in free}
+    plans, used = [], set()
+    for p in out.get("playlists", [])[:5]:
+        title = str(p.get("title", "")).strip()[:60]
+        ids_ = [i for i in p.get("video_ids", []) if i in ok_ids and i not in used]
+        if len(ids_) >= 2 and title and title.lower() not in {x.lower() for x in names.values()}:
+            plans.append({"title": title, "ids": ids_, "why": str(p.get("why", ""))[:120]})
+            used |= set(ids_)
+    if not plans:
+        return send("None of your loose videos group naturally, and I would not force it. Skipped.")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "plall", "plans": plans, "created": time.time()}
+    send("📚 New playlists I would build:\n\n" + "\n\n".join(
+        f"{p['title']}\n" + "\n".join("  • " + ok_ids[i] for i in p["ids"]) + (f"\n  Why: {p['why']}" if p["why"] else "") for p in plans),
+        [[btn("✅ Create them and add the videos", pid, "pq"), btn("Skip", pid, "cs")]])
+
+
+def do_playlists(st, jid, prop):
+    tok = yt_token()
+    h = {"Authorization": f"Bearer {tok}"}
+    made, added, failed = 0, 0, []
+    for p in prop["plans"]:
+        try:
+            if not p.get("pl_id"):
+                r = S.post(f"{YT}/youtube/v3/playlists?part=snippet,status", headers=h, timeout=60,
+                           json={"snippet": {"title": p["title"]}, "status": {"privacyStatus": "public"}})
+                r.raise_for_status()
+                p["pl_id"] = r.json()["id"]
+                made += 1
+            for vid in list(p["ids"]):
+                body = {"snippet": {"playlistId": p["pl_id"], "resourceId": {"kind": "youtube#video", "videoId": vid}}}
+                ok = False
+                for wait in (0, 3, 6, 12):
+                    if wait:
+                        time.sleep(wait)
+                    r = S.post(f"{YT}/youtube/v3/playlistItems?part=snippet", headers=h, json=body, timeout=60)
+                    if r.status_code < 400 or (r.status_code == 409 and "AlreadyInPlaylist" in r.text):
+                        ok = True
+                        break
+                    if r.status_code not in (409, 500, 502, 503, 404):
+                        break
+                if ok:
+                    added += 1
+                    p["ids"].remove(vid)
+                else:
+                    failed.append(p["title"])
+        except Exception as e:
+            failed.append(f"{p['title']}: {clean(e)[:60]}")
+    if not failed:
+        st["props"].pop(jid, None)
+    send(f"✅ Created {made} playlist(s) and added {added} video(s)." +
+         (f"\n⚠️ Not finished: {'; '.join(sorted(set(failed)))}. Tap again to retry the rest (nothing is duplicated)." if failed else ""),
+         [[btn("Try again", jid, "pq")]] if failed else None)
+
+
+SPAM_WORDS = ("http", "t.me/", "whatsapp", "crypto", "telegram me", "dm me")
+
+
+def nb_watch(st, force=False):
+    """Mistake watch: only reads. It warns you; it never deletes or changes anything."""
+    if os.getenv("NB_NO_WATCH"):
+        return
+    w = mem().setdefault("watch", {"last": 0, "priv": {}, "alerted": {}})
+    now = time.time()
+    if not force and now - w["last"] < 6 * 3600:
+        return
+    w["last"] = now
+    tok = yt_token()
+    vids, chid = latest_vids(tok, 15)
+    alerts = []
+    def once(key):
+        if now - w["alerted"].get(key, 0) < 7 * 86400:
+            return False
+        w["alerted"][key] = now
+        return True
+    ids = [v["id"] for v in vids]
+    title = {v["id"]: v["snippet"]["title"] for v in vids}
+    if ids:
+        for it in yt_get("videos", tok, part="status", id=",".join(ids)).get("items", []):
+            sx, vid = it.get("status", {}) or {}, it.get("id")
+            bad = sx.get("uploadStatus") in ("failed", "rejected", "deleted") or sx.get("rejectionReason") or sx.get("failureReason")
+            if bad and once("bad|" + str(vid)):
+                alerts.append(f"🚨 YouTube reports a problem with \"{title.get(vid, vid)}\": {sx.get('rejectionReason') or sx.get('failureReason') or sx.get('uploadStatus')}. Open YouTube Studio > Content to see the details.")
+            prev, cur = w["priv"].get(vid), sx.get("privacyStatus")
+            if prev == "public" and cur in ("private", "unlisted") and once(f"priv|{vid}|{cur}"):
+                alerts.append(f"⚠️ \"{title.get(vid, vid)}\" was public and is now {cur}. If you did that yourself, ignore this.")
+            if cur:
+                w["priv"][vid] = cur
+    try:
+        t7 = an_query(tok, "views", 7)[0]
+        t28 = an_query(tok, "views", 28)[0]
+        recent, prior = t7 / 7, (t28 - t7) / 21
+        if prior >= 10 and recent < 0.4 * prior and once("drop|" + time.strftime("%G-%V", time.gmtime())):
+            alerts.append(f"📉 Views fell sharply: about {recent:.0f} a day this week against {prior:.0f} a day before. Check whether a video was taken down or YouTube's suggestions changed. I can look at /retention or /titles if you want.")
+    except Exception as e:
+        print("watch analytics:", clean(e)[:80])
+    try:
+        com = viewer_comments(tok, vids[:3], chid, per=30)
+        spam = [c for c in com if any(x in c["comment"].lower() for x in SPAM_WORDS)]
+        if len(spam) >= 5 and once("spam|" + time.strftime("%Y-%m-%d", time.gmtime())):
+            alerts.append(f"🧹 {len(spam)} recent comments look like spam or link drops. I never delete comments. In YouTube Studio > Settings > Community you can hold comments with links for review.")
+    except Exception as e:
+        print("watch comments:", clean(e)[:80])
+    if alerts:
+        send("🛡 Channel watch\n\n" + "\n\n".join(alerts))
+    return len(alerts)
+
+
+def cmd_watch(st):
+    try:
+        n_ = nb_watch(st, force=True)
+    except Exception as e:
+        return send("I could not check the channel just now: " + clean(e)[:120])
+    if not n_:
+        send("🛡 Channel watch: nothing wrong right now (video status, privacy changes, view drops, spam comments). I check again every 6 hours. 👍")
 
 
 def show_lessons():
@@ -5717,7 +6020,7 @@ Choose the action. Actions: idea (wants video ideas), script (gave a topic to wr
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes), sources (add sources to the descriptions of older videos), patterns (what the owner's own numbers show about titles and formats), brief (a summary of everything that needs him),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
-funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), learned (everything the bot has learned from your numbers and viewers' comments, and pause/forget it), lessons (short list of past lessons), health (is everything working),
+funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), translate (translated subtitles in Spanish, Portuguese, Hindi), shortcuts (the best moments of a long video to cut into Shorts), playlists (build themed playlists), watch (check the channel for problems), learned (everything the bot has learned from your numbers and viewers' comments, and pause/forget it), lessons (short list of past lessons), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -5797,6 +6100,8 @@ def run_action(action, topic, st, text=""):
         if action == "goal":
             return cmd_goal(st, "/goal " + (topic or ""))
         return globals()["cmd_" + action](st)
+    if action in ("translate", "shortcuts", "playlists", "watch"):
+        return globals()["cmd_" + action](st)
     if action == "learned":
         return cmd_learned(st)
     if action == "lessons":
@@ -5846,6 +6151,16 @@ def handle_voice(msg, st):
     route_text(text, st)
 
 
+def help_text():
+    """The help message with the commands in alphabetical order."""
+    lines = HELP.split("\n")
+    head, cmds = [], []
+    for ln in lines:
+        (cmds if ln.startswith("/") else head).append(ln)
+    head = [h for h in head if h.strip()]
+    return "\n".join(head) + "\n\n" + "\n".join(sorted(cmds, key=lambda x: x.split()[0].lower()))
+
+
 HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "I will check it and give you choices to tap. Nothing goes on YouTube without your tap.\n\n"
         "/idea - fresh video ideas, then a fact-checked script\n"
@@ -5867,6 +6182,10 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/watchnext - add 'Watch next' links to old descriptions\n"
         "/hashtags - refresh old hashtags from what is trending now\n"
         "/learned - what I learned from your numbers and viewers' comments (forget or pause any time)\n"
+        "/translate - Spanish, Portuguese and Hindi subtitles for my latest video\n"
+        "/shortcuts - the best moments of my latest long video to cut into Shorts\n"
+        "/playlists - build themed playlists for my videos (you approve)\n"
+        "/watch - check the channel for problems (also runs by itself)\n"
         "/recheck - full checkup of all my videos (facts, sources, hashtags, Watch-next, playlist)\n"
         "/schedule - pick a publish time for your private video; /autoschedule on|off; /besthour 17 sets the US Eastern hour\n"
         "/trends - what is hot now in the niche (tags, topics)\n"
@@ -5971,7 +6290,7 @@ def on_message(msg, st):
     raw = (msg.get("text") or "").strip()
     text = raw.lower()
     if text in ("/start", "/help"):
-        send(HELP)
+        send(help_text())
     elif text == "/report":
         trigger_report()
     elif text == "/titles":
@@ -5998,6 +6317,14 @@ def on_message(msg, st):
             make_subtitles({"video_id": vid}, st)
     elif text == "/lessons":
         show_lessons()
+    elif text == "/translate":
+        cmd_translate(st)
+    elif text == "/shortcuts":
+        cmd_shortcuts(st)
+    elif text == "/playlists":
+        cmd_playlists(st)
+    elif text == "/watch":
+        cmd_watch(st)
     elif text.startswith("/learned"):
         cmd_learned(st, text[8:])
     elif text == "/progress":
@@ -6141,7 +6468,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -6264,7 +6591,7 @@ def main():
     global ST
     ST = st
     try:
-        tg("setMyCommands", commands=[
+        tg("setMyCommands", commands=sorted([
             {"command": "idea", "description": "Fresh video ideas + script"},
             {"command": "titles", "description": "Better titles for old videos"},
             {"command": "subtitles", "description": "English + Arabic subtitles"},
@@ -6320,7 +6647,11 @@ def main():
             {"command": "comments", "description": "Draft replies to comments"},
             {"command": "report", "description": "Daily channel report now"},
             {"command": "status", "description": "Videos waiting for you"},
-            {"command": "help", "description": "How to use the bot"}])
+            {"command": "translate", "description": "Translated subtitles (Spanish, Portuguese, Hindi)"},
+            {"command": "shortcuts", "description": "Best moments to cut into Shorts"},
+            {"command": "playlists", "description": "Build playlists for my videos"},
+            {"command": "watch", "description": "Check the channel for problems"},
+            {"command": "help", "description": "How to use the bot"}], key=lambda c: c["command"]))
     except Exception:
         pass
     try:
