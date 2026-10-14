@@ -37,7 +37,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.49"
+BOT_VERSION = "v10.50"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -172,7 +172,7 @@ def mem():
     return m
 
 
-REMEMBER_LIMIT = {"picks": 300, "skips": 300, "lessons": 100}      # his taste history is kept long; the prompts only use the latest few
+REMEMBER_LIMIT = {"picks": 20000, "skips": 20000, "lessons": 20000}      # his taste history is kept long; the prompts only use the latest few
 
 
 def remember(kind, item):
@@ -2358,7 +2358,7 @@ def on_prop(jid, act, st):
     if kind == "why" and act == "wy":
         st["props"].pop(jid, None)
         m_ = mem()
-        m_["reasons"] = (m_.get("reasons", []) + [{"title": prop["title"][:120], "why": str(st.get("_val", ""))[:40]}])[-30:]
+        m_["reasons"] = (m_.get("reasons", []) + [{"title": prop["title"][:120], "why": str(st.get("_val", ""))[:40]}])[-20000:]
         return send("Noted. I will take that into account.")
     if act == "sh" and kind == "schedgen":
         st["props"].pop(jid, None)
@@ -2377,7 +2377,8 @@ def on_prop(jid, act, st):
         except Exception:
             return send("That list is too old. Send /learned again.")
         n = nb()
-        n["muted"] = (n["muted"] + [key])[-100:]
+        n["muted"] = (n["muted"] + [key])[-5000:]
+        n["library"]["patterns"].pop(key, None)
         n["facts"] = [f for f in n["facts"] if f["key"] != key]
         return send("🗑 Forgotten. I will not bring that pattern up again.")
     if kind == "plall" and act == "pq":
@@ -3456,7 +3457,7 @@ def run_exps(st):
         e["done"] = True
         try:
             nb()["tests"] = (nb()["tests"] + [{"old": e["old"][:100], "new": e["new"][:100], "before": round(before, 1), "after": round(after, 1),
-                                               "win": bool(better), "loss": bool(worse)}])[-40:]
+                                               "win": bool(better), "loss": bool(worse)}])[-5000:]
         except Exception as ex:
             print("title test note:", clean(ex)[:80])
         if before > 0 and after < before * EXP_REVERT_BELOW:
@@ -4078,7 +4079,7 @@ Comments:
 def nb():
     n = mem().setdefault("notebook", {})
     for k, v in (("obs", {}), ("facts", []), ("asks", []), ("muted", []), ("last", 0), ("off", False), ("last_comments", 0),
-                 ("thumbs", {}), ("tests", []), ("demand", {}), ("news", {}), ("comp", {}), ("preds", {}), ("acc", {}), ("score", [0, 0]), ("last_report", ""), ("rep_keys", [])):
+                 ("library", {"patterns": {}, "world": {}}), ("thumbs", {}), ("tests", []), ("demand", {}), ("news", {}), ("comp", {}), ("preds", {}), ("acc", {}), ("score", [0, 0]), ("last_report", ""), ("rep_keys", [])):
         n.setdefault(k, v)
     return n
 
@@ -4173,6 +4174,7 @@ def nb_scan(st, force=False):
             f["hit"] = f"{a[0]}/{a[1]}"
             if a[0] / a[1] < 0.4:
                 f["conf"] = "unreliable"
+    nb_lib_patterns(n, now)
     fresh = [f for f in n["facts"] if f["key"] not in old]
     if fresh and not first:
         send("🧠 I noticed something new in your numbers (" + fresh[0]["conf"] + "): " + fresh[0]["text"] + "\nSend /learned to see everything I have learned.")
@@ -4182,6 +4184,10 @@ def nb_scan(st, force=False):
             except Exception as e:
                 print("auto fix:", clean(e)[:100])
     nb_feeds(st, tok, force)
+    try:
+        nb_lib_feeds(n)
+    except Exception as e:
+        print("library:", clean(e)[:80])
     if now - n["last_comments"] > 3 * 86400:
         n["last_comments"] = now
         try:
@@ -4197,7 +4203,7 @@ def nb_scan(st, force=False):
                         have[t.lower()]["count"] = have[t.lower()].get("count", 1) + 1
                     else:
                         n["asks"].append({"ask": t, "count": int(a.get("count", 1) or 1), "ts": now})
-                n["asks"] = sorted(n["asks"], key=lambda a: (-a.get("count", 1), -a.get("ts", 0)))[:12]
+                n["asks"] = sorted(n["asks"], key=lambda a: (-a.get("count", 1), -a.get("ts", 0)))[:5000]
         except Exception as e:
             print("notebook comments:", clean(e)[:100])
     return len(n["obs"])
@@ -4294,6 +4300,56 @@ Below are recent videos that beat their own channel's size (views_per_sub is hig
 {rows}
 Return JSON only: {{"patterns": ["3 to 4 short, concrete patterns in titles, length or topics that seem to work for these videos"]}}
 Say "seems" when the data is thin: this is a small sample. Do not copy any title."""
+
+
+def nb_lib(group, text, **extra):
+    """The permanent library: everything learned from outside the channel stays, with when it was first and last seen and how often."""
+    lib = nb()["library"].setdefault("world", {}).setdefault(group, {})
+    key = str(text).strip()[:220]
+    if not key:
+        return
+    now = time.time()
+    e = lib.setdefault(key, {"first": now, "seen": 0})
+    e["last"] = now
+    e["seen"] += 1
+    e.update(extra)
+    if len(lib) > 4000:                                    # a safety valve against a runaway file: drops only the least-seen, oldest entries
+        for k in sorted(lib, key=lambda k: (lib[k]["seen"], lib[k]["last"]))[:len(lib) - 4000]:
+            lib.pop(k, None)
+
+
+def nb_lib_patterns(n, now):
+    lp = n["library"].setdefault("patterns", {})
+    cur = {f["key"] for f in n["facts"]}
+    for f in n["facts"]:
+        e = lp.setdefault(f["key"], {"first": now, "seen": 0})
+        e.update(text=f["text"], conf=f["conf"], last=now)
+        e["seen"] += 1
+    for k, e in lp.items():
+        e["holds"] = k in cur
+
+
+def nb_lib_feeds(n):
+    d = n.get("demand") or {}
+    for r in d.get("rows", []):
+        nb_lib("demand", r["q"], comp=r["comp"])
+    for i in (n.get("news") or {}).get("items", []):
+        nb_lib("news", i["headline"], idea=i.get("idea", ""))
+    cp = n.get("comp") or {}
+    for p in cp.get("patterns", []):
+        nb_lib("comp", p)
+    for a in cp.get("asks", []):
+        nb_lib("their_asks", a)
+
+
+def lib_counts(n):
+    lib = n.get("library") or {}
+    w = lib.get("world", {})
+    return len(lib.get("patterns", {})), sum(len(v) for v in w.values())
+
+
+def day(ts):
+    return time.strftime("%d %b", time.gmtime(ts))
 
 
 def nb_demand(tok):
@@ -4418,6 +4474,13 @@ def nb_block():
         parts.append("What seems to work on big American history channels (small sample, hints only):\n" + "\n".join("- " + p for p in cp["patterns"]))
     if cp.get("asks"):
         parts.append("What viewers of big history channels ask in public comments:\n" + "\n".join("- " + a for a in cp["asks"]))
+    lib = (n.get("library") or {})
+    stable = sorted(((k, e) for k, e in lib.get("world", {}).get("comp", {}).items() if e["seen"] >= 2), key=lambda x: (-x[1]["seen"], -x[1]["last"]))[:4]
+    if stable:
+        parts.append("Findings about big history channels that keep coming back (seen several times, so more reliable):\n" + "\n".join("- " + k for k, _ in stable))
+    old_p = [e for e in lib.get("patterns", {}).values() if not e.get("holds") and e.get("seen", 0) >= 2][:3]
+    if old_p:
+        parts.append("Earlier patterns in his numbers that no longer hold (do not rely on them):\n" + "\n".join("- " + e["text"] for e in old_p))
     return "\n".join(parts)
 
 
@@ -4496,6 +4559,20 @@ def nb_section(st, name):
             lines += ["- " + p for p in cp["patterns"][:4]]
         if len(lines) == 1:
             lines.append("Nothing yet. I look at search, news and big channels every few days.")
+    elif name == "library":
+        lp, lw = lib_counts(n)
+        lib = n.get("library") or {}
+        lines = [f"📚 Everything I have learned and kept ({lp} patterns, {lw} outside findings, {len(m['lessons'])} lessons, {len(m['picks']) + len(m['skips'])} title choices, {len(n['asks'])} viewer requests, {len(n['obs'])} videos)",
+                 "I never delete these by myself. Only your Forget button removes something."]
+        pats = sorted(lib.get("patterns", {}).values(), key=lambda e: -e.get("last", 0))
+        if pats:
+            lines.append("\nPatterns in your numbers (since the day first seen):")
+            lines += [f"- {e['text']} ({'holds' if e.get('holds') else 'no longer holds'}; first seen {day(e['first'])}, seen {e['seen']}x)" for e in pats[:6]]
+        for g_, title_ in (("comp", "Big American history channels"), ("demand", "What people search for"), ("news", "News hooks"), ("their_asks", "What their viewers ask")):
+            items = sorted(lib.get("world", {}).get(g_, {}).items(), key=lambda kv: (-kv[1]["seen"], -kv[1]["last"]))
+            if items:
+                lines.append(f"\n{title_} ({len(items)} kept):")
+                lines += [f"- {k}" + (f" (seen {e['seen']}x)" if e["seen"] > 1 else "") for k, e in items[:4]]
     elif name == "lessons":
         lines = ["📝 Older lessons (from each video's results)"]
         texts_ = list(m["lessons"][-8:])
@@ -4522,7 +4599,7 @@ def cmd_learned(st, arg=""):
         return send("▶️ Learning is on again. I study your numbers and comments by myself about once a day.")
     if arg == "report":
         return nb_report(st, force=True)
-    if arg in ("patterns", "viewers", "world", "lessons"):
+    if arg in ("patterns", "viewers", "world", "lessons", "library"):
         return nb_section(st, arg)
     if arg == "now" or (not n["obs"] and not n["off"]):
         try:
@@ -4538,6 +4615,8 @@ def cmd_learned(st, arg=""):
                  else "• Patterns in your numbers: none solid yet (too early, I need 8+ videos older than 3 days)")
     lines.append(f"• Viewer requests: {len(n['asks'])}")
     lines.append(f"• Search topics with weak competition: {len(d.get('rows', []))}; news hooks: {len(nw.get('items', []))}; big-channel patterns: {len(cp.get('patterns', []))}")
+    lp, lw = lib_counts(n)
+    lines.append(f"• Library kept for good: {lp} patterns, {lw} outside findings")
     lines.append(f"• Older lessons from results: {len(m['lessons'])}")
     if nb_tests_line(n):
         lines.append("• " + nb_tests_line(n).split(". Winning")[0])
@@ -4549,6 +4628,7 @@ def cmd_learned(st, arg=""):
     rows = [[btn("🔎 Patterns (forget)", pid, "ns", "patterns"), btn("💬 Viewer requests", pid, "ns", "viewers")],
             [btn("🌍 Search, news, big channels", pid, "ns", "world")],
             [btn("📝 Older lessons (forget)", pid, "ns", "lessons")],
+            [btn("📚 Everything I know", pid, "ns", "library")],
             [btn("▶️ Resume learning" if n["off"] else "⏸ Pause learning", pid, "np")]]
     send("\n".join(lines), rows)
 
@@ -5729,6 +5809,11 @@ def cmd_health(st):
     try:
         _n = nb()
         lines.append(f"✓ Learning notebook: {len(_n['obs'])} videos studied, {len(_n['facts'])} patterns, {len(_n['asks'])} viewer requests" + (" (paused)" if _n["off"] else ""))
+    except Exception:
+        pass
+    try:
+        _kb = STATE_FILE.stat().st_size / 1024
+        lines.append(f"✓ Memory file: {_kb:.0f} KB" + (" (getting large: tell me and I will compact old raw numbers, nothing learned is lost)" if _kb > 3000 else ""))
     except Exception:
         pass
     chk("YouTube login", login)
