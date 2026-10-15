@@ -37,7 +37,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.51"
+BOT_VERSION = "v10.52"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -4495,31 +4495,39 @@ def nb_fix(st, key):
     kind, name = key.split("|", 1)
     d = f.get("dir") or 0
     good = d > 0
+    if kind == "p":
+        sib = next((x for x in n["facts"] if x["key"] == "v|" + name and x.get("dir") and d and x["dir"] != d), None)
+        if sib:
+            return send("🛠 " + f["text"] + "\nThis one pulls the other way from: " + sib["text"] + ". Changing old videos would help one and hurt the other, so I leave them as they are. "
+                        "For new videos I keep the click-getting side and make sure the video delivers what the title promises.")
+        kind = "v"
     if kind == "v" and name in title_features(""):
-        send(("🛠 Fixing: " + f["text"] + "\\nNothing changes until you tap Apply on each proposal. From now on my new ideas and scripts also lean this way."))
+        send(("🛠 Fixing: " + f["text"] + "\nNothing changes until you tap Apply on each proposal. From now on my new ideas and scripts also lean this way."))
         return cmd_titles(st, {"name": name, "dir": d or 1})
     if kind == "v" and name.startswith("posted in the US evening"):
         h = 18.0 if good else 13.0
         pid = new_pid(st)
         st["props"][pid] = {"type": "hour", "h": h, "created": time.time()}
-        return send(f"🛠 Fixing: {f['text']}\\nI can make {int(h)}:00 US Eastern your default publish hour. Your next scheduled videos would use it.",
+        return send(f"🛠 Fixing: {f['text']}\nI can make {int(h)}:00 US Eastern your default publish hour. Your next scheduled videos would use it.",
                     [[btn(f"✅ Use {int(h)}:00 US Eastern", pid, "hq"), btn("Skip", pid, "cs")]])
     if kind == "v" and name == "3 or more hashtags":
         if good:
-            send("🛠 Fixing: " + f["text"] + "\\nI will refresh the hashtags of your older videos. Nothing changes until you tap.")
+            send("🛠 Fixing: " + f["text"] + "\nI will refresh the hashtags of your older videos. Nothing changes until you tap.")
             return cmd_hashtags(st)
-        return send("🛠 " + f["text"] + "\\nSo I will keep new videos at 3 to 4 hashtags, not more. Nothing on your old videos needs changing.")
+        return send("🛠 " + f["text"] + "\nSo I will keep new videos at 3 to 4 hashtags, not more. Nothing on your old videos needs changing.")
     if kind == "v" and name.startswith("a Watch-next link"):
         if good:
-            send("🛠 Fixing: " + f["text"] + "\\nI will look for older videos without a Watch-next link. Nothing changes until you tap.")
+            send("🛠 Fixing: " + f["text"] + "\nI will look for older videos without a Watch-next link. Nothing changes until you tap.")
             return cmd_watchnext(st)
-        return send("🛠 " + f["text"] + "\\nI will leave your Watch-next links as they are and keep watching this.")
+        return send("🛠 " + f["text"] + "\nI will leave your Watch-next links as they are and keep watching this.")
     if kind == "v" and name.startswith("a Short"):
-        return send("🛠 " + f["text"] + "\\nNothing to fix on old videos. From now on my weekly plan and ideas lean " +
-                    ("toward Shorts" if good else "toward long videos") + ", and I will keep checking whether it holds.")
+        if good:
+            send("🛠 Fixing: " + f["text"] + "\nI will look for long videos I can cut into Shorts. Nothing is published until you tap. My weekly plan and ideas also lean toward Shorts now.")
+            return cmd_shortcuts(st)
+        return send("🛠 " + f["text"] + "\nNothing to fix on old videos. My weekly plan and ideas lean toward long videos now, and I keep checking whether it holds.")
     if kind == "v" and name.startswith("a thumbnail taken"):
-        return send("🛠 " + f["text"] + "\\nWhen you upload, I will point out the thumbnail option that " + ("comes from the opening of the video." if good else "does not come from the opening."))
-    send("🛠 " + f["text"] + "\\nThis one is about how viewers watch, so it cannot be fixed on an old video. My scripts and ideas now take it into account.")
+        return send("🛠 " + f["text"] + "\nWhen you upload, I will point out the thumbnail option that " + ("comes from the opening of the video." if good else "does not come from the opening."))
+    send("🛠 " + f["text"] + "\nThis one is about how viewers watch, so it cannot be fixed on an old video. My scripts and ideas now take it into account.")
 
 
 def nb_section(st, name):
