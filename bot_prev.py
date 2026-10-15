@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -37,7 +38,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.52"
+BOT_VERSION = "v10.55"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1597,6 +1598,112 @@ def cmd_hashtags(st, limit=4):
              [[btn(f"✅ Refresh all {len(pids)}", pa, "hz")]])
 
 
+# ---------------- check and fix the pinned comments of every video ----------------
+PINS_PROMPT = """You check the top comments the owner of the YouTube channel "Kemet | Ancient Egypt" wrote under his own videos (his pinned-comment question).
+For each video decide: "ok" (a question that is clearly about THIS video's subject and different from the others) or "replace" (no comment yet, the same or near-same text as another video, not about this video's subject, or not an easy question to answer).
+For "replace" write a new comment: one short question people can answer with an opinion or a guess, naming this video's own subject, max 180 characters, calm, honest, no begging to subscribe, no fake claims. Every new comment must differ clearly in wording and angle from all the others and from these earlier ones: {used}
+Videos (JSON): {items}
+Return JSON only: {{"items": [{{"n": 0, "verdict": "ok" or "replace", "why": "short reason", "new": "only for replace"}}]}}"""
+
+
+def delete_comment(cid):
+    tok = yt_token()
+    r = S.delete(f"{YT}/youtube/v3/comments", params={"id": cid}, headers={"Authorization": f"Bearer {tok}"}, timeout=60)
+    if r.status_code not in (200, 204):
+        raise RuntimeError(f"HTTP {r.status_code}")
+
+
+def _norm(t):
+    return re.sub(r"[^a-z0-9 ]", "", (t or "").lower()).strip()
+
+
+def cmd_pins(st, limit=6):
+    send("📌 Checking the pinned comment of every video (about a minute)...")
+    tok = yt_token()
+    vids, chid = latest_vids(tok, 50)
+    if not vids:
+        return send("I could not find any videos yet.")
+    rows = []
+    for v in vids:
+        try:
+            threads = yt_get("commentThreads", tok, part="snippet", videoId=v["id"], maxResults=20, order="relevance")["items"]
+        except Exception:
+            continue                                      # comments are off on this video
+        mine = [t for t in threads if t["snippet"]["topLevelComment"]["snippet"].get("authorChannelId", {}).get("value") == chid]
+        first = mine[0]["snippet"]["topLevelComment"] if mine else None
+        rows.append({"v": v, "cid": first["id"] if first else None,
+                     "text": (first["snippet"].get("textOriginal") or first["snippet"].get("textDisplay") or "") if first else "",
+                     "top": bool(first and threads and threads[0]["snippet"]["topLevelComment"]["id"] == first["id"])})
+    if not rows:
+        return send("Comments are off or unreadable on every video, so there is nothing to check.")
+    counts = {}
+    for r in rows:
+        if r["text"]:
+            counts[_norm(r["text"])] = counts.get(_norm(r["text"]), 0) + 1
+    items = [{"n": i, "title": r["v"]["snippet"].get("title", ""), "about": (r["v"]["snippet"].get("description") or "")[:200],
+              "current": r["text"][:200], "same_text_on_videos": counts.get(_norm(r["text"]), 0) if r["text"] else 0} for i, r in enumerate(rows)]
+    used = mem().setdefault("pins_used", [])
+    res = {}
+    for k in range(0, len(items), 25):
+        try:
+            out = gemini([{"text": PINS_PROMPT.format(items=json.dumps(items[k:k + 25]), used=json.dumps(used[-12:]))}])
+        except Exception as e:
+            return send("I could not judge the comments right now: " + clean(e)[:140] + "\nTry again in a minute.")
+        for it in out.get("items", []):
+            if isinstance(it.get("n"), int):
+                res[it["n"]] = it
+    bad, seen_new = [], set(map(_norm, used))
+    for i, r in enumerate(rows):
+        it = res.get(i) or {}
+        new = str(it.get("new", "")).strip()[:200]
+        dup = bool(r["text"]) and counts.get(_norm(r["text"]), 0) > 1
+        if it.get("verdict") == "replace" or dup or not r["text"]:
+            if not new or _norm(new) in seen_new:
+                continue
+            seen_new.add(_norm(new))
+            bad.append((r, new, it.get("why") or ("same comment on several videos" if dup else "no comment yet")))
+    okn = len(rows) - len(bad)
+    if not bad:
+        return send(f"✅ All {len(rows)} videos have their own fitting pinned-style comment. Nothing to fix.")
+    send(f"📌 {len(rows)} videos checked: {okn} fine, {len(bad)} need a better comment. Here are the first {min(limit, len(bad))} "
+         "(nothing changes until you tap; I post the new one, remove my old one, and you pin the new one).")
+    pids = []
+    for r, new, why in bad[:limit]:
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "pinfix", "video_id": r["v"]["id"], "title": r["v"]["snippet"].get("title", ""), "old_id": r["cid"],
+                            "new": new, "created": time.time()}
+        pids.append(pid)
+        send(f"📺 \"{r['v']['snippet'].get('title', '')}\"\nnow: {r['text'][:200] or '(no comment from you)'}"
+             + ("  (looks pinned)" if r["top"] else "") + f"\nwhy: {why}\nnew: {new}",
+             [[btn("✅ Post the new one" + (" and remove the old" if r["cid"] else ""), pid, "pn"), btn("Skip", pid, "cs")]])
+    if len(pids) > 1:
+        pa = new_pid(st)
+        st["props"][pa] = {"type": "pinall", "pids": pids, "created": time.time()}
+        send(f"Fix all {len(pids)} in one go?" + (f" ({len(bad) - limit} more will follow next time you send /pins.)" if len(bad) > limit else ""),
+             [[btn(f"✅ Fix all {len(pids)}", pa, "pw")]])
+
+
+def apply_pinfix(prop):
+    """Post the new comment first, then remove my old one. Returns a short result line."""
+    try:
+        post_top_comment(prop["video_id"], prop["new"])
+    except Exception as e:
+        return False, f"✗ {prop['title'][:40]}: YouTube refused the comment ({clean(e)[:50]}). Is the video public with comments on?"
+    used = mem().setdefault("pins_used", [])
+    used.append(prop["new"])
+    mem()["pins_used"] = used[-60:]
+    rec = mem()["videos"].get(prop["video_id"])
+    if rec is not None:
+        rec["pin"] = prop["new"]
+    note = ""
+    if prop.get("old_id"):
+        try:
+            delete_comment(prop["old_id"])
+        except Exception as e:
+            note = f" (I could not remove the old one: {clean(e)[:40]}; delete it by hand)"
+    return True, f"✓ {prop['title'][:40]}{note}"
+
+
 # ---------------- full checkup of every video ----------------
 def set_description_replace(video_id, old, new):
     tok = yt_token()
@@ -1921,10 +2028,10 @@ def do_upload(job):
     ST["props"][pid_x] = {"type": "xgen", "video_id": vid, "created": time.time()}
     pid_s = new_pid(ST)
     ST["props"][pid_s] = {"type": "schedgen", "video_id": vid, "created": time.time()}
-    kit = mem().get("last_kit") or {}
+    kit = {"pinned": pinned_for(vid, job.get("title", ""), job.get("desc") or "")}
     pid_c = None
     kit_note = ""
-    if kit.get("pinned") and time.time() - kit.get("ts", 0) < 14 * 86400:
+    if kit.get("pinned"):
         if status == "public":
             pid_c = new_pid(ST)
             ST["props"][pid_c] = {"type": "pin", "video_id": vid, "text": kit["pinned"], "created": time.time()}
@@ -2427,6 +2534,23 @@ def on_prop(jid, act, st):
             return send("I could not update that description (" + clean(e)[:80] + "). Tap again later.", [[btn("Try again", jid, "hy")]])
         st["props"].pop(jid, None)
         return send(f"✅ Hashtags refreshed on \"{prop['title']}\"." if ok else "Nothing to change there.")
+    if act == "pn" and kind == "pinfix":
+        ok_, line = apply_pinfix(prop)
+        if ok_:
+            st["props"].pop(jid, None)
+        return send(("✅ " if ok_ else "") + line.lstrip("✓✗ ") + ("\nNow open the video in the YouTube app, press and hold your new comment, tap Pin. (YouTube does not let me pin by code.)" if ok_ else ""))
+    if act == "pw" and kind == "pinall":
+        lines, good = [], 0
+        for p in prop["pids"]:
+            pr = st["props"].get(p)
+            if pr and pr.get("type") == "pinfix":
+                ok_, line = apply_pinfix(pr)
+                lines.append(line)
+                if ok_:
+                    good += 1
+                    st["props"].pop(p, None)
+        st["props"].pop(jid, None)
+        return send(f"✅ Fixed {good} of {len(lines)}:\n" + "\n".join(lines) + "\n\nNow pin each new comment in the YouTube app: press and hold it, tap Pin. (YouTube does not let me pin by code.)")
     if act == "hz" and kind == "hta":
         done = 0
         for p in prop["pids"]:
@@ -2527,6 +2651,8 @@ def on_prop(jid, act, st):
         return write_long(prop["concepts"][int(st.get("_val", "0"))])
     if act == "ad" and kind == "claims":
         return run_audit(prop["claims"][int(st.get("_val", "0"))], st)
+    if act == "av" and kind == "audit":
+        return make_audited_video(prop, st)
     if act == "am":
         return cmd_audit(st)
     if act == "as" and kind == "audit":
@@ -3207,7 +3333,7 @@ def cmd_audit(st, raw="/audit"):
          [[btn(str(n + 1), pid, "ad", n) for n in range(len(claims))]])
 
 
-def run_audit(claim, st):
+def run_audit(claim, st, video=False):
     send(f"🔎 Auditing: {claim}\n(about a minute: evidence first)")
     text, sources = gemini_text(AUDIT_PROMPT.format(claim=claim), search=True)
     a = parse_obj(text)
@@ -3234,9 +3360,13 @@ def run_audit(claim, st):
     au.append({"claim": claim, "verdict": verdict, "score": a.get("score"), "ts": time.time()})
     mem()["audits"] = au[-30:]
     pid = new_pid(st)
-    st["props"][pid] = {"type": "audit", "claim": claim, "verdict": verdict, "sources": srcs, "created": time.time()}
-    send(msg[:4000], [[btn("📌 Put these sources in my next upload", pid, "as")],
+    st["props"][pid] = {"type": "audit", "claim": claim, "verdict": verdict, "sources": srcs, "created": time.time(),
+                        "a": {k: a.get(k) for k in ("script", "score", "bottom_line", "evidence_for", "evidence_against", "unsure", "card")}}
+    send(msg[:4000], [[btn("🎬 Make the video (" + TTS_VOICE + " voice)", pid, "av")],
+                      [btn("📌 Put these sources in my next upload", pid, "as")],
                       [btn("🔁 Another claim", pid, "am")]])
+    if video:
+        make_audited_video(st["props"][pid], st)
 
 
 def evidence_block(job):
@@ -3418,8 +3548,50 @@ def run_results(force=False):
     return shown
 
 
-def first_hour(vid, rec):
+PIN_PROMPT = """The YouTube channel "Kemet | Ancient Egypt" wants ONE pinned comment under this exact video that makes viewers WANT to answer.
+Video: "{title}" - {about}
+One short question people can answer with an opinion or a guess, tied to a real point of THIS video (name its subject), never rude, no fake claims, no begging to subscribe. Max 180 characters.
+It must be clearly different in wording and angle from these earlier pinned comments: {used}
+Return JSON only: {{"pinned": ""}}"""
+
+
+def _same_topic(a, b):
+    wa = {w for w in re.findall(r"[a-z0-9]{4,}", (a or "").lower())}
+    wb = {w for w in re.findall(r"[a-z0-9]{4,}", (b or "").lower())}
+    return bool(wa and wb) and len(wa & wb) / min(len(wa), len(wb)) >= 0.5
+
+
+def pinned_for(vid, title, about=""):
+    """A pinned comment written for THIS video, never one that was already used. Returns "" if none can be made (better none than a repeat)."""
+    used = mem().setdefault("pins_used", [])
+    vrec = mem()["videos"].get(vid)
+    if vrec and vrec.get("pin"):
+        return vrec["pin"]
     kit = mem().get("last_kit") or {}
+    text = ""
+    if kit.get("pinned") and kit["pinned"] not in used and _same_topic(kit.get("title"), title):
+        text = kit["pinned"]
+    for _ in range(3):
+        if text and text not in used:
+            break
+        text = ""
+        try:
+            out = gemini([{"text": PIN_PROMPT.format(title=title, about=(about or "")[:400], used=json.dumps(used[-12:]))}])
+            text = str(out.get("pinned", "")).strip()[:200]
+        except Exception as e:
+            print("pinned_for:", clean(e)[:120])
+            break
+    if not text or text in used:
+        return ""
+    used.append(text)
+    mem()["pins_used"] = used[-60:]
+    if vrec is not None:
+        vrec["pin"] = text
+    return text
+
+
+def first_hour(vid, rec):
+    kit = {"pinned": pinned_for(vid, rec.get("title", ""), rec.get("desc") or rec.get("description") or "")}
     pid = None
     txt = ("🚀 Your video just went live: https://youtu.be/" + vid + "\n\nThe first hour decides how far YouTube pushes it. Do these now:\n"
            "1. Pin a question comment (below).\n2. Reply to every comment fast: I will draft the replies, you tap.\n"
@@ -6323,7 +6495,7 @@ Choose the action. Actions: idea (wants video ideas), script (gave a topic to wr
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes), sources (add sources to the descriptions of older videos), patterns (what the owner's own numbers show about titles and formats), brief (a summary of everything that needs him),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
-funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), fullrefresh (refresh everything the bot knows with the newest data in one go), script (write a fact-checked Shorts script on a topic in the owner's style; topic is the subject), affiliate (find real affiliate programs and sponsors that fit the channel), translate (translated subtitles in Spanish, Portuguese, Hindi), shortcuts (the best moments of a long video to cut into Shorts), playlists (build themed playlists), watch (check the channel for problems), learned (everything the bot has learned from your numbers and viewers' comments, and pause/forget it), lessons (short list of past lessons), health (is everything working),
+funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), pins (check and fix the pinned comment of every video), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), fullrefresh (refresh everything the bot knows with the newest data in one go), script (write a fact-checked Shorts script on a topic in the owner's style; topic is the subject), affiliate (find real affiliate programs and sponsors that fit the channel), translate (translated subtitles in Spanish, Portuguese, Hindi), shortcuts (the best moments of a long video to cut into Shorts), playlists (build themed playlists), watch (check the channel for problems), learned (everything the bot has learned from your numbers and viewers' comments, and pause/forget it), lessons (short list of past lessons), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -6399,7 +6571,7 @@ def run_action(action, topic, st, text=""):
         return cmd_batch(st)
     if action == "collab":
         return cmd_collab(st)
-    if action in ("community", "starter", "sublines", "hook", "demand", "refresh", "calendar", "subs", "praise", "voice", "poll", "goal"):
+    if action in ("community", "starter", "pins", "sublines", "hook", "demand", "refresh", "calendar", "subs", "praise", "voice", "poll", "goal"):
         if action == "demand":
             return cmd_demand(st, "/demand " + (topic or ""))
         if action == "goal":
@@ -6503,7 +6675,9 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/post - 3 Community posts (poll, fact, teaser) to paste into YouTube\n"
         "/fbsetup - link your Facebook Page (then /crosspost gets a post button)\n"
         "/news - fresh Egypt news to turn into videos\n"
+        "/pins - fix repeated or weak pinned comments (you tap)\n"
         "/audit - Kemet Audited: test a myth against evidence (or /audit your claim)\n"
+        "/audited - /audit plus the finished video (Charon voice)\n"
         "/longform - plan long videos (they earn more)\n"
         "/batch - 5 scripts to film in one sitting\n"
         "/collab - draft messages to similar channels\n"
@@ -6673,6 +6847,8 @@ def on_message(msg, st):
         cmd_besttime(st)
     elif text == "/watchnext":
         cmd_watchnext(st)
+    elif text == "/pins":
+        cmd_pins(st)
     elif text == "/hashtags":
         cmd_hashtags(st)
     elif text.startswith("/recheck"):
@@ -6711,6 +6887,9 @@ def on_message(msg, st):
         cmd_searchoff(st)
     elif text == "/review":
         weekly_review(st)
+    elif text.startswith("/audited"):
+        claim = raw.split(None, 1)[1].strip()[:300] if len(raw.split(None, 1)) > 1 else ""
+        run_audit(claim, st, video=True) if claim else cmd_audit(st)
     elif text.startswith("/audit"):
         cmd_audit(st, raw)
     elif text == "/longform":
@@ -6784,7 +6963,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -6898,6 +7077,319 @@ def worker_ack(upto):
         print("ack error:", clean(e))
 
 
+AV_RENDERER_B64 = (
+    "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"
+)
+
+
+# ---------------- Kemet Audited video (Charon voice, free Wikimedia photos, your own renderer) ----------------
+TTS_VOICE = os.getenv("TTS_VOICE", "Charon")
+TTS_MODELS = [m for m in os.getenv("TTS_MODELS", "gemini-2.5-flash-preview-tts,gemini-2.5-pro-preview-tts").split(",") if m]
+TTS_STYLE = "Read this as a low-pitched, calm, informative studio narrator for a history documentary. Natural pace, clear, no drama: "
+COMMONS = os.getenv("COMMONS_URL", "https://commons.wikimedia.org")
+AV_UA = {"User-Agent": "KemetAuditedBot/1.0 (YouTube channel Kemet-ssh; contact via channel)"}
+
+VPLAN_PROMPT = """You prepare a Kemet Audited YouTube Short (portrait, 40-70 seconds of narration). Facts must come ONLY from this audit; never add facts.
+CLAIM: {claim}
+VERDICT: {verdict}   EVIDENCE SCORE: {score}/100
+BOTTOM LINE: {bottom}
+EVIDENCE FOR: {pro}
+EVIDENCE AGAINST: {con}
+NOT CONFIRMED: {unsure}
+DRAFT SCRIPT: {script}
+Return JSON only:
+{{"segments": ["exactly 4 narration parts, in order: 1 hook (the claim as a question, 1-2 sentences), 2 the strongest evidence, 3 context and what is still unknown or debated, 4 the verdict in plain calm words, then ONE specific question for the comments, then: Follow Kemet for evidence-led history. Use the draft script's facts and wording; spoken English, no lists, no stage directions. 130-170 words in total"],
+ "cards": ["exactly 8 objects {{\\"eyebrow\\": \\"SHORT UPPERCASE LABEL max 28 chars\\", \\"title\\": \\"max 56 chars\\", \\"detail\\": \\"max 48 chars UPPERCASE\\"}} for these slides: 1 claim, 2 what the sources show, 3 how it worked, 4 contrast (other period or place, labelled), 5 what is unknown, 6 verdict, 7 score, 8 your take question"],
+ "image_queries": ["exactly 5 different Wikimedia Commons search phrases for real photos or museum objects matching the story, concrete (site, object, museum item), no people names unless historical"],
+ "titles": ["3 title options, each under 70 characters, honest to the verdict"],
+ "pinned_comment": "one specific question for a pinned comment"}}"""
+
+
+def av_tts(text, out_wav):
+    """Charon voice through Gemini speech (free key). Writes a 24 kHz mono WAV and returns its length in seconds."""
+    import wave
+    body = {"contents": [{"parts": [{"text": TTS_STYLE + text}]}],
+            "generationConfig": {"responseModalities": ["AUDIO"],
+                                 "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": TTS_VOICE}}}}}
+    last = "no speech model answered"
+    for rnd in range(3):
+        for m in TTS_MODELS:
+            r = S.post(f"{GBASE}/v1beta/models/{m}:generateContent", headers={"x-goog-api-key": GKEY}, json=body, timeout=240)
+            if r.status_code in (429, 500, 502, 503, 504):
+                last = f"{m} HTTP {r.status_code}"
+                time.sleep(min(10 * (rnd + 1), 40))
+                continue
+            if r.status_code in (400, 404):
+                last = f"{m} HTTP {r.status_code}"
+                continue
+            r.raise_for_status()
+            try:
+                data = r.json()["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+            except Exception:
+                last = f"{m} sent no audio"
+                continue
+            pcm = base64.b64decode(data)
+            if len(pcm) < 4800:
+                last = f"{m} sent empty audio"
+                continue
+            with wave.open(str(out_wav), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(24000)
+                w.writeframes(pcm)
+            return len(pcm) / 2 / 24000
+    raise RuntimeError("The speech voice did not answer: " + last)
+
+
+def av_license_ok(meta):
+    lic = (meta.get("LicenseShortName", {}).get("value") or "").lower().replace("-", " ")
+    return any(k in lic for k in ("public domain", "cc0", "cc by", "pd")) and not re.search(r"\b(nc|nd)\b", lic)
+
+
+def av_images(queries, work, need=5):
+    """Real photos from Wikimedia Commons (public domain or CC BY / BY-SA). Returns (paths, credits). Missing ones become a plain dark plate."""
+    paths, credits, used = [], [], set()
+    for q in queries:
+        if len(paths) >= need:
+            break
+        try:
+            r = S.get(f"{COMMONS}/w/api.php", headers=AV_UA, timeout=30, params={
+                "action": "query", "format": "json", "generator": "search", "gsrnamespace": 6, "gsrsearch": q + " filetype:bitmap",
+                "gsrlimit": 8, "prop": "imageinfo", "iiprop": "url|extmetadata|size|mime", "iiurlwidth": 1400})
+            pages = list(((r.json().get("query") or {}).get("pages") or {}).values())
+        except Exception as e:
+            print("commons:", clean(e)[:100])
+            continue
+        for pg in sorted(pages, key=lambda p: p.get("index", 99)):
+            ii = (pg.get("imageinfo") or [{}])[0]
+            meta = ii.get("extmetadata") or {}
+            if ii.get("mime") not in ("image/jpeg", "image/png") or (ii.get("width") or 0) < 900 or not ii.get("thumburl"):
+                continue
+            if not av_license_ok(meta) or ii["thumburl"] in used:
+                continue
+            try:
+                img = S.get(ii["thumburl"], headers=AV_UA, timeout=60)
+                if img.status_code != 200 or len(img.content) < 20000:
+                    continue
+            except Exception:
+                continue
+            p = work / f"shot_{len(paths) + 1:02d}.jpg"
+            p.write_bytes(img.content)
+            used.add(ii["thumburl"])
+            paths.append(p)
+            who = re.sub(r"<[^>]+>", "", (meta.get("Artist", {}).get("value") or "unknown")).strip()[:70]
+            credits.append(f"{pg.get('title', '').replace('File:', '')[:70]} / {who} / {meta.get('LicenseShortName', {}).get('value', '')} / {ii.get('descriptionurl', '')}")
+            break
+    while len(paths) < need:
+        p = work / f"shot_{len(paths) + 1:02d}.png"
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=0x14100a:s=1080x1920", "-frames:v", "1", str(p)], check=True)
+        paths.append(p)
+    return paths, credits
+
+
+def av_srt(segments, durs, pause=0.18):
+    def clock(t):
+        ms = int(round(t * 1000))
+        return f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d},{ms % 1000:03d}"
+    out, n, t0 = [], 1, 0.0
+    for seg, d in zip(segments, durs):
+        words = seg.split()
+        chunks = [words[i:i + 5] for i in range(0, len(words), 5)] or [[""]]
+        tot = sum(len(" ".join(c)) for c in chunks) or 1
+        t = t0
+        for c in chunks:
+            ln = d * len(" ".join(c)) / tot
+            out.append(f"{n}\n{clock(t)} --> {clock(t + ln)}\n{' '.join(c)}\n")
+            n += 1
+            t += ln
+        t0 += d + pause
+    return "\n".join(out)
+
+
+def av_renderer():
+    d = ROOT / "_audited"
+    d.mkdir(exist_ok=True)
+    p = d / "render_episode.py"
+    import zlib
+    p.write_bytes(zlib.decompress(base64.b64decode(AV_RENDERER_B64)))
+    return p
+
+
+def av_clip(s, n):
+    s = re.sub(r"\s+", " ", str(s or "")).strip()
+    return s if len(s) <= n else s[:n - 1].rstrip() + "…"
+
+
+def make_audited_video(prop, st):
+    claim, a = prop["claim"], prop.get("a") or {}
+    if not a.get("script"):
+        return send("I need the audit details for this one. Send /audited and your claim again.")
+    send("🎬 Making the video now: narration in the " + TTS_VOICE + " voice, real photos, your Kemet Audited look. About 5 to 8 minutes. "
+         "Nothing is posted: I send it to you first.")
+    try:
+        plan = gemini([{"text": VPLAN_PROMPT.format(
+            claim=claim, verdict=prop["verdict"], score=a.get("score", "?"), bottom=a.get("bottom_line", ""),
+            pro=json.dumps(a.get("evidence_for") or []), con=json.dumps(a.get("evidence_against") or []),
+            unsure=json.dumps(a.get("unsure") or []), script=a.get("script", ""))}])
+    except Exception as e:
+        return send("I could not plan the video: " + clean(e)[:160] + "\nTry again in a minute.")
+    segs = [av_clip(x, 900) for x in (plan.get("segments") or []) if str(x).strip()]
+    cards = [c for c in (plan.get("cards") or []) if isinstance(c, dict)]
+    if len(segs) != 4 or len(cards) != 8:
+        return send("The plan came back incomplete, so I stopped. Tap the button again to retry.")
+    segs = [soften(s_, prop["verdict"]) for s_ in segs]
+    base = Path(tempfile.mkdtemp(prefix="audvid_"))
+    work, assets, renders = base / "work", base / "assets", base / "renders"
+    for d in (work, assets, renders):
+        d.mkdir()
+    try:
+        durs = []
+        for i, s_ in enumerate(segs, 1):
+            durs.append(av_tts(s_, work / f"voice_{i:02d}.wav"))
+        total = sum(durs) + 0.18 * 3
+        if total > 175:
+            return send(f"The narration came out {total:.0f} seconds, too long for a Short. Tap the button again for a tighter version.")
+        shots, credits = av_images([str(q) for q in (plan.get("image_queries") or [])][:6] or [claim], assets)
+        shots = sorted(assets.glob("shot_*"))
+        (work / "captions.srt").write_text(av_srt(segs, durs), encoding="utf-8")
+        score = a.get("score", "?")
+        cd = [{"eyebrow": av_clip(c.get("eyebrow"), 30).upper(), "title": av_clip(c.get("title"), 56).upper(), "detail": av_clip(c.get("detail"), 48).upper()} for c in cards]
+        cd[0] = {"eyebrow": "KEMET AUDITED · CLAIM CHECK", "title": av_clip(claim, 70).upper(), "detail": "EVIDENCE FIRST · SCORED 0-100"}
+        cd[5]["eyebrow"] = "VERDICT: " + prop["verdict"]
+        cd[6] = {"eyebrow": "KEMET EVIDENCE SCORE", "title": f"{score} / 100", "detail": "EDITORIAL SCORE · HOW STRONGLY EVIDENCE SUPPORTS THE CLAIM"}
+        vt = [f"work/voice_{i:02d}.wav" for i in range(1, 5)]
+        spec = [(0, 1.0, 1, 1), (1, .53, 2, 2), (1, .47, 3, 3), (2, .6, 4, 4), (2, .4, 5, 5), (3, .4, 2, 6), (3, .32, 5, 7), (3, .28, 1, 8)]
+        man = {"output": "renders/episode.mp4", "channel_label": "Kemet Audited", "channel_handle": "@Kemet-ssh",
+               "channel_url": "https://www.youtube.com/@Kemet-ssh", "max_duration_seconds": 180, "captions_srt": "work/captions.srt",
+               "caption_font_size": 44, "caption_margin_v": 360, "width": 1080, "height": 1920, "fps": 24, "max_file_size_mb": 19.0,
+               "target_video_bitrate_kbps": 900, "audio_bitrate_kbps": 96, "pause_between_tracks_seconds": 0.18,
+               "card_visible_seconds": 3.8, "fade_seconds": 1.5, "voice_tracks": vt, "cards": cd,
+               "beats": [{"voice": vt[v], "fraction": fr, "image": "assets/" + shots[im - 1].name, "card": cn} for v, fr, im, cn in spec]}
+        (base / "manifest.json").write_text(json.dumps(man, indent=1), encoding="utf-8")
+        try:
+            import playwright  # noqa: F401
+        except ImportError:
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "playwright"], check=True, timeout=300)
+        pwdir = Path(os.getenv("PLAYWRIGHT_BROWSERS_PATH") or "~/.cache/ms-playwright").expanduser()
+        if not any(shutil.which(b) for b in ("chromium", "chromium-browser", "google-chrome")) and not list(pwdir.glob("chromium*")):
+            subprocess.run([sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"], check=True, timeout=600)
+        rp = av_renderer()
+        for extra in (["--validate-only"], []):
+            r = subprocess.run([sys.executable, str(rp), str(base / "manifest.json"), *extra], capture_output=True, text=True, timeout=900)
+            if r.returncode != 0:
+                return send("The video builder stopped: " + clean((r.stderr or r.stdout)[-300:]))
+        mp4 = renders / "episode.mp4"
+        dur, w, h = probe(mp4)
+        with open(mp4, "rb") as f:
+            rr = S.post(f"{TGAPI}/sendVideo", data={"chat_id": CHAT, "supports_streaming": "true", "width": w, "height": h,
+                        "caption": f"🎬 Kemet Audited draft ({dur:.0f} s, {mp4.stat().st_size / 1e6:.1f} MB). Watch it with sound before anything else."},
+                        files={"video": ("kemet_audited.mp4", f, "video/mp4")}, timeout=600).json()
+        if not rr.get("ok"):
+            return send("The video is ready but Telegram refused it: " + str(rr.get("description", ""))[:120])
+    except Exception as e:
+        return send("The video could not be finished: " + clean(e)[:200] + "\nNothing was posted. Tap the button to try again.")
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    srcs = prop.get("sources") or []
+    desc = (f"{claim}\n\nVerdict: {prop['verdict']} (editorial evidence score {score}/100).\n{a.get('bottom_line', '')}\n\nSources:\n" +
+            "\n".join(f"- {t}: {u}" for t, u in srcs[:6]) + "\n\nImages (Wikimedia Commons):\n" + ("\n".join("- " + c for c in credits) or "- illustrative backgrounds") +
+            f"\n\nNarration: AI voice ({TTS_VOICE}).\nKemet: https://www.youtube.com/@Kemet-ssh")
+    titles = [av_clip(t, 70) for t in (plan.get("titles") or [])[:3]]
+    mem()["pending_audit"] = {"claim": claim, "verdict": prop["verdict"], "sources": srcs}
+    send("📦 Upload pack\n\nTitle options:\n" + "\n".join(f"{n + 1}. {t}" for n, t in enumerate(titles)) +
+         "\n\nPinned comment:\n" + av_clip(plan.get("pinned_comment"), 200) + "\n\nDescription:\n" + desc[:2400] +
+         "\n\nTo publish: long-press the video above → Forward → Kemet. I then run my usual checks, and nothing goes up without your tap. "
+         "Your sources are already saved for it.\n"
+         "⚠️ In YouTube's upload form, answer the \"altered or synthetic content\" question honestly: the narration is an AI voice.")
+
+
 def main():
     st = load_state()
     st.setdefault("props", {}); st.setdefault("seen", []); st.setdefault("n", 0)
@@ -6921,6 +7413,8 @@ def main():
             {"command": "progress", "description": "Progress toward earning"},
             {"command": "retention", "description": "Where viewers leave your video"},
             {"command": "audit", "description": "Kemet Audited: check a claim vs evidence"},
+            {"command": "pins", "description": "Check and fix pinned comments"},
+            {"command": "audited", "description": "Kemet Audited: check a claim and make the video"},
             {"command": "scout", "description": "What works on other Egypt channels"},
             {"command": "bigsetup", "description": "Handle videos over 20 MB"},
             {"command": "asked", "description": "Viewer questions into video ideas"},
