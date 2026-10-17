@@ -38,7 +38,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.61"
+BOT_VERSION = "v10.64"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -455,7 +455,23 @@ def tg(method, **data):
     return j["result"]
 
 
+def remember_out(text):
+    """Keep the last few things I sent him, so 'reframe the title' or 'shorten it' can be answered about the right text."""
+    try:
+        lo = mem().setdefault("last_out", [])
+        lo.append(str(text)[:1500])
+        mem()["last_out"] = lo[-4:]
+    except Exception:
+        pass
+
+
+def recent_out():
+    lo = mem().get("last_out") or []
+    return "\n---\n".join(lo[-3:]) if lo else "(nothing yet)"
+
+
 def send(text, rows=None):
+    remember_out(text)
     chunks = [text[i:i + 3800] for i in range(0, len(text), 3800)] or [""]
     for i, c in enumerate(chunks):
         d = {"chat_id": CHAT, "text": c, "disable_web_page_preview": True}
@@ -2160,13 +2176,14 @@ def cmd_titles(st, focus=None):
     if [e for e in mem()["exps"] if not e["done"]]:
         return send("A title test is already running, so I will not start another. "
                     "I only test one at a time and I will report when it ends.")
+    min_age = PATTERN_FIX_MIN_AGE_DAYS if focus else EXP_MIN_AGE_DAYS      # a pattern fix you asked for may touch videos older than 3 days
     data = [{"id": v["id"], "title": v["snippet"]["title"],
              "description": v["snippet"].get("description", "")[:200],
              "views": int(v.get("statistics", {}).get("viewCount", 0))} for v in vids
             if not (iso_ts(v["snippet"].get("publishedAt", "")) and
-                    (time.time() - iso_ts(v["snippet"].get("publishedAt", ""))) / 86400 < EXP_MIN_AGE_DAYS)]
+                    (time.time() - iso_ts(v["snippet"].get("publishedAt", ""))) / 86400 < min_age)]
     if not data:
-        return send(f"All your videos are under {EXP_MIN_AGE_DAYS} days old. I leave fresh videos alone: "
+        return send(f"All your videos are under {min_age} days old. I leave fresh videos alone: "
                     "their views are still settling. Ask again later.")
     extra = ""
     if focus:
@@ -2184,14 +2201,16 @@ def cmd_titles(st, focus=None):
         new = (p.get("new_title") or "").strip()[:100]
         if not v or not new or new == v["snippet"]["title"]:
             continue
-        if exp_blocker(v["id"], v["snippet"].get("publishedAt", "")):
+        if exp_blocker(v["id"], v["snippet"].get("publishedAt", ""), min_age):
             continue
+        age_d = (time.time() - (iso_ts(v["snippet"].get("publishedAt", "")) or time.time())) / 86400
         pid = new_pid(st)
         st["props"][pid] = {"type": "title", "video_id": v["id"], "old": v["snippet"]["title"],
-                            "new": new, "created": time.time(),
+                            "new": new, "created": time.time(), "min_age": min_age,
                             "views": int(v.get("statistics", {}).get("viewCount", 0)),
                             "published": v["snippet"].get("publishedAt", "")}
         send(f"Title idea\nNow: {v['snippet']['title']}\nNew: {new}\nWhy: {p.get('why', '')}\n"
+             + (f"⚠️ This video is only {age_d:.0f} days old, so its views are still settling. I will watch it and put the old title back if views per day drop.\n" if age_d < EXP_MIN_AGE_DAYS else "") +
              f"https://youtu.be/{v['id']}",
              [[btn("✅ Apply", pid, "ta"), btn("Skip", pid, "ts")]])
         shown += 1
@@ -2200,18 +2219,20 @@ def cmd_titles(st, focus=None):
 
 
 EXP_MIN_AGE_DAYS = 14      # never test titles on fresh videos
+PATTERN_FIX_MIN_AGE_DAYS = 3   # but a pattern fix he tapped may use videos older than this (each change still needs his Apply tap)
 EXP_REVERT_BELOW = 0.6     # if views per day fall below 60% of before, put the old title back
 
 
-def exp_blocker(video_id, published):
+def exp_blocker(video_id, published, min_age=None):
     """Why a title test must NOT start now (None = fine)."""
     open_ = [e for e in mem()["exps"] if not e["done"]]
     if open_:
         return ("One title test is already running (" + open_[0]["new"][:60] + "). "
                 "I only run one at a time so I can tell what caused any change. I will report in a few days.")
     pub = iso_ts(published or "")
-    if pub and (time.time() - pub) / 86400 < EXP_MIN_AGE_DAYS:
-        return (f"This video is under {EXP_MIN_AGE_DAYS} days old. Its views are still settling, so a title test "
+    min_age = EXP_MIN_AGE_DAYS if min_age is None else min_age
+    if pub and (time.time() - pub) / 86400 < min_age:
+        return (f"This video is under {min_age} days old. Its views are still settling, so a title test "
                 "would tell us nothing, and a title change can hurt a fresh video. Try again later.")
     return None
 
@@ -2614,7 +2635,7 @@ def on_prop(jid, act, st):
     if act == "sy" and kind == "sched":
         return do_schedule(st, jid, st.get("_val"))
     if act == "ta" and kind == "title":
-        why = exp_blocker(prop["video_id"], prop.get("published", ""))
+        why = exp_blocker(prop["video_id"], prop.get("published", ""), prop.get("min_age"))
         if why:
             return send("✋ Not now.\n" + why, [[btn("Skip this idea", jid, "ts")]])
         set_title(prop["video_id"], prop["new"])
@@ -2677,6 +2698,8 @@ def on_prop(jid, act, st):
         return run_audit(prop["claims"][int(st.get("_val", "0"))], st)
     if act == "av" and kind == "audit":
         return make_audited_video(prop, st)
+    if act == "avp" and kind == "audit":
+        return make_audited_video(prop, st, pov=True)
     if act == "am":
         return cmd_audit(st)
     if act == "as" and kind == "audit":
@@ -3262,6 +3285,7 @@ MOSTLY SUPPORTED = good evidence, minor open details.
 DISPUTED = serious scholars disagree, evidence points both ways.
 UNSUPPORTED = no good evidence for it, but it is not disproven (typical for claims about causes, motives, intentions, or secrets nobody can observe).
 CONTRADICTED = solid direct evidence shows it is wrong.
+Break the claim into its parts (place, period, actor, mechanism) and judge each part. Keep sites and periods apart: a similar thing at another site or in a later era does not prove it for this one. Separate what a source directly shows (artifact, inscription, excavation) from what scholars only infer. Silence is not proof: write "I found no published evidence for X in the sources reviewed", never "X never happened", unless the evidence directly rules it out. Treat "ritual", "engineering", "political show" and "fraud" as different readings; never claim intent without direct evidence.
 Never use CONTRADICTED for a claim about why or how something happened unless the evidence directly rules it out. Never write the words 'debunked', 'disproven' or 'officially' in the script unless the verdict is CONTRADICTED. In the script, say what the evidence shows and what it does not, in plain calm words.
 Return JSON only: {{"verdict": "SUPPORTED" or "MOSTLY SUPPORTED" or "DISPUTED" or "UNSUPPORTED" or "CONTRADICTED",
  "score": integer 0-100 (how strongly the evidence supports the claim),
@@ -3270,6 +3294,8 @@ Return JSON only: {{"verdict": "SUPPORTED" or "MOSTLY SUPPORTED" or "DISPUTED" o
  "bottom_line": "one plain sentence",
  "script": "45-60 second voice-over, STRICTLY under 130 words (count them): hook that states the claim, then the evidence, then the verdict. Calm cinematic English. Ends with 'Verdict: ...'",
  "card": ["3-4 short lines for an on-screen score card"],
+ "findings": ["max 4 objects {{\"part\": \"one part of the claim with its place and period\", \"assessment\": \"supported or contested or unverified\", \"note\": \"best evidence or caveat, max 140 chars\"}}"],
+ "not_established": ["what the sources do not show, max 3"],
  "unsure": ["anything you could not confirm, else empty"]}}"""
 
 FACT_PROMPT = """Use web search. Fact-check these claims taken from a short Ancient Egypt video. Be strict and honest; never invent sources.
@@ -3357,7 +3383,7 @@ def cmd_audit(st, raw="/audit"):
          [[btn(str(n + 1), pid, "ad", n) for n in range(len(claims))]])
 
 
-def run_audit(claim, st, video=False):
+def run_audit(claim, st, video=False, pov=False):
     send(f"🔎 Auditing: {claim}\n(about a minute: evidence first)")
     text, sources = gemini_text(AUDIT_PROMPT.format(claim=claim), search=True)
     a = parse_obj(text)
@@ -3385,12 +3411,13 @@ def run_audit(claim, st, video=False):
     mem()["audits"] = au[-30:]
     pid = new_pid(st)
     st["props"][pid] = {"type": "audit", "claim": claim, "verdict": verdict, "sources": srcs, "created": time.time(),
-                        "a": {k: a.get(k) for k in ("script", "score", "bottom_line", "evidence_for", "evidence_against", "unsure", "card")}}
+                        "a": {k: a.get(k) for k in ("script", "score", "bottom_line", "evidence_for", "evidence_against", "unsure", "card", "findings", "not_established")}}
     send(msg[:4000], [[btn("🎬 Make the video (" + TTS_VOICE + " voice)", pid, "av")],
+                      [btn("🎥 POV, then proof version", pid, "avp")],
                       [btn("📌 Put these sources in my next upload", pid, "as")],
                       [btn("🔁 Another claim", pid, "am")]])
     if video:
-        make_audited_video(st["props"][pid], st)
+        make_audited_video(st["props"][pid], st, pov=pov)
 
 
 def evidence_block(job):
@@ -6565,12 +6592,17 @@ funnel (link a Short to a long video), trends (what is trending now, hashtags), 
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
+My last messages to him (newest last):
+{recent}
+IMPORTANT: if his words refer to something in my last messages ("the claim", "this title", "it", "that script", "reframe", "shorten", "explain", "translate this") and he is not clearly asking for one of the commands above, choose chat, so I work on that exact text. "titles" means retitling his OLD YouTube videos and is only right when he talks about his videos.
 Return JSON only: {{"action": "...", "topic": ""}}"""
 
 CHAT_PROMPT = """You are the assistant of the owner of the YouTube channel "Kemet | Ancient Egypt" (short history videos).
 What you know about the channel: {context}
 Recent conversation (newest last; use it so follow-ups make sense): {history}
+My last messages to him (newest last): {recent}
 He asks: {text}
+If he refers to one of my last messages (a claim, a title, a script, a verdict), work on that exact text: rewrite, reframe, shorten, explain or improve it, and give the result itself, not advice about it.
 Answer in at most 6 short lines, plain and honest. Check facts with search. If you are not sure, say so.
 Never promise views or growth."""
 
@@ -6665,7 +6697,8 @@ def run_action(action, topic, st, text=""):
         st["paused"] = False
         return send("▶️ Back on.")
     ctx = learned() + "\nRecent videos made here: " + json.dumps([r["title"] for r in mem()["videos"].values()][-8:])
-    reply, _ = gemini_text(CHAT_PROMPT.format(context=ctx, history=chat_history(), text=text), search=True)
+    reply, _ = gemini_text(CHAT_PROMPT.format(context=ctx, history=chat_history(), text=text, recent=recent_out()), search=True,
+                           topic=re.sub(r"\s+", " ", text)[:150] if len(text) >= 12 else None)
     chat_remember(text, reply)
     send(reply[:3800])
 
@@ -6721,7 +6754,7 @@ def handle_attachment(msg, st):
 def route_text(text, st):
     ctx = learned() + "\nRecent videos made here: " + json.dumps([r["title"] for r in mem()["videos"].values()][-8:])
     try:
-        out = gemini([{"text": ROUTER_PROMPT.format(text=text.replace('"', "'")[:600], context=ctx)}])
+        out = gemini([{"text": ROUTER_PROMPT.format(text=text.replace('"', "'")[:600], context=ctx, recent=recent_out())}])
         action, topic = str(out.get("action", "chat")).lower(), (out.get("topic") or "").strip()
     except Exception as e:
         print("router:", clean(e)[:120])
@@ -6809,7 +6842,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/news - fresh Egypt news to turn into videos\n"
         "/pins - fix repeated or weak pinned comments (you tap)\n"
         "/audit - Kemet Audited: test a myth against evidence (or /audit your claim)\n"
-        "/audited - /audit plus the finished video (Charon voice)\n"
+        "/audited - /audit + video (Charon); add pov first for POV version\n"
         "/longform - plan long videos (they earn more)\n"
         "/batch - 5 scripts to film in one sitting\n"
         "/collab - draft messages to similar channels\n"
@@ -7020,7 +7053,9 @@ def on_message(msg, st):
         weekly_review(st)
     elif text.startswith("/audited"):
         claim = raw.split(None, 1)[1].strip()[:300] if len(raw.split(None, 1)) > 1 else ""
-        run_audit(claim, st, video=True) if claim else cmd_audit(st)
+        pov_ = bool(re.match(r"pov\b", claim, re.I))
+        claim = re.sub(r"^pov\b[:\s]*", "", claim, flags=re.I).strip()
+        run_audit(claim, st, video=True, pov=pov_) if claim else cmd_audit(st)
     elif text.startswith("/audit"):
         cmd_audit(st, raw)
     elif text == "/longform":
@@ -7098,7 +7133,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -7365,13 +7400,19 @@ EVIDENCE FOR: {pro}
 EVIDENCE AGAINST: {con}
 NOT CONFIRMED: {unsure}
 DRAFT SCRIPT: {script}
+SERIES RULES: the first spoken words (first 1-2 seconds) must name the object, site or question, with no intro or logo talk. Give the first concrete piece of evidence early, by the start of part 2. Say the period and place whenever you contrast another site or era. Describe the number as the "editorial evidence score", never as a probability. Use only the words supported, mixed, unsupported or unknown for the verdict, matching the verdict above. Keep ritual, engineering, political show and fraud apart; never state intent without direct evidence. Close: one specific question people can answer, then a short follow invitation. Never promise virality.
+{pov}
 Return JSON only:
 {{"segments": ["exactly 4 narration parts, in order: 1 hook (the claim as a question, 1-2 sentences), 2 the strongest evidence, 3 context and what is still unknown or debated, 4 the verdict in plain calm words, then ONE specific question for the comments, then: Follow Kemet for evidence-led history. Use the draft script's facts and wording; spoken English, no lists, no stage directions. 130-170 words in total"],
  "cards": ["exactly 8 objects {{\\"eyebrow\\": \\"SHORT UPPERCASE LABEL max 28 chars\\", \\"title\\": \\"max 56 chars\\", \\"detail\\": \\"max 48 chars UPPERCASE\\"}} for these slides: 1 claim, 2 what the sources show, 3 how it worked, 4 contrast (other period or place, labelled), 5 what is unknown, 6 verdict, 7 score, 8 your take question"],
- "image_prompts": ["exactly 5 different scene descriptions for AI illustrations that match the story in order, each one sentence, concrete (place, object, light), calm documentary look, no text in the picture"],
+ "image_prompts": ["exactly 5 different scene descriptions for AI illustrations that match the story in order, each one sentence, concrete (place, object, light), calm documentary look, no text in the picture. These are illustrations only: never draw hieroglyph or inscription text, never draw a specific named artifact, named person or excavation as if it were real documentation, and keep one site and one period per picture"],
  "image_queries": ["exactly 5 different Wikimedia Commons search phrases for real photos or museum objects matching the story (backup if a picture cannot be made), concrete, no people names unless historical"],
  "titles": ["3 title options, each under 70 characters, honest to the verdict"],
  "pinned_comment": "one specific question for a pinned comment"}}"""
+
+POV_RULE = ("FORMAT: POV then proof. Part 1 puts the viewer inside the scene at human eye height (what they would see and hear at this site and period, "
+            "clearly an illustration, never a fake eyewitness, never testimony from a named person), then part 2 breaks the illusion and shows the real evidence. "
+            "Say once that the scene is an illustration.")
 
 
 def av_tts(text, out_wav):
@@ -7534,7 +7575,26 @@ def av_clip(s, n):
     return s if len(s) <= n else s[:n - 1].rstrip() + "…"
 
 
-def make_audited_video(prop, st):
+def send_factcheck_notes(prop, a, segs, srcs):
+    """Episode fact-check notes (claim, verdict, claim-by-claim table, distinctions, score, exact narration, source log) as a file."""
+    rows = "\n".join(f"| {av_clip(f.get('part'), 120)} | {av_clip(f.get('assessment'), 20)} | {av_clip(f.get('note'), 200)} |"
+                     for f in (a.get("findings") or []) if isinstance(f, dict)) or "| (not itemised) | | |"
+    lst = lambda k: "\n".join("- " + str(x) for x in (a.get(k) or [])) or "- none listed"
+    md = (f"# Kemet Audited: {prop['claim']}\n\n## Claim under review\n{prop['claim']}\n\n## Verdict\n{prop['verdict']}. {a.get('bottom_line', '')}\n\n"
+          f"## Claim-by-claim findings\n| Part | Assessment | Best evidence / caveat |\n|---|---|---|\n{rows}\n\n"
+          f"## Important distinctions\n- Documented (evidence for):\n{lst('evidence_for')}\n- Disputed or against:\n{lst('evidence_against')}\n- Not established:\n{lst('not_established')}\n- Not confirmed:\n{lst('unsure')}\n\n"
+          f"## Editorial score\n{a.get('score', '?')}/100: editorial assessment of this exact claim, not a measured probability.\n\n"
+          "## Narration (exactly as spoken)\n" + "\n\n".join(segs) + "\n\n## Source log\n" +
+          "\n".join(f"{i}. {t}: {u}" for i, (t, u) in enumerate(srcs[:8], 1)) + "\n\nAI can be wrong: open each source before you rely on it.\n")
+    p = Path(tempfile.mkdtemp(prefix="notes_")) / "fact_check_notes.md"
+    p.write_text(md, encoding="utf-8")
+    with open(p, "rb") as f:
+        S.post(f"{TGAPI}/sendDocument", data={"chat_id": CHAT, "caption": "📝 Fact-check notes for this episode (keep with the video)"},
+               files={"document": ("fact_check_notes.md", f, "text/markdown")}, timeout=120)
+    shutil.rmtree(p.parent, ignore_errors=True)
+
+
+def make_audited_video(prop, st, pov=False):
     claim, a = prop["claim"], prop.get("a") or {}
     if not a.get("script"):
         return send("I need the audit details for this one. Send /audited and your claim again.")
@@ -7544,7 +7604,7 @@ def make_audited_video(prop, st):
         plan = gemini([{"text": VPLAN_PROMPT.format(
             claim=claim, verdict=prop["verdict"], score=a.get("score", "?"), bottom=a.get("bottom_line", ""),
             pro=json.dumps(a.get("evidence_for") or []), con=json.dumps(a.get("evidence_against") or []),
-            unsure=json.dumps(a.get("unsure") or []), script=a.get("script", ""))}])
+            unsure=json.dumps(a.get("unsure") or []), script=a.get("script", ""), pov=POV_RULE if pov else "")}])
     except Exception as e:
         return send("I could not plan the video: " + clean(e)[:160] + "\nTry again in a minute.")
     segs = [av_clip(x, 900) for x in (plan.get("segments") or []) if str(x).strip()]
@@ -7617,15 +7677,20 @@ def make_audited_video(prop, st):
     finally:
         shutil.rmtree(base, ignore_errors=True)
     srcs = prop.get("sources") or []
-    desc = (f"{claim}\n\nVerdict: {prop['verdict']} (editorial evidence score {score}/100).\n{a.get('bottom_line', '')}\n\nSources:\n" +
+    desc = (f"{claim}\n\nVerdict: {prop['verdict']} (editorial evidence score {score}/100, not a measured probability).\n{a.get('bottom_line', '')}\n\nSources:\n" +
             "\n".join(f"- {t}: {u}" for t, u in srcs[:6]) + "\n\nImages:\n" + ("\n".join("- " + c for c in credits) or "- illustrative backgrounds") + "\nIllustrative scenes are not archaeological photographs." +
             f"\n\nNarration: AI voice ({TTS_VOICE}).\nKemet: https://www.youtube.com/@Kemet-ssh\n" + " ".join(pick_hashtags(claim + " " + str(a.get("bottom_line", "")), short=True)))
     titles = [av_clip(t, 70) for t in (plan.get("titles") or [])[:3]]
+    try:
+        send_factcheck_notes(prop, a, segs, srcs)
+    except Exception as e:
+        print("notes:", clean(e))
     mem()["pending_audit"] = {"claim": claim, "verdict": prop["verdict"], "sources": srcs}
     send("📦 Upload pack\n\nTitle options:\n" + "\n".join(f"{n + 1}. {t}" for n, t in enumerate(titles)) +
          "\n\nPinned comment:\n" + av_clip(plan.get("pinned_comment"), 200) + "\n\nDescription:\n" + desc[:2400] +
          "\n\nTo publish: long-press the video above → Forward → Kemet. I then run my usual checks, and nothing goes up without your tap. "
          "Your sources are already saved for it.\n"
+         "🔗 In YouTube Studio, use \"Related video\" to link this Short to your best matching long video.\n"
          "⚠️ In YouTube's upload form, answer the \"altered or synthetic content\" question honestly: the narration is an AI voice" + (" and most pictures are AI-made." if sum(c.startswith("AI") for c in credits) >= 3 else "."))
 
 
