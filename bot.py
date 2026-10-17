@@ -38,7 +38,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.64"
+BOT_VERSION = "v10.65"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2150,7 +2150,7 @@ def new_pid(st):
 
 
 TITLES_PROMPT = """You help the YouTube history channel "Kemet | Ancient Egypt".
-Below are the channel's recent videos as JSON. Pick at most 3 whose TITLE could clearly be
+Below are the channel's recent videos as JSON. Pick at most 3 (or the number asked below) whose TITLE could clearly be
 better (more curious, clearer, under 70 characters) while staying 100% true to the video.
 Do not touch titles that are already good. Never invent facts or use clickbait lies.
 Return JSON only: {"proposals": [{"video_id": "...", "new_title": "...", "why": "one short line"}]}
@@ -2170,10 +2170,10 @@ Comments: """
 def cmd_titles(st, focus=None):
     send("Looking at your videos..." if not focus else "Looking for old titles this pattern can improve...")
     tok = yt_token()
-    vids, _ = my_videos(tok)
+    vids, _ = my_videos(tok, 50)            # the whole recent catalogue, not only the 15 newest (those are all fresh)
     if not vids:
         return send("I could not find any videos on the channel yet.")
-    if [e for e in mem()["exps"] if not e["done"]]:
+    if not focus and [e for e in mem()["exps"] if not e["done"]]:
         return send("A title test is already running, so I will not start another. "
                     "I only test one at a time and I will report when it ends.")
     min_age = PATTERN_FIX_MIN_AGE_DAYS if focus else EXP_MIN_AGE_DAYS      # a pattern fix you asked for may touch videos older than 3 days
@@ -2186,17 +2186,23 @@ def cmd_titles(st, focus=None):
         return send(f"All your videos are under {min_age} days old. I leave fresh videos alone: "
                     "their views are still settling. Ask again later.")
     extra = ""
+    limit = 3
     if focus:
-        name, want = focus["name"], focus["dir"] > 0
-        data = [d for d in data if bool(title_features(d["title"]).get(name)) != want][:25]
+        rules = focus.get("rules") or [{"name": focus["name"], "dir": focus["dir"]}]
+        def misses(t):
+            f = title_features(t)
+            return [r for r in rules if bool(f.get(r["name"])) != (r["dir"] > 0)]
+        data = [d for d in data if misses(d["title"])][:30]
         if not data:
-            return send(f"Every older title already follows this pattern ({name}), so there is nothing to fix there. 👍")
-        extra = (f"\nPATTERN TO APPLY: in this channel's own numbers, videos with {name} do {'better' if want else 'worse'}. "
-                 f"Propose titles that {'have' if want else 'avoid'} {name}, but ONLY where it stays 100% true to the video and natural. Skip a video if it would need a stretch.\n")
+            return send("Every title I may change already follows these patterns, so there is nothing to fix there. 👍")
+        limit = 8
+        extra = ("\nPATTERNS TO APPLY: in this channel's own numbers, these title habits work better:\n" +
+                 "\n".join(f"- {'USE' if r['dir'] > 0 else 'AVOID'}: {r['name']}" for r in rules) +
+                 f"\nFor up to {limit} videos, propose a new title that follows ALL of these at once, but ONLY where it stays 100% true to the video and natural. Skip a video if it would need a stretch.\n")
     out = gemini([{"text": "What you know about the owner's taste:\n" + learned() + "\n" + extra + "\n" + TITLES_PROMPT + json.dumps(data)}])
     byid = {v["id"]: v for v in vids}
     shown = 0
-    for p in out.get("proposals", [])[:3]:
+    for p in out.get("proposals", [])[:limit]:
         v = byid.get(p.get("video_id"))
         new = (p.get("new_title") or "").strip()[:100]
         if not v or not new or new == v["snippet"]["title"]:
@@ -2226,6 +2232,10 @@ EXP_REVERT_BELOW = 0.6     # if views per day fall below 60% of before, put the 
 def exp_blocker(video_id, published, min_age=None):
     """Why a title test must NOT start now (None = fine)."""
     open_ = [e for e in mem()["exps"] if not e["done"]]
+    if min_age is not None:        # a pattern fix he asked for: several at once are fine, but never two on the same video
+        if any(e["video_id"] == video_id for e in open_):
+            return "This video already has a title change being watched. I wait until that is judged."
+        open_ = []
     if open_:
         return ("One title test is already running (" + open_[0]["new"][:60] + "). "
                 "I only run one at a time so I can tell what caused any change. I will report in a few days.")
@@ -2529,6 +2539,8 @@ def on_prop(jid, act, st):
         return send("🗑 Forgotten. I will not bring that pattern up again.")
     if kind == "plall" and act == "pq":
         return do_playlists(st, jid, prop)
+    if kind == "nbk" and act == "nfa":
+        return nb_fix_all(st, prop.get("keys") or [])
     if kind == "nbk" and act == "nf":
         try:
             key = prop["keys"][int(st.get("_val", "0"))]
@@ -4753,6 +4765,28 @@ def nb_fix(st, key):
     send("🛠 " + f["text"] + "\nThis one is about how viewers watch, so it cannot be fixed on an old video. My scripts and ideas now take it into account.")
 
 
+def nb_fix_all(st, keys):
+    """Fix every pattern at once: all title habits in ONE pass (one new title that follows them all), plus the other fixes."""
+    n = nb()
+    facts = [x for x in n["facts"] if x["key"] in keys]
+    rules, others, seen = [], [], set()
+    for f in sorted(facts, key=lambda x: 0 if x["key"].startswith("v|") else 1):
+        kind, name = f["key"].split("|", 1)
+        if kind == "p" and any(x["key"] == "v|" + name for x in facts):
+            continue                       # the click-getting number wins over the watch-through one, same as a single Fix
+        if kind in ("v", "p") and name in title_features(""):
+            if name not in seen and f.get("dir"):
+                seen.add(name)
+                rules.append({"name": name, "dir": f["dir"]})
+        else:
+            others.append(f["key"])
+    send("🛠 Fixing all %d patterns. Titles first: one new title per video that follows all the title habits together. Nothing changes until you tap Apply on each one." % len(facts))
+    if rules:
+        cmd_titles(st, {"rules": rules})
+    for k in others:
+        nb_fix(st, k)
+
+
 def nb_section(st, name):
     n = nb()
     m = mem()
@@ -4769,6 +4803,8 @@ def nb_section(st, name):
         else:
             lines.append("Nothing solid yet. I need at least 8 videos older than 3 days, and 3 on each side of a comparison. I would rather say 'too early' than guess.")
         lines.append(nb_accuracy_line(n))
+        if keys:
+            rows.insert(0, [btn("🛠 Fix ALL patterns", pid, "nfa")])
         st["props"][pid] = {"type": "nbk", "keys": keys, "created": time.time()}
     elif name == "viewers":
         lines = ["💬 What viewers ask for"]
@@ -7133,7 +7169,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "nfa", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
