@@ -38,7 +38,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.59"
+BOT_VERSION = "v10.61"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1477,39 +1477,41 @@ def tag_to_hash(t):
 
 
 def pick_hashtags(about, short=False, trend=None, keep=()):
-    """3-5 hashtags. Order: #AncientEgypt, #Shorts (Shorts), the video's OWN existing hashtags (kept, never dropped), then only TRENDING
-    tags whose words appear in this video's own topic. A generic niche tag is never added just because it is trending."""
+    """Exactly 5 hashtags, the most trending ones that are TRUE for this video. Order: #AncientEgypt, #Shorts (Shorts), then trending niche
+    tags, then viral worldwide tags that fit any history video, then the video's own existing tags, then safe history defaults.
+    An unrelated viral tag (like a celebrity or #fyp) is never added: YouTube can punish misleading hashtags."""
     tr = trend if trend is not None else (mem().get("trend") or {})
     out = ["#AncientEgypt"] + (["#Shorts"] if short else [])
 
     def has(h):
         return h.lower() in [x.lower() for x in out]
+
+    def add(ht):
+        if ht and not has(ht) and len(out) < 5:
+            out.append(ht)
+    topic = title_words(about)
+
+    def fits(t):
+        low = re.sub(r"[^a-z0-9]", "", str(t).lower())
+        return bool(title_words(t) & topic) or low in SAFE_GENERIC or any(w in low for w in ("egypt", "pharaoh", "pyramid", "nile", "kemet", "mummy", "tomb", "sphinx"))
+    for t in (tr.get("tags") or []):
+        if fits(t):
+            add(tag_to_hash(t))
+    g = mem().get("gtrend") or {}
+    if time.time() - g.get("ts", 0) < 7 * 86400:
+        for t in (g.get("tags") or []):
+            ht = tag_to_hash(t)
+            if ht and (ht[1:].lower() in SAFE_GENERIC or (title_words(t) & topic)):
+                add(ht)
     for k in keep:
         k = str(k)
-        if k.startswith("#") and 2 < len(k) <= 23 and not has(k) and len(out) < 5:
+        if k.startswith("#") and 2 < len(k) <= 23:
             nice = {"#ancientegypt": "#AncientEgypt", "#shorts": "#Shorts", "#kemet": "#Kemet"}.get(k.lower(), k)
             if nice[1:].islower():
                 nice = "#" + nice[1:2].upper() + nice[2:]
-            out.append(nice)
-    topic = title_words(about)
-    for t in (tr.get("tags") or []):
-        if len(out) >= 5:
-            break
-        ht = tag_to_hash(t)
-        if ht and not has(ht) and (title_words(t) & topic):
-            out.append(ht)
-    g = mem().get("gtrend") or {}
-    if len(out) < 5 and time.time() - g.get("ts", 0) < 7 * 86400:
-        for t in (g.get("tags") or []):
-            ht = tag_to_hash(t)
-            if ht and not has(ht) and (ht[1:].lower() in SAFE_GENERIC or (title_words(t) & topic)):
-                out.append(ht)                       # one slot only, and only a tag that is true for this video
-                break
-    for d in ("#Egyptology", "#History", "#Archaeology"):
-        if len(out) >= 3:
-            break
-        if not has(d):
-            out.append(d)
+            add(nice)
+    for d in ("#History", "#Egyptology", "#Archaeology", "#Pharaoh", "#Egypt", "#Mystery"):
+        add(d)
     return out[:5]
 
 
@@ -4708,7 +4710,7 @@ def nb_fix(st, key):
         if good:
             send("🛠 Fixing: " + f["text"] + "\nI will refresh the hashtags of your older videos. Nothing changes until you tap.")
             return cmd_hashtags(st)
-        return send("🛠 " + f["text"] + "\nSo I will keep new videos at 3 to 4 hashtags, not more. Nothing on your old videos needs changing.")
+        return send("🛠 " + f["text"] + "\nSo I will use exactly 5 hashtags, the most trending ones that are true for the video. Nothing on your old videos needs changing.")
     if kind == "v" and name.startswith("a Watch-next link"):
         if good:
             send("🛠 Fixing: " + f["text"] + "\nI will look for older videos without a Watch-next link. Nothing changes until you tap.")
@@ -5097,17 +5099,59 @@ Find up to 6 REAL programs or kinds of partners that fit: Egyptology and history
 Return JSON only: {{"programs": [{{"name": "", "what": "one short line: what it is", "fit": "one short line: why it fits this channel", "how": "how to apply, as found on its own site", "caution": "one short line: a real limit (minimum audience, terms, country rules) or 'check the terms'"}}]}}"""
 
 
+AFFIL_QUERIES = ["Egypt tours tickets skip the line affiliate program commission join",
+                 "Egyptology history books publisher bookshop affiliate program join",
+                 "online history courses documentary streaming affiliate program for YouTubers",
+                 "museum shop gifts history affiliate program join commission",
+                 "sponsorship brands for small history education YouTube channels"]
+
+AFFIL_EXTRACT = """The owner of the small YouTube channel "Kemet | Ancient Egypt" (calm, evidence-first Ancient Egypt history, audience mostly in the USA, about 15-500 subscribers) wants honest ideas for earning through affiliate programs and sponsors BEFORE reaching YouTube's partner thresholds.
+Below are real web search results. Use ONLY them. List up to 6 programs or partners that appear in them and fit the channel. Never invent a program, commission rate, link or condition that is not in the results; if a detail is missing write "check the terms".
+RESULTS:
+{results}
+Return JSON only: {{"programs": [{{"name": "", "what": "one short line", "fit": "one short line: why it fits this channel", "how": "how to apply, only as the result says", "caution": "one short real limit or 'check the terms'", "src": 1}}]}}
+"src" is the number of the result the program comes from."""
+
+
 def cmd_affiliate(st):
     send("Looking for real affiliate programs and sponsors that fit your channel (about a minute)...")
-    text, sources = gemini_text(AFFIL_PROMPT, search=True)
-    a, b = text.find("{"), text.rfind("}")
-    try:
-        progs = json.loads(text[a:b + 1]).get("programs", [])
-    except Exception:
-        progs = []
-    progs = [p for p in progs if p.get("name")][:6]
+    res, seen = [], set()
+    for q in AFFIL_QUERIES:
+        for x in web_search(q)[:4]:
+            if x["url"] not in seen:
+                seen.add(x["url"])
+                res.append(x)
+    progs, sources = [], []
+    if res:
+        res = res[:14]
+        ctx = "\n\n".join(f"[{i + 1}] {x['title']} ({x['url']})\n{x['content']}" for i, x in enumerate(res))
+        try:
+            out = gemini([{"text": AFFIL_EXTRACT.format(results=ctx)}])
+            progs = [p for p in out.get("programs", []) if p.get("name")][:6]
+        except Exception as e:
+            print("affiliate:", clean(e)[:120])
+        used = []
+        for p in progs:
+            try:
+                i = int(p.get("src")) - 1
+            except Exception:
+                i = -1
+            if 0 <= i < len(res) and res[i] not in used:
+                used.append(res[i])
+        sources = [(x["title"], x["url"]) for x in used]
+        if progs and not sources:
+            sources = [(x["title"], x["url"]) for x in res[:4]]
+    if not progs:                                     # no search key or nothing usable: try the older way (Google search through Gemini)
+        text, sources = gemini_text(AFFIL_PROMPT, search=True)
+        a, b = text.find("{"), text.rfind("}")
+        try:
+            progs = json.loads(text[a:b + 1]).get("programs", [])
+        except Exception:
+            progs = []
+        progs = [p for p in progs if p.get("name")][:6]
     if not progs or not sources:
-        return send("I could not find programs I can back with real sources right now, and I will not guess. Try again later.")
+        why = "" if tavily_key() else " The web search key is not set, so I could only use Gemini's own search, which is limited. Send /searchkey to add the free one."
+        return send("I could not find programs I can back with real sources right now, and I will not guess." + why + " Try again later.")
     body = "💼 Earning ideas that fit Kemet (found on the web, check each one's terms yourself):\n\n" + "\n\n".join(
         f"{i + 1}. {str(p['name'])[:80]}\n{str(p.get('what', ''))[:140]}\nFit: {str(p.get('fit', ''))[:140]}\nHow: {str(p.get('how', ''))[:140]}\nCareful: {str(p.get('caution', 'check the terms'))[:140]}"
         for i, p in enumerate(progs))
@@ -6516,7 +6560,7 @@ He wrote: "{text}"
 Choose the action. Actions: idea (wants video ideas), script (gave a topic to write a script about; put the topic in "topic"),
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes), sources (add sources to the descriptions of older videos), patterns (what the owner's own numbers show about titles and formats), brief (a summary of everything that needs him),
-progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"),
+progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"), audited (same, and also make the finished video; put the claim in "topic"),
 funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), pins (check and fix the pinned comment of every video), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), fullrefresh (refresh everything the bot knows with the newest data in one go), script (write a fact-checked Shorts script on a topic in the owner's style; topic is the subject), affiliate (find real affiliate programs and sponsors that fit the channel), translate (translated subtitles in Spanish, Portuguese, Hindi), shortcuts (the best moments of a long video to cut into Shorts), playlists (build themed playlists), watch (check the channel for problems), learned (everything the bot has learned from your numbers and viewers' comments, and pause/forget it), lessons (short list of past lessons), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
@@ -6525,6 +6569,7 @@ Return JSON only: {{"action": "...", "topic": ""}}"""
 
 CHAT_PROMPT = """You are the assistant of the owner of the YouTube channel "Kemet | Ancient Egypt" (short history videos).
 What you know about the channel: {context}
+Recent conversation (newest last; use it so follow-ups make sense): {history}
 He asks: {text}
 Answer in at most 6 short lines, plain and honest. Check facts with search. If you are not sure, say so.
 Never promise views or growth."""
@@ -6587,6 +6632,8 @@ def run_action(action, topic, st, text=""):
         return cmd_news(st)
     if action == "audit":
         return cmd_audit(st, "/audit " + (topic or ""))
+    if action == "audited":
+        return run_audit(topic, st, video=True) if topic else cmd_audit(st)
     if action == "longform":
         return cmd_longform(st)
     if action == "batch":
@@ -6618,14 +6665,77 @@ def run_action(action, topic, st, text=""):
         st["paused"] = False
         return send("▶️ Back on.")
     ctx = learned() + "\nRecent videos made here: " + json.dumps([r["title"] for r in mem()["videos"].values()][-8:])
-    reply, _ = gemini_text(CHAT_PROMPT.format(context=ctx, text=text), search=True)
+    reply, _ = gemini_text(CHAT_PROMPT.format(context=ctx, history=chat_history(), text=text), search=True)
+    chat_remember(text, reply)
     send(reply[:3800])
+
+
+def chat_history():
+    h = mem().get("chat_hist") or []
+    return json.dumps(h[-6:]) if h else "(none yet)"
+
+
+def chat_remember(said, reply):
+    h = mem().setdefault("chat_hist", [])
+    h.append({"he": str(said)[:300], "you": str(reply)[:300]})
+    mem()["chat_hist"] = h[-8:]
+
+
+IMG_CHAT_PROMPT = """You are the assistant of the owner of the YouTube channel "Kemet | Ancient Egypt" (short history videos).
+What you know about the channel: {context}
+Recent conversation: {history}
+He sent this file (often a screenshot of YouTube, a viewer comment, a Telegram message from you, or an error). His words with it: {text}
+First say in one short line what it shows. Then help with what he most likely needs: answer his question, explain an error and what to do, or, if it is a viewer comment, draft a short, calm, fact-careful reply he can post. Be honest; never invent facts about a video you cannot see. At most 8 short lines, plain text."""
+
+
+def handle_attachment(msg, st):
+    """Photos, screenshots, PDFs and text files: look at them and answer."""
+    mime, name, fid = "", "file", None
+    if msg.get("photo"):
+        fid, mime, name = msg["photo"][-1]["file_id"], "image/jpeg", "photo.jpg"
+    else:
+        d = msg.get("document") or {}
+        fid, mime, name = d.get("file_id"), d.get("mime_type", ""), d.get("file_name", "file")
+        if d.get("file_size", 0) > 15 * 1024 * 1024:
+            return send("That file is too big for me to read here (over 15 MB). Send a smaller one or a screenshot.")
+    cap = (msg.get("caption") or "").strip() or "(no words, only the file)"
+    ctx = learned() + "\nRecent videos made here: " + json.dumps([r["title"] for r in mem()["videos"].values()][-8:])
+    with tempfile.TemporaryDirectory() as d_:
+        p = Path(d_) / "in.bin"
+        tg_download(fid, p)
+        raw = p.read_bytes()
+    low = str(name).lower()
+    if mime.startswith("image/") or mime == "application/pdf":
+        part = {"inline_data": {"mime_type": mime, "data": base64.b64encode(raw).decode()}}
+    elif mime.startswith("text/") or low.endswith((".txt", ".md", ".csv", ".json", ".srt", ".log")):
+        part = {"text": "FILE " + str(name) + ":\n" + raw.decode("utf-8", "replace")[:20000]}
+    else:
+        return send("I can read photos, screenshots, PDFs and text files, and watch videos. I cannot open \"" + str(name)[:50] + "\".")
+    prompt = IMG_CHAT_PROMPT.format(context=ctx, history=chat_history(), text=cap)
+    r = _gpost({"contents": [{"parts": [part, {"text": prompt}]}]})
+    reply = plain("".join(x.get("text", "") for x in r.json()["candidates"][0]["content"]["parts"]).strip())
+    chat_remember("[sent " + str(name)[:40] + "] " + cap, reply)
+    send(reply[:3800] or "I could not read that. Try a clearer screenshot.")
 
 
 def route_text(text, st):
     ctx = learned() + "\nRecent videos made here: " + json.dumps([r["title"] for r in mem()["videos"].values()][-8:])
-    out = gemini([{"text": ROUTER_PROMPT.format(text=text.replace('"', "'")[:600], context=ctx)}])
-    run_action(str(out.get("action", "chat")).lower(), (out.get("topic") or "").strip(), st, text)
+    try:
+        out = gemini([{"text": ROUTER_PROMPT.format(text=text.replace('"', "'")[:600], context=ctx)}])
+        action, topic = str(out.get("action", "chat")).lower(), (out.get("topic") or "").strip()
+    except Exception as e:
+        print("router:", clean(e)[:120])
+        action, topic = "chat", ""                  # can't pick a command: just answer him in words
+    try:
+        run_action(action, topic, st, text)
+    except GeminiBusy:
+        send("I read your message, but my thinking service is busy (free limit). Please send it again in a minute or two.")
+    except Exception as e:
+        if action == "chat":
+            print("chat:", clean(e)[:120])
+            send("I read your message, but I could not answer it just now (" + clean(str(e))[:80] + "). Please send it again in a minute.")
+        else:
+            raise
 
 
 def handle_voice(msg, st):
@@ -6788,9 +6898,8 @@ def on_message(msg, st):
     if msg.get("video") or str(doc.get("mime_type", "")).startswith("video/") or \
             str(doc.get("file_name", "")).lower().endswith((".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".3gp")):
         return start_job(msg, st)       # a video sent "as a file" often has an odd mime type, so the name counts too
-    if doc:
-        return send("I received the file \"%s\" but I can only read videos (mp4, mov), voice notes and my own bot.py. "
-                    "If it is a video, send it again as a Video." % str(doc.get("file_name", "file"))[:60])
+    if msg.get("photo") or doc:
+        return handle_attachment(msg, st)
     if msg.get("voice") or msg.get("audio"):
         return handle_voice(msg, st)
     raw = (msg.get("text") or "").strip()
@@ -6965,10 +7074,14 @@ def on_message(msg, st):
                  + "\n\nSend /status clear to cancel them all. Unfinished ones also expire after 3 days.")
         else:
             send("Nothing waiting. Send me a video any time.")
-    elif raw and not raw.startswith("/"):
-        route_text(raw, st)
+    elif raw:
+        q = ((msg.get("reply_to_message") or {}).get("text") or (msg.get("reply_to_message") or {}).get("caption") or "").strip()
+        body = raw.lstrip("/") if raw.startswith("/") else raw
+        route_text(('(He is replying to this earlier message: "' + q[:300].replace('"', "'") + '") ' + body) if q else body, st)       # anything else he writes gets an answer, even an unknown /command
+    elif msg.get("sticker") or msg.get("location") or msg.get("contact") or msg.get("poll"):
+        send("Got it. I read text, voice notes, photos, screenshots, PDFs and videos. Tell me in words what you want and I will do it.")
     else:
-        send("Send me a video file, a voice note, or just tell me what you want. /help lists everything.")
+        send("Send me a video file, a voice note, a screenshot, or just tell me what you want. /help lists everything.")
 
 
 def on_callback(cb, st):
@@ -7087,7 +7200,7 @@ def fetch_updates(st, wait):
         return ups
     return S.get(f"{TGAPI}/getUpdates", params={
         "offset": st["offset"], "timeout": wait,
-        "allowed_updates": json.dumps(["message", "callback_query"])},
+        "allowed_updates": json.dumps(["message", "edited_message", "callback_query"])},
         timeout=wait + 30).json().get("result", [])
 
 
@@ -7506,7 +7619,7 @@ def make_audited_video(prop, st):
     srcs = prop.get("sources") or []
     desc = (f"{claim}\n\nVerdict: {prop['verdict']} (editorial evidence score {score}/100).\n{a.get('bottom_line', '')}\n\nSources:\n" +
             "\n".join(f"- {t}: {u}" for t, u in srcs[:6]) + "\n\nImages:\n" + ("\n".join("- " + c for c in credits) or "- illustrative backgrounds") + "\nIllustrative scenes are not archaeological photographs." +
-            f"\n\nNarration: AI voice ({TTS_VOICE}).\nKemet: https://www.youtube.com/@Kemet-ssh")
+            f"\n\nNarration: AI voice ({TTS_VOICE}).\nKemet: https://www.youtube.com/@Kemet-ssh\n" + " ".join(pick_hashtags(claim + " " + str(a.get("bottom_line", "")), short=True)))
     titles = [av_clip(t, 70) for t in (plan.get("titles") or [])[:3]]
     mem()["pending_audit"] = {"claim": claim, "verdict": prop["verdict"], "sources": srcs}
     send("📦 Upload pack\n\nTitle options:\n" + "\n".join(f"{n + 1}. {t}" for n, t in enumerate(titles)) +
@@ -7616,6 +7729,8 @@ def main():
                     on_callback(u["callback_query"], st)
                 elif "message" in u:
                     on_message(u["message"], st)
+                elif "edited_message" in u and not str(u["edited_message"].get("text", "")).startswith("/"):
+                    on_message(u["edited_message"], st)         # he fixed a typo: answer the corrected text
             except Exception as e:
                 print("error:", clean(e))
                 try:
