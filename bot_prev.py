@@ -38,7 +38,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.65"
+BOT_VERSION = "v10.66"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1788,6 +1788,34 @@ def cmd_recheck(st, restart=True):
     rc_batch(st)
 
 
+YT_LINK = re.compile(r"(?:youtu\.be/|youtube\.com/(?:watch\?(?:[^\s]*&)?v=|shorts/|live/|embed/))([A-Za-z0-9_-]{11})")
+
+
+def cmd_checkvideo(st, vid):
+    """A video he uploaded straight to YouTube (too big for Telegram): the same checkup the bot gives every upload."""
+    send("🔍 Checking " + ("that video" if vid else "your newest video") + " on your channel...")
+    tok = yt_token()
+    if not vid:
+        newest, _c = latest_vids(tok, 5)
+        if not newest:
+            return send("I could not find any video on your channel yet.")
+        vid = newest[0]["id"]
+    items = yt_get("videos", tok, part="snippet,status", id=vid).get("items", [])
+    chid = my_videos(tok, 1)[1]
+    v = items[0] if items else None
+    if not v or v["snippet"].get("channelId") not in (chid, None):
+        return send("That video is not on your Kemet channel, so I cannot check or change it. Send the link of one of your own videos.")
+    vis = (v.get("status") or {}).get("privacyStatus", "")
+    pool, _v = watch_pool(tok)
+    names, placed, _vv = playlist_scan(tok)
+    rc_card(st, v, pool, placed)
+    tail = "Nothing changes until you tap a button."
+    if vis in ("private", "unlisted"):
+        tail += f"\nThis video is {vis}. When you are happy with it, send /schedule and I will propose the best time to publish it (your tap)."
+    tail += "\nFor its pinned comment send /pins."
+    send(tail)
+
+
 def rc_batch(st, n=3):
     rc = mem().get("recheck")
     if not rc:
@@ -1890,7 +1918,7 @@ def rc_card(st, v, pool, placed):
         lines.append("⚠️ Not in any playlist")
         btns_.append([btn("📚 Find a playlist", pid, "rl")])
     flagged = any(l.startswith("⚠️") for l in lines)
-    if flagged:
+    if flagged and mem().get("recheck"):
         mem()["recheck"]["flagged"] = mem()["recheck"].get("flagged", 0) + 1
     if len([f for f in fixes if f]) >= 2:
         btns_.append([btn("✅ Fix everything above", pid, "rv")])
@@ -6624,7 +6652,7 @@ Choose the action. Actions: idea (wants video ideas), script (gave a topic to wr
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes), sources (add sources to the descriptions of older videos), patterns (what the owner's own numbers show about titles and formats), brief (a summary of everything that needs him),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"), audited (same, and also make the finished video; put the claim in "topic"),
-funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), pins (check and fix the pinned comment of every video), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), fullrefresh (refresh everything the bot knows with the newest data in one go), script (write a fact-checked Shorts script on a topic in the owner's style; topic is the subject), affiliate (find real affiliate programs and sponsors that fit the channel), translate (translated subtitles in Spanish, Portuguese, Hindi), shortcuts (the best moments of a long video to cut into Shorts), playlists (build themed playlists), watch (check the channel for problems), learned (everything the bot has learned from your numbers and viewers' comments, and pause/forget it), lessons (short list of past lessons), health (is everything working),
+funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), checklast (check and fix the newest video, for example one he uploaded straight to YouTube because it was too big for Telegram), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), pins (check and fix the pinned comment of every video), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), fullrefresh (refresh everything the bot knows with the newest data in one go), script (write a fact-checked Shorts script on a topic in the owner's style; topic is the subject), affiliate (find real affiliate programs and sponsors that fit the channel), translate (translated subtitles in Spanish, Portuguese, Hindi), shortcuts (the best moments of a long video to cut into Shorts), playlists (build themed playlists), watch (check the channel for problems), learned (everything the bot has learned from your numbers and viewers' comments, and pause/forget it), lessons (short list of past lessons), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -6708,6 +6736,8 @@ def run_action(action, topic, st, text=""):
         return cmd_batch(st)
     if action == "collab":
         return cmd_collab(st)
+    if action == "checklast":
+        return cmd_checkvideo(st, None)
     if action in ("community", "starter", "pins", "sublines", "hook", "demand", "refresh", "calendar", "subs", "praise", "voice", "poll", "goal"):
         if action == "demand":
             return cmd_demand(st, "/demand " + (topic or ""))
@@ -6869,7 +6899,8 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/shortcuts - the best moments of my latest long video to cut into Shorts\n"
         "/playlists - build themed playlists for my videos (you approve)\n"
         "/watch - check the channel for problems (also runs by itself)\n"
-        "/recheck - full checkup of all my videos (facts, sources, hashtags, Watch-next, playlist)\n"
+        "/recheck - full checkup of all videos\n"
+        "/checklast - check my YouTube upload (or paste link)\n"
         "/schedule - pick a publish time for your private video; /autoschedule on|off; /besthour 17 sets the US Eastern hour\n"
         "/trends - what is hot now in the niche (tags, topics)\n"
         "/thumbtest - 3 thumbnail options and how to test them\n"
@@ -7145,6 +7176,10 @@ def on_message(msg, st):
                  + "\n\nSend /status clear to cancel them all. Unfinished ones also expire after 3 days.")
         else:
             send("Nothing waiting. Send me a video any time.")
+    elif (text.startswith("/check") and YT_LINK.search(raw)) or (YT_LINK.search(raw) and len(YT_LINK.sub("", raw).strip()) < 30):
+        cmd_checkvideo(st, YT_LINK.search(raw).group(1))
+    elif text.startswith("/checklast"):
+        cmd_checkvideo(st, None)
     elif raw:
         q = ((msg.get("reply_to_message") or {}).get("text") or (msg.get("reply_to_message") or {}).get("caption") or "").strip()
         body = raw.lstrip("/") if raw.startswith("/") else raw
@@ -7754,6 +7789,7 @@ def main():
             {"command": "retention", "description": "Where viewers leave your video"},
             {"command": "audit", "description": "Kemet Audited: check a claim vs evidence"},
             {"command": "pins", "description": "Check and fix pinned comments"},
+            {"command": "checklast", "description": "Check the video you uploaded on YouTube"},
             {"command": "audited", "description": "Kemet Audited: check a claim and make the video"},
             {"command": "scout", "description": "What works on other Egypt channels"},
             {"command": "bigsetup", "description": "Handle videos over 20 MB"},
