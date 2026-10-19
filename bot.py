@@ -38,7 +38,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.71"
+BOT_VERSION = "v10.72"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1498,6 +1498,9 @@ def tag_to_hash(t):
     return "#" + h
 
 
+HASHTAG_GENERIC_WORDS = {"ancient", "egypt", "egyptian", "egyptians", "history", "historical", "kemet", "world", "facts", "fact", "story", "mystery"}
+
+
 def pick_hashtags(about, short=False, trend=None, keep=()):
     """Exactly 5 hashtags, the most trending ones that are TRUE for this video. Order: #AncientEgypt, #Shorts (Shorts), then trending niche
     tags, then viral worldwide tags that fit any history video, then the video's own existing tags, then safe history defaults.
@@ -1515,7 +1518,8 @@ def pick_hashtags(about, short=False, trend=None, keep=()):
 
     def fits(t):
         low = re.sub(r"[^a-z0-9]", "", str(t).lower())
-        return bool(title_words(t) & topic) or low in SAFE_GENERIC or any(w in low for w in ("egypt", "pharaoh", "pyramid", "nile", "kemet", "mummy", "tomb", "sphinx"))
+        return bool((title_words(t) & topic) - HASHTAG_GENERIC_WORDS) or low in SAFE_GENERIC or low in ("egypt", "egyptology") or any(w in low for w in ("pharaoh", "pyramid", "nile", "kemet", "mummy", "mummies", "tomb", "sphinx")) \
+            or any(len(w) >= 5 and w in low for w in (topic - HASHTAG_GENERIC_WORDS))
     for t in (tr.get("tags") or []):
         if fits(t):
             add(tag_to_hash(t))
@@ -1523,7 +1527,7 @@ def pick_hashtags(about, short=False, trend=None, keep=()):
     if time.time() - g.get("ts", 0) < 7 * 86400:
         for t in (g.get("tags") or []):
             ht = tag_to_hash(t)
-            if ht and (ht[1:].lower() in SAFE_GENERIC or (title_words(t) & topic)):
+            if ht and (ht[1:].lower() in SAFE_GENERIC or ((title_words(t) & topic) - HASHTAG_GENERIC_WORDS)):
                 add(ht)
     for k in keep:
         k = str(k)
@@ -3335,6 +3339,7 @@ MOSTLY SUPPORTED = good evidence, minor open details.
 DISPUTED = serious scholars disagree, evidence points both ways.
 UNSUPPORTED = no good evidence for it, but it is not disproven (typical for claims about causes, motives, intentions, or secrets nobody can observe).
 CONTRADICTED = solid direct evidence shows it is wrong.
+For "first", "oldest" or "earliest" claims write "the earliest known" or "the earliest documented", and never argue "no earlier record exists, so the claim is well-founded": missing records are not proof.
 Break the claim into its parts (place, period, actor, mechanism) and judge each part. Keep sites and periods apart: a similar thing at another site or in a later era does not prove it for this one. Separate what a source directly shows (artifact, inscription, excavation) from what scholars only infer. Silence is not proof: write "I found no published evidence for X in the sources reviewed", never "X never happened", unless the evidence directly rules it out. Treat "ritual", "engineering", "political show" and "fraud" as different readings; never claim intent without direct evidence.
 Never use CONTRADICTED for a claim about why or how something happened unless the evidence directly rules it out. Never write the words 'debunked', 'disproven' or 'officially' in the script unless the verdict is CONTRADICTED. In the script, say what the evidence shows and what it does not, in plain calm words.
 Return JSON only: {{"verdict": "SUPPORTED" or "MOSTLY SUPPORTED" or "DISPUTED" or "UNSUPPORTED" or "CONTRADICTED",
@@ -3443,6 +3448,15 @@ def run_audit(claim, st, video=False, pov=False):
     verdict = VERDICT_OLD.get(verdict, verdict)
     a["script"] = soften(str(a.get("script", "")), verdict)
     srcs = dedupe_sources(sources)
+    searched = False
+    if len(srcs) < 2:                          # the audit came back without links: find real pages for the owner to open
+        try:
+            for r_ in web_search(claim + " Ancient Egypt evidence archaeology", 6)[:5]:
+                if r_.get("url"):
+                    srcs = dedupe_sources(srcs + [[r_.get("title") or r_["url"], r_["url"]]])
+                    searched = True
+        except Exception as e:
+            print("audit sources:", clean(e)[:80])
     bullets = lambda k: "\n".join("• " + str(x) for x in (a.get(k) or [])[:3]) or "• none found"
     msg = (f"🔎 KEMET AUDITED\nClaim: {claim}\n\n{VERDICT_ICON.get(verdict, '•')} Verdict: {verdict}  |  Evidence score: {a.get('score', '?')}/100\n"
            f"{a.get('bottom_line', '')}\n\nEvidence for:\n{bullets('evidence_for')}\n\nEvidence against:\n{bullets('evidence_against')}")
@@ -3452,7 +3466,7 @@ def run_audit(claim, st, video=False, pov=False):
         msg += "\n\n🎞 On-screen card:\n" + "\n".join(str(x) for x in a["card"][:4])
     msg += "\n\n🎬 Script (record it in your own voice):\n" + str(a.get("script", ""))[:1500]
     if srcs:
-        msg += "\n\nSources:\n" + "\n".join(f"• {t}: {u}" for t, u in srcs[:5])
+        msg += "\n\nSources" + (" (found by web search, not checked by me: open them first)" if searched else "") + ":\n" + "\n".join(f"• {t}: {u}" for t, u in srcs[:5])
     msg += (f"\n\n🏷 Series title: Kemet Audited: {claim[:60].rstrip('.?')}? Score {a.get('score', '?')}/100"
             "\nKeep the same card, same title shape and the same weekday: a recognisable format is what makes people subscribe.")
     msg += "\n\nAI can still be wrong: open the sources before you film."
@@ -7979,6 +7993,9 @@ def make_audited_video(prop, st, pov=False, style=None, backup_voice=False):
     except Exception as e:
         print("notes:", clean(e))
     mem()["pending_audit"] = {"claim": claim, "verdict": prop["verdict"], "sources": srcs}
+    # the upload review must compare THIS video with THIS script, never with an older /script from another topic
+    mem()["cleared"] = {"title": claim, "script": "\n\n".join(segs), "sources": srcs, "ts": time.time(), "verified": True}
+    mem().pop("script_sources", None)
     send("📦 Upload pack\n\nTitle options:\n" + "\n".join(f"{n + 1}. {t}" for n, t in enumerate(titles)) +
          "\n\nPinned comment:\n" + av_clip(plan.get("pinned_comment"), 200) + "\n\nDescription:\n" + desc[:2400] +
          "\n\nTo publish: long-press the video above → Forward → Kemet. I then run my usual checks, and nothing goes up without your tap. "
