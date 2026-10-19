@@ -38,7 +38,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.69"
+BOT_VERSION = "v10.70"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2736,6 +2736,9 @@ def on_prop(jid, act, st):
         return write_long(prop["concepts"][int(st.get("_val", "0"))])
     if act == "ad" and kind == "claims":
         return run_audit(prop["claims"][int(st.get("_val", "0"))], st)
+    if act == "avv" and kind == "audit":
+        r_ = prop.get("retry") or {}
+        return make_audited_video(prop, st, pov=bool(r_.get("pov")), style=r_.get("style"), backup_voice=True)
     if act in ("av", "avp") and kind == "audit":
         sty = st.get("_val") or ""
         if sty not in VISUAL_STYLES:
@@ -7215,7 +7218,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "nfa", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -7498,19 +7501,75 @@ POV_RULE = ("FORMAT: POV then proof. Part 1 puts the viewer inside the scene at 
             "Say once that the scene is an illustration.")
 
 
-def av_tts(text, out_wav):
-    """Charon voice through Gemini speech (free key). Writes a 24 kHz mono WAV and returns its length in seconds."""
+class TtsQuota(RuntimeError):
+    """The free speech limit is used up (per minute after waiting, or for the day)."""
+
+
+EDGE_VOICE = os.getenv("EDGE_VOICE", "en-US-ChristopherNeural")
+
+
+def tts_wait_seconds(body_text):
+    m = re.search(r'retryDelay"?\s*:\s*"?(\d+(?:\.\d+)?)s', body_text or "") or re.search(r"retry in (\d+(?:\.\d+)?)\s*s", body_text or "", re.I)
+    return min(float(m.group(1)) + 2, 70) if m else None
+
+
+def av_tts_edge(text, out_wav):
+    """Backup narrator (Microsoft Edge neural voice, free, deep male). NOT Charon. Writes a 24 kHz mono WAV, returns seconds."""
     import wave
+    try:
+        import edge_tts  # noqa: F401
+    except ImportError:
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "edge-tts"], check=True, timeout=300)
+    mp3 = Path(str(out_wav) + ".mp3")
+    r = subprocess.run([sys.executable, "-m", "edge_tts", "--voice", EDGE_VOICE, "--rate=-4%", "--pitch=-6Hz", "--text", text, "--write-media", str(mp3)],
+                       capture_output=True, text=True, timeout=240)
+    if r.returncode != 0 or not mp3.exists() or mp3.stat().st_size < 2000:
+        raise RuntimeError("The backup voice did not answer: " + clean(r.stderr or r.stdout)[-120:])
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(mp3), "-ar", "24000", "-ac", "1", str(out_wav)], check=True)
+    mp3.unlink()
+    with wave.open(str(out_wav)) as w:
+        return w.getnframes() / w.getframerate()
+
+
+def av_tts(text, out_wav, backup=False):
+    """Charon voice through Gemini speech (free key). Writes a 24 kHz mono WAV and returns its length in seconds.
+    Finished parts are kept during one run, so a retry inside it does not ask twice."""
+    import wave, hashlib
+    cache = ROOT / "_audited" / "tts"
+    cache.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha1((("edge:" + EDGE_VOICE) if backup else ("g:" + TTS_VOICE) + TTS_STYLE).encode() + text.encode()).hexdigest()[:20]
+    hit = cache / (key + ".wav")
+    if hit.exists() and hit.stat().st_size > 5000:
+        shutil.copy(hit, out_wav)
+        with wave.open(str(out_wav)) as w:
+            return w.getnframes() / w.getframerate()
+    if backup:
+        d = av_tts_edge(text, out_wav)
+        shutil.copy(out_wav, hit)
+        return d
     body = {"contents": [{"parts": [{"text": TTS_STYLE + text}]}],
             "generationConfig": {"responseModalities": ["AUDIO"],
                                  "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": TTS_VOICE}}}}}
-    last = "no speech model answered"
+    last, limited, daily = "no speech model answered", False, False
     for rnd in range(3):
+        wait = 0
         for m in TTS_MODELS:
             r = S.post(f"{GBASE}/v1beta/models/{m}:generateContent", headers={"x-goog-api-key": GKEY}, json=body, timeout=240)
-            if r.status_code in (429, 500, 502, 503, 504):
+            if r.status_code == 429:
+                limited = True
+                last = f"{m} HTTP 429"
+                txt = ""
+                try:
+                    txt = r.text if isinstance(r.text, str) else ""
+                except Exception:
+                    pass
+                if re.search(r"PerDay|per day|daily", txt, re.I):
+                    daily = True
+                wait = max(wait, tts_wait_seconds(txt) or 20 * (rnd + 1))
+                continue
+            if r.status_code in (500, 502, 503, 504):
                 last = f"{m} HTTP {r.status_code}"
-                time.sleep(min(10 * (rnd + 1), 40))
+                wait = max(wait, 8 * (rnd + 1))
                 continue
             if r.status_code in (400, 404):
                 last = f"{m} HTTP {r.status_code}"
@@ -7530,7 +7589,14 @@ def av_tts(text, out_wav):
                 w.setsampwidth(2)
                 w.setframerate(24000)
                 w.writeframes(pcm)
+            shutil.copy(out_wav, hit)
             return len(pcm) / 2 / 24000
+        if daily:
+            break                      # a daily limit does not pass in a minute
+        if wait and rnd < 2:
+            time.sleep(min(wait, 60))
+    if limited:
+        raise TtsQuota("The free speech limit is used up" + (" for today (it resets " + quota_reset_text() + ")" if daily else " for now") + ": " + last)
     raise RuntimeError("The speech voice did not answer: " + last)
 
 
@@ -7802,12 +7868,12 @@ def av_review_script(segs, prop, a):
     return segs, 0
 
 
-def make_audited_video(prop, st, pov=False, style=None):
+def make_audited_video(prop, st, pov=False, style=None, backup_voice=False):
     style = style or visual_style()
     claim, a = prop["claim"], prop.get("a") or {}
     if not a.get("script"):
         return send("I need the audit details for this one. Send /audited and your claim again.")
-    send("🎬 Making the video now: narration in the " + TTS_VOICE + " voice, " + VISUAL_STYLES[style].split(" ", 1)[1].lower() + ", your Kemet Audited look. About 5 to 8 minutes. "
+    send("🎬 Making the video now: narration in the " + (("backup voice (" + EDGE_VOICE + ", not Charon)") if backup_voice else TTS_VOICE + " voice") + ", " + VISUAL_STYLES[style].split(" ", 1)[1].lower() + ", your Kemet Audited look. About 5 to 8 minutes. "
          "Nothing is posted: I send it to you first.")
     try:
         plan = gemini([{"text": VPLAN_PROMPT.format(
@@ -7831,7 +7897,7 @@ def make_audited_video(prop, st, pov=False, style=None):
     try:
         durs = []
         for i, s_ in enumerate(segs, 1):
-            durs.append(av_tts(s_, work / f"voice_{i:02d}.wav"))
+            durs.append(av_tts(s_, work / f"voice_{i:02d}.wav", backup=backup_voice))
         total = sum(durs) + 0.18 * 3
         if total > 175:
             return send(f"The narration came out {total:.0f} seconds, too long for a Short. Tap the button again for a tighter version.")
@@ -7884,6 +7950,15 @@ def make_audited_video(prop, st, pov=False, style=None):
                         files={"video": ("kemet_audited.mp4", f, "video/mp4")}, timeout=600).json()
         if not rr.get("ok"):
             return send("The video is ready but Telegram refused it: " + str(rr.get("description", ""))[:120])
+    except TtsQuota as e:
+        jid = next((k for k, v in st["props"].items() if v is prop), None)
+        if jid is None:
+            jid = new_pid(st)
+            st["props"][jid] = prop
+        prop["retry"] = {"style": style, "pov": pov}
+        return send("🎙 " + clean(e)[:220] + ".\nNothing was posted. You can wait and tap Make the video again, or use a backup voice for this video.",
+                    [[btn("🎙 Use the backup voice now (deep male, not Charon)", jid, "avv", "go")],
+                     [btn("⏳ I will try Charon again later", jid, "cs")]])
     except Exception as e:
         return send("The video could not be finished: " + clean(e)[:200] + "\nNothing was posted. Tap the button to try again.")
     finally:
@@ -7891,7 +7966,7 @@ def make_audited_video(prop, st, pov=False, style=None):
     srcs = prop.get("sources") or []
     desc = (f"{claim}\n\nVerdict: {prop['verdict']} (editorial evidence score {score}/100, not a measured probability).\n{a.get('bottom_line', '')}\n\nSources:\n" +
             "\n".join(f"- {t}: {u}" for t, u in srcs[:6]) + "\n\nImages:\n" + ("\n".join("- " + c for c in credits) or "- illustrative backgrounds") + "\nIllustrative scenes are not archaeological photographs." +
-            f"\n\nNarration: AI voice ({TTS_VOICE}).\nKemet: https://www.youtube.com/@Kemet-ssh\n" + " ".join(pick_hashtags(claim + " " + str(a.get("bottom_line", "")), short=True)))
+            f"\n\nNarration: AI voice ({'Microsoft Edge ' + EDGE_VOICE if backup_voice else TTS_VOICE}).\nKemet: https://www.youtube.com/@Kemet-ssh\n" + " ".join(pick_hashtags(claim + " " + str(a.get("bottom_line", "")), short=True)))
     titles = [av_clip(t, 70) for t in (plan.get("titles") or [])[:3]]
     try:
         send_factcheck_notes(prop, a, segs, srcs)
