@@ -38,7 +38,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.66"
+BOT_VERSION = "v10.69"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2736,10 +2736,11 @@ def on_prop(jid, act, st):
         return write_long(prop["concepts"][int(st.get("_val", "0"))])
     if act == "ad" and kind == "claims":
         return run_audit(prop["claims"][int(st.get("_val", "0"))], st)
-    if act == "av" and kind == "audit":
-        return make_audited_video(prop, st)
-    if act == "avp" and kind == "audit":
-        return make_audited_video(prop, st, pov=True)
+    if act in ("av", "avp") and kind == "audit":
+        sty = st.get("_val") or ""
+        if sty not in VISUAL_STYLES:
+            return ask_visual_style(prop, jid, act)
+        return make_audited_video(prop, st, pov=(act == "avp"), style=sty)
     if act == "am":
         return cmd_audit(st)
     if act == "as" and kind == "audit":
@@ -6652,7 +6653,7 @@ Choose the action. Actions: idea (wants video ideas), script (gave a topic to wr
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes), sources (add sources to the descriptions of older videos), patterns (what the owner's own numbers show about titles and formats), brief (a summary of everything that needs him),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"), audited (same, and also make the finished video; put the claim in "topic"),
-funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), checklast (check and fix the newest video, for example one he uploaded straight to YouTube because it was too big for Telegram), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), pins (check and fix the pinned comment of every video), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), fullrefresh (refresh everything the bot knows with the newest data in one go), script (write a fact-checked Shorts script on a topic in the owner's style; topic is the subject), affiliate (find real affiliate programs and sponsors that fit the channel), translate (translated subtitles in Spanish, Portuguese, Hindi), shortcuts (the best moments of a long video to cut into Shorts), playlists (build themed playlists), watch (check the channel for problems), learned (everything the bot has learned from your numbers and viewers' comments, and pause/forget it), lessons (short list of past lessons), health (is everything working),
+funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), visuals (choose real photos only, a mix, or AI images only for videos; put real, mix or ai in "topic"), image (make an AI picture plus a real photo of a subject, for a thumbnail or post; put the subject in "topic"), checklast (check and fix the newest video, for example one he uploaded straight to YouTube because it was too big for Telegram), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), pins (check and fix the pinned comment of every video), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), fullrefresh (refresh everything the bot knows with the newest data in one go), script (write a fact-checked Shorts script on a topic in the owner's style; topic is the subject), affiliate (find real affiliate programs and sponsors that fit the channel), translate (translated subtitles in Spanish, Portuguese, Hindi), shortcuts (the best moments of a long video to cut into Shorts), playlists (build themed playlists), watch (check the channel for problems), learned (everything the bot has learned from your numbers and viewers' comments, and pause/forget it), lessons (short list of past lessons), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -6736,6 +6737,10 @@ def run_action(action, topic, st, text=""):
         return cmd_batch(st)
     if action == "collab":
         return cmd_collab(st)
+    if action == "visuals":
+        return cmd_visuals(topic or "")
+    if action == "image":
+        return cmd_image(st, topic or text)
     if action == "checklast":
         return cmd_checkvideo(st, None)
     if action in ("community", "starter", "pins", "sublines", "hook", "demand", "refresh", "calendar", "subs", "praise", "voice", "poll", "goal"):
@@ -6891,7 +6896,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/besttime - when to post, from your own data\n"
         "/watchnext - add 'Watch next' links to old descriptions\n"
         "/hashtags - refresh old hashtags from what is trending now\n"
-        "/learned - what I learned from your numbers and viewers' comments (forget or pause any time)\n"
+        "/learned - what I learned (forget or pause any time)\n"
         "/fullrefresh - one tap: refresh everything I know with the newest data\n"
         "/script - write a fact-checked script on a topic you give me, in your style\n"
         "/affiliate - find real affiliate programs and sponsors that fit the channel\n"
@@ -6901,7 +6906,9 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/watch - check the channel for problems (also runs by itself)\n"
         "/recheck - full checkup of all videos\n"
         "/checklast - check my YouTube upload (or paste link)\n"
-        "/schedule - pick a publish time for your private video; /autoschedule on|off; /besthour 17 sets the US Eastern hour\n"
+        "/image <subject> - AI picture + real photo\n"
+        "/visuals - real, mix or AI pictures\n"
+        "/schedule - pick a publish time (/autoschedule on|off, /besthour 17)\n"
         "/trends - what is hot now in the niche (tags, topics)\n"
         "/thumbtest - 3 thumbnail options and how to test them\n"
         "/post - 3 Community posts (poll, fact, teaser) to paste into YouTube\n"
@@ -6913,7 +6920,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/longform - plan long videos (they earn more)\n"
         "/batch - 5 scripts to film in one sitting\n"
         "/collab - draft messages to similar channels\n"
-        "/community - posts to share your newest video in Reddit, Facebook groups, Quora\n"
+        "/community - posts to share your newest video\n"
         "/starter - a question under your video that gets comments\n"
         "/sublines - rotate the subscribe line and learn which brings subscribers\n"
         "/hook - 3 opening lines for your next Short\n"
@@ -7178,6 +7185,10 @@ def on_message(msg, st):
             send("Nothing waiting. Send me a video any time.")
     elif (text.startswith("/check") and YT_LINK.search(raw)) or (YT_LINK.search(raw) and len(YT_LINK.sub("", raw).strip()) < 30):
         cmd_checkvideo(st, YT_LINK.search(raw).group(1))
+    elif text.startswith("/visuals"):
+        cmd_visuals(raw.split(None, 1)[1] if len(raw.split(None, 1)) > 1 else "")
+    elif text.startswith("/image"):
+        cmd_image(st, raw.split(None, 1)[1] if len(raw.split(None, 1)) > 1 else "")
     elif text.startswith("/checklast"):
         cmd_checkvideo(st, None)
     elif raw:
@@ -7471,6 +7482,7 @@ EVIDENCE FOR: {pro}
 EVIDENCE AGAINST: {con}
 NOT CONFIRMED: {unsure}
 DRAFT SCRIPT: {script}
+ACCURACY RULES: never use absolute words (entirely, always, never, consistently, completely, all, every, only, nothing, proved) unless the audit above says exactly that. Prefer "most", "mainly", "usually", "the evidence suggests". Do not add any fact that is not in the audit.
 SERIES RULES: the first spoken words (first 1-2 seconds) must name the object, site or question, with no intro or logo talk. Give the first concrete piece of evidence early, by the start of part 2. Say the period and place whenever you contrast another site or era. Describe the number as the "editorial evidence score", never as a probability. Use only the words supported, mixed, unsupported or unknown for the verdict, matching the verdict above. Keep ritual, engineering, political show and fraud apart; never state intent without direct evidence. Close: one specific question people can answer, then a short follow invitation. Never promise virality.
 {pov}
 Return JSON only:
@@ -7552,6 +7564,34 @@ def av_ai_image(prompt, dest):
     return False
 
 
+def av_ai_edit(src, dest):
+    """Adapt a REAL photo to vertical 9:16 with AI: extend the background and grade the colour, subject unchanged. True if saved."""
+    try:
+        raw = Path(src).read_bytes()
+    except Exception:
+        return False
+    mime = "image/png" if raw[:4] == b"\x89PNG" else "image/jpeg"
+    body = {"contents": [{"parts": [
+        {"text": "Recompose this real photograph into a vertical 9:16 frame for a history documentary. Keep the main subject exactly as it is: do not change, add or remove "
+                 "objects, faces, carvings or any lettering. Only extend the surroundings naturally to fill the vertical frame and give it a warm, calm documentary colour grade. "
+                 "No text, no logos, no watermarks."},
+        {"inlineData": {"mimeType": mime, "data": base64.b64encode(raw).decode()}}]}],
+        "generationConfig": {"responseModalities": ["IMAGE"]}}
+    for m in AV_IMG_MODELS:
+        try:
+            r = S.post(f"{GBASE}/v1beta/models/{m}:generateContent", headers={"x-goog-api-key": GKEY}, json=body, timeout=180)
+            if r.status_code != 200:
+                continue
+            for p in r.json()["candidates"][0]["content"]["parts"]:
+                d = (p.get("inlineData") or {}).get("data")
+                if d and len(base64.b64decode(d)) > 20000:
+                    Path(dest).write_bytes(base64.b64decode(d))
+                    return True
+        except Exception as e:
+            print("ai edit:", clean(e)[:100])
+    return False
+
+
 def av_commons_one(q, used, dest):
     """One real photo from Wikimedia Commons (PD / CC0 / CC BY / CC BY-SA). Returns a credit line or None."""
     try:
@@ -7582,34 +7622,96 @@ def av_commons_one(q, used, dest):
     return None
 
 
-def av_images(queries, work, need=5, prompts=None):
-    """Mostly AI pictures (one per prompt), real Commons photos where AI is unavailable, a plain plate as the last resort.
-    Returns (paths, credits). If the AI picture service refuses once, it is not asked again for this video."""
-    paths, credits, used, ai_ok = [], [], set(), bool(prompts)
+AV_REAL_SLOTS = (1, 3)      # evidence slots: a real photo (AI-adapted to vertical), the others are AI illustrations
+
+
+def av_images(queries, work, need=5, prompts=None, style="mix"):
+    """style "mix" (default), "real" (Commons photos only) or "ai" (AI pictures only; real photos only if the AI service refuses). A deliberate mix: AI illustrations for the scenes, real Wikimedia Commons photos (adapted to vertical by AI, subject unchanged) for the evidence slots.
+    If a source is missing the other fills in; a plain plate is the last resort. If the AI service refuses once, it is not asked again for this video."""
+    style = style if style in ("real", "mix", "ai") else "mix"
+    paths, credits, used, ai_ok = [], [], set(), bool(prompts) and style != "real"
+    real_slots = AV_REAL_SLOTS if style == "mix" else ()
+    def real(i):
+        for q in [queries[(i + k) % len(queries)] for k in range(len(queries))][:3]:
+            raw_dest = work / f"raw_{i + 1:02d}.jpg"
+            line = av_commons_one(q, used, raw_dest)
+            if line:
+                return raw_dest, line
+        return None, None
     for i in range(need):
         dest = work / f"shot_{i + 1:02d}.png"
         got = False
-        if ai_ok and i < len(prompts):
+        if ai_ok and queries and i in real_slots:
+            raw_dest, line = real(i)
+            if line:
+                if av_ai_edit(raw_dest, dest):
+                    credits.append(line + " (adapted to vertical with AI: background extended and colour graded, subject unchanged)")
+                else:
+                    ai_ok = False
+                    dest = work / f"shot_{i + 1:02d}.jpg"
+                    shutil.copy(raw_dest, dest)
+                    credits.append(line)
+                got = True
+        if not got and ai_ok and i < len(prompts):
             got = av_ai_image(str(prompts[i]), dest)
             if got:
                 credits.append("AI illustration (Gemini): " + av_clip(prompts[i], 90))
             else:
                 ai_ok = False
         if not got and queries:
-            dest = work / f"shot_{i + 1:02d}.jpg"
-            line = None
-            for q in [queries[(i + k) % len(queries)] for k in range(len(queries))][:3]:
-                line = av_commons_one(q, used, dest)
-                if line:
-                    break
+            raw_dest, line = real(i)
             if line:
+                dest = work / f"shot_{i + 1:02d}.jpg"
+                shutil.copy(raw_dest, dest)
                 credits.append(line)
                 got = True
         if not got:
             dest = work / f"shot_{i + 1:02d}.png"
             subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=0x14100a:s=1080x1920", "-frames:v", "1", str(dest)], check=True)
         paths.append(dest)
+    for f in work.glob("raw_*"):
+        f.unlink()
     return paths, credits
+
+
+def cmd_visuals(arg):
+    a = arg.strip().lower()
+    k = "real" if a.startswith("real") else "ai" if a in ("ai", "ai only", "ai images", "ai images only") else "mix" if a.startswith(("mix", "both")) else ""
+    if not k:
+        return send("Your default for pictures in videos: " + VISUAL_STYLES[visual_style()] + "\n\nChange it: /visuals real, /visuals mix or /visuals ai.\n"
+                    "Real = Wikimedia Commons photos only. Mix = real photos for the evidence, AI for the scenes. AI = AI pictures only.\n"
+                    "When you tap Make the video I also let you choose each time.")
+    mem()["visuals"] = k
+    send("✅ Default pictures: " + VISUAL_STYLES[k] + ". /audited uses it; the Make the video button still lets you choose.")
+
+
+def cmd_image(st, topic):
+    """/image <subject>: one AI illustration and real photos of it, each clearly labelled, for thumbnails, Community posts or Shorts."""
+    topic = (topic or "").strip()[:200]
+    if not topic:
+        return send("Tell me the subject, for example: /image Temple of Karnak at sunrise")
+    send("🖼 Making pictures for: " + topic + " (about a minute).")
+    work = Path(tempfile.mkdtemp(prefix="img_"))
+    try:
+        sent_n, used = 0, set()
+        ai = work / "ai.png"
+        if av_ai_image(topic, ai):
+            send_photo(ai, "🤖 AI illustration (not a real photo): " + av_clip(topic, 120) + "\nSay on the video that it is AI-made.")
+            sent_n += 1
+        raw = work / "real.jpg"
+        line = av_commons_one(topic, used, raw)
+        if line:
+            send_photo(raw, "📷 Real photo\n" + line[:900])
+            sent_n += 1
+            ed = work / "real_ai.png"
+            if av_ai_edit(raw, ed):
+                send_photo(ed, "🤖📷 The same real photo, adapted to vertical with AI (background extended, colours graded, subject unchanged). Credit the photographer: " + line[7:200])
+                sent_n += 1
+        if not sent_n:
+            return send("I could not make or find a picture for that right now. Try another wording in a minute.")
+        send("Use any of these for a thumbnail, a Community post or a Short. Real photos need the credit line in the description; AI pictures need the synthetic-content answer in YouTube's upload form.")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def av_srt(segments, durs, pause=0.18):
@@ -7665,11 +7767,47 @@ def send_factcheck_notes(prop, a, segs, srcs):
     shutil.rmtree(p.parent, ignore_errors=True)
 
 
-def make_audited_video(prop, st, pov=False):
+VISUAL_STYLES = {"real": "📷 Real photos only", "mix": "🎨 Mix of real photos and AI", "ai": "🤖 AI images only"}
+
+
+def visual_style():
+    v = mem().get("visuals", "mix")
+    return v if v in VISUAL_STYLES else "mix"
+
+
+def ask_visual_style(prop, jid, act):
+    send("Which pictures should this video use?\n(You can set a default with /visuals.)",
+         [[btn(VISUAL_STYLES[k], jid, act, k)] for k in ("real", "mix", "ai")])
+
+
+SCRIPT_EDIT_PROMPT = """You are a strict fact editor for a calm, evidence-led Ancient Egypt channel. Below are the 4 narration parts of a video, and the audit they must follow.
+Rewrite ONLY the sentences that overstate the evidence: absolute words (entirely, always, never, consistently, completely, all, every, only, nothing, proved), claims that go beyond the audit, or a theory stated as fact.
+Make them accurate and careful ("most", "mainly", "the evidence suggests", "one theory proposes"). Keep every other sentence word for word, keep the meaning, the order, the question for the comments, the follow invitation, and about the same length.
+AUDIT: claim: {claim} | verdict: {verdict} | for: {pro} | against: {con} | not confirmed: {unsure} | bottom line: {bottom}
+NARRATION: {segs}
+Return JSON only: {{"segments": [exactly 4 strings], "changed": number of sentences you changed}}"""
+
+
+def av_review_script(segs, prop, a):
+    """One careful pass before recording: take out overstatements, so the video does not fail the fact-check that follows. Returns (segments, changed)."""
+    try:
+        out = gemini([{"text": SCRIPT_EDIT_PROMPT.format(
+            claim=prop["claim"], verdict=prop["verdict"], pro=json.dumps(a.get("evidence_for") or []), con=json.dumps(a.get("evidence_against") or []),
+            unsure=json.dumps(a.get("unsure") or []), bottom=a.get("bottom_line", ""), segs=json.dumps(segs))}])
+        new = [av_clip(x, 900) for x in (out.get("segments") or [])]
+        if len(new) == 4 and all(len(n_) > 20 for n_ in new):
+            return [soften(n_, prop["verdict"]) for n_ in new], int(out.get("changed") or 0)
+    except Exception as e:
+        print("script review:", clean(e)[:100])
+    return segs, 0
+
+
+def make_audited_video(prop, st, pov=False, style=None):
+    style = style or visual_style()
     claim, a = prop["claim"], prop.get("a") or {}
     if not a.get("script"):
         return send("I need the audit details for this one. Send /audited and your claim again.")
-    send("🎬 Making the video now: narration in the " + TTS_VOICE + " voice, real photos, your Kemet Audited look. About 5 to 8 minutes. "
+    send("🎬 Making the video now: narration in the " + TTS_VOICE + " voice, " + VISUAL_STYLES[style].split(" ", 1)[1].lower() + ", your Kemet Audited look. About 5 to 8 minutes. "
          "Nothing is posted: I send it to you first.")
     try:
         plan = gemini([{"text": VPLAN_PROMPT.format(
@@ -7683,6 +7821,9 @@ def make_audited_video(prop, st, pov=False):
     if len(segs) != 4 or len(cards) != 8:
         return send("The plan came back incomplete, so I stopped. Tap the button again to retry.")
     segs = [soften(s_, prop["verdict"]) for s_ in segs]
+    segs, nfix = av_review_script(segs, prop, a)
+    if nfix:
+        send(f"✍️ Before recording I softened {nfix} line(s) that said more than the evidence supports.")
     base = Path(tempfile.mkdtemp(prefix="audvid_"))
     work, assets, renders = base / "work", base / "assets", base / "renders"
     for d in (work, assets, renders):
@@ -7695,7 +7836,7 @@ def make_audited_video(prop, st, pov=False):
         if total > 175:
             return send(f"The narration came out {total:.0f} seconds, too long for a Short. Tap the button again for a tighter version.")
         shots, credits = av_images([str(q) for q in (plan.get("image_queries") or [])][:6] or [claim], assets,
-                                    prompts=[str(x) for x in (plan.get("image_prompts") or [])][:5])
+                                    prompts=[str(x) for x in (plan.get("image_prompts") or [])][:5], style=style)
         shots = sorted(assets.glob("shot_*"))
         (work / "captions.srt").write_text(av_srt(segs, durs), encoding="utf-8")
         score = a.get("score", "?")
@@ -7762,7 +7903,7 @@ def make_audited_video(prop, st, pov=False):
          "\n\nTo publish: long-press the video above → Forward → Kemet. I then run my usual checks, and nothing goes up without your tap. "
          "Your sources are already saved for it.\n"
          "🔗 In YouTube Studio, use \"Related video\" to link this Short to your best matching long video.\n"
-         "⚠️ In YouTube's upload form, answer the \"altered or synthetic content\" question honestly: the narration is an AI voice" + (" and most pictures are AI-made." if sum(c.startswith("AI") for c in credits) >= 3 else "."))
+         "⚠️ In YouTube's upload form, answer the \"altered or synthetic content\" question honestly: the narration is an AI voice" + (" and most pictures are AI-made." if sum(c.startswith("AI") or "adapted to vertical with AI" in c for c in credits) >= 3 else "."))
 
 
 def main():
@@ -7790,6 +7931,8 @@ def main():
             {"command": "audit", "description": "Kemet Audited: check a claim vs evidence"},
             {"command": "pins", "description": "Check and fix pinned comments"},
             {"command": "checklast", "description": "Check the video you uploaded on YouTube"},
+            {"command": "image", "description": "AI picture + real photo of a subject"},
+            {"command": "visuals", "description": "Real photos, a mix, or AI images"},
             {"command": "audited", "description": "Kemet Audited: check a claim and make the video"},
             {"command": "scout", "description": "What works on other Egypt channels"},
             {"command": "bigsetup", "description": "Handle videos over 20 MB"},
