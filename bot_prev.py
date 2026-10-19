@@ -38,7 +38,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.70"
+BOT_VERSION = "v10.71"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -529,7 +529,7 @@ def _gpost(body, rounds=3):
                        headers={"x-goog-api-key": GKEY}, json=body, timeout=240)
             if r.status_code in (429, 500, 502, 503, 504):
                 last = f"{m} HTTP {r.status_code}"
-                busy = busy or r.status_code == 429
+                busy = True
                 try:
                     wait = float(r.headers.get("Retry-After", 0))
                 except ValueError:
@@ -542,18 +542,24 @@ def _gpost(body, rounds=3):
             r.raise_for_status()
             return r
     if busy:
-        raise GeminiBusy("Gemini's free limit is busy right now. Wait a minute or two and try again.")
+        raise GeminiBusy("Google's AI is busy or at its free limit right now. Nothing was lost: send it again in a few minutes.")
     raise RuntimeError(f"Gemini failed: {last}")
 
 
 def gemini(parts):
     body = {"contents": [{"parts": parts}],
             "generationConfig": {"responseMimeType": "application/json"}}
-    r = _gpost(body)
-    cand = r.json()["candidates"][0]["content"]["parts"]
-    text = "".join(p.get("text", "") for p in cand)
-    a, b = text.find("{"), text.rfind("}")
-    return json.loads(text[a:b + 1])
+    last = None
+    for _try in range(2):                      # one fresh answer if the first one is not clean JSON
+        r = _gpost(body)
+        cand = r.json()["candidates"][0]["content"]["parts"]
+        text = "".join(p.get("text", "") for p in cand)
+        a = text.find("{")
+        try:
+            return json.JSONDecoder().raw_decode(text[a:])[0]      # first complete object; extra text after it is ignored
+        except ValueError as e:
+            last = e
+    raise RuntimeError("Gemini sent an answer I could not read (" + clean(last)[:60] + ")")
 
 
 
@@ -8094,7 +8100,10 @@ def main():
                 except Exception:
                     where = ""
                 try:
-                    send("⚠️ Something failed: " + clean(str(e) + where)[:400] + "\nNothing was published. Try again.")
+                    if isinstance(e, GeminiBusy) or "Gemini failed" in str(e):
+                        send("⏳ " + (str(e) if isinstance(e, GeminiBusy) else "Google's AI did not answer just now (it is overloaded at times).") + "\nNothing was published and nothing was lost.")
+                    else:
+                        send("⚠️ Something failed: " + clean(str(e) + where)[:400] + "\nNothing was published. Try again.")
                 except Exception:
                     pass
             save_state(st)
