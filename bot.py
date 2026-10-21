@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.76"
+BOT_VERSION = "v10.78"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2759,6 +2759,27 @@ def on_prop(jid, act, st):
         st["props"].pop(jid, None)
         cfg = fb_cfg()
         return send("✅ Posted to your Facebook Page " + cfg.get("page_name", "") + ".\nhttps://www.facebook.com/" + str(pid_ or cfg.get("page_id", "")))
+    if act == "al" and kind == "alb":
+        try:
+            ok_ = set_description_article(prop["video_id"], prop["line"], prop["url"])
+        except Exception as e:
+            return send("YouTube did not accept the change: " + clean(e)[:160])
+        st["props"].pop(jid, None)
+        return send("✅ Added the article link to the description." if ok_ else "That description already has the link or is too long, so I left it as it is.")
+    if act == "aa" and kind == "ala":
+        done = 0
+        for p in prop["pids"]:
+            pr = st["props"].get(p)
+            if pr and pr.get("type") == "alb":
+                try:
+                    done += 1 if set_description_article(pr["video_id"], pr["line"], pr["url"]) else 0
+                except Exception as e:
+                    print("article link:", clean(e)[:100])
+                st["props"].pop(p, None)
+        st["props"].pop(jid, None)
+        return send(f"✅ Added the article link to {done} description(s).")
+    if act == "ah" and kind == "articles":
+        return cmd_hubs(st)
     if act == "ar" and kind == "articles":
         return write_article(prop["cands"][int(st.get("_val", "0"))], st)
     if act == "ls" and kind == "longs":
@@ -6997,8 +7018,9 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/recheck - full checkup of all videos\n"
         "/checklast - check my YouTube upload (or paste link)\n"
         "/image <subject> - AI picture + real photo\n"
-        "/articles - long website articles from my top videos\n"
-        "/visuals - real, mix or AI pictures\n"
+        "/articles - website articles\n"
+        "/articlelinks - link articles in descriptions\n"
+        "/visuals - real, mix or AI pics\n"
         "/schedule - pick a publish time (/autoschedule on|off, /besthour 17)\n"
         "/trends - what is hot now in the niche (tags, topics)\n"
         "/thumbtest - 3 thumbnail options and how to test them\n"
@@ -7278,6 +7300,10 @@ def on_message(msg, st):
             send("Nothing waiting. Send me a video any time.")
     elif (text.startswith("/check") and YT_LINK.search(raw)) or (YT_LINK.search(raw) and len(YT_LINK.sub("", raw).strip()) < 30):
         cmd_checkvideo(st, YT_LINK.search(raw).group(1))
+    elif text.startswith("/articlelinks"):
+        cmd_articlelinks(st)
+    elif text.startswith("/seriespages"):
+        cmd_hubs(st)
     elif text.startswith("/articles"):
         cmd_articles(st)
     elif text.startswith("/visuals"):
@@ -7310,7 +7336,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -8089,7 +8115,7 @@ def esc(s):
     return html.escape(str(s), quote=True)
 
 
-def art_page(art, v, slug, sources, others):
+def art_page(art, v, slug, sources, others, series=None):
     """One full article page in the site's design. v = video facts (id, title, published, secs, views)."""
     url = f"/articles/{slug}/"
     full = SITE_BASE + url
@@ -8132,7 +8158,13 @@ def art_page(art, v, slug, sources, others):
             {"@type": "ListItem", "position": 3, "name": title, "item": full}]}]}
     ld = [e for e in ld["@graph"]]
     ld = {"@context": "https://schema.org", "@graph": [e for e in ld if not (e["@type"] == "VideoObject" and not e.get("duration"))]}
-    label = esc((art["kw"] or ["History"])[0].title())
+    label = esc(series["title"] if series else (art["kw"] or ["History"])[0].title())
+    if series:
+        rel = f'<a href="/playlists/{esc(series["slug"])}/">Part of the series: {esc(series["title"])} →</a><br/>' + rel
+        bc = ld["@graph"][-1]["itemListElement"]
+        bc[1:] = [{"@type": "ListItem", "position": 2, "name": "The series", "item": SITE_BASE + "/playlists/"},
+                  {"@type": "ListItem", "position": 3, "name": series["title"], "item": f"{SITE_BASE}/playlists/{series['slug']}/"},
+                  {"@type": "ListItem", "position": 4, "name": title, "item": full}]
     return f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -8149,7 +8181,7 @@ def art_page(art, v, slug, sources, others):
 </head>
 <body class="article-page">
 <a class="skip-link" href="#main-content">Skip to content</a>
-<header class="site-header"><a aria-label="Kemet home" class="brand" href="/"><span class="brand-icon"><img alt="" src="/brand-mark.svg"/></span><span class="brand-lockup"><strong>KEMET</strong><small>STORIES FROM THE BLACK LAND</small></span></a><button aria-controls="main-nav" aria-expanded="false" aria-label="Open navigation" class="menu-toggle" id="menu-toggle"><span></span><span></span></button><nav aria-label="Main navigation" class="main-nav" id="main-nav"><a href="/#origin">The origin</a><a href="/articles/">The archive</a><a href="/#films">The films</a><a href="/about/">The approach</a><a class="nav-cta" href="https://www.youtube.com/watch?v={esc(v["id"])}" rel="noopener" target="_blank">Watch the film ↗</a></nav></header>
+<header class="site-header"><a aria-label="Kemet home" class="brand" href="/"><span class="brand-icon"><img alt="" src="/brand-mark.svg"/></span><span class="brand-lockup"><strong>KEMET</strong><small>STORIES FROM THE BLACK LAND</small></span></a><button aria-controls="main-nav" aria-expanded="false" aria-label="Open navigation" class="menu-toggle" id="menu-toggle"><span></span><span></span></button><nav aria-label="Main navigation" class="main-nav" id="main-nav"><a href="/#origin">The origin</a><a href="/articles/">The archive</a><a href="/playlists/">The series</a><a href="/#films">The films</a><a href="/about/">The approach</a><a class="nav-cta" href="https://www.youtube.com/watch?v={esc(v["id"])}" rel="noopener" target="_blank">Watch the film ↗</a></nav></header>
 <main id="main-content">
 <header class="article-hero"><div class="section-shell"><div class="article-meta"><span>Kemet / {label}</span><span>Reading note · {mins} min</span></div><h1>{h1}</h1><p class="article-deck">{esc(art["deck"])}</p></div></header>
 <div class="section-shell article-layout"><article class="article-body">
@@ -8242,6 +8274,288 @@ def store_site_zip(msg):
     send("✅ Saved your site zip (" + str(len(names)) + " files). Now /articles writes a long article for your most viewed videos and sends you the updated full site to upload to Cloudflare.")
 
 
+# ---------------- playlist hubs: every YouTube playlist is a section of the site ----------------
+HUB_PROMPT = """Write the introduction for a series page on the website of the history channel "Kemet | Ancient Egypt". The series mirrors the YouTube playlist "{title}".
+Playlist description: {desc}
+Films in it (in order): {films}
+Write 2 short paragraphs (110 to 170 words in total), calm, concrete, inviting, evidence-first English. Say what questions the series follows and why they matter.
+Use ONLY what the title, description and film titles tell you. Add no new facts, dates, names or numbers. Plain text, no markdown, no lists, no headings."""
+
+HUB_CSS_MARK = "/* kemet playlist hubs */"
+HUB_CSS = HUB_CSS_MARK + """
+.series-list, .article-body ul.series-list { display: grid; gap: 14px; margin: 38px 0; padding: 0; list-style: none; }
+.article-body .series-list li + li { margin-top: 0; }
+.series-item { display: grid; grid-template-columns: 128px 1fr; gap: 18px; align-items: center; padding: 14px; border: 1px solid var(--line); background: var(--ink-soft); transition: border-color .3s ease; }
+.series-item:hover { border-color: var(--gold); }
+.series-item img { width: 128px; height: 96px; object-fit: cover; display: block; background: #000; }
+.series-item strong { display: block; color: var(--sand); font-family: var(--serif); font-weight: 500; font-size: 1.15rem; line-height: 1.3; }
+.series-item span { display: block; margin-top: 8px; color: var(--gold-bright); font: .62rem var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+@media (max-width: 520px) { .series-item { grid-template-columns: 96px 1fr; gap: 12px; } .series-item img { width: 96px; height: 72px; } }
+"""
+
+
+def site_playlists(tok):
+    """The channel's own playlists with their videos, in order (a few cheap YouTube calls)."""
+    pls = yt_get("playlists", tok, part="snippet,contentDetails", mine="true", maxResults=50).get("items", [])
+    out = []
+    for p in pls[:40]:
+        items, page = [], None
+        for _ in range(4):
+            kw = {"pageToken": page} if page else {}
+            try:
+                d = yt_get("playlistItems", tok, part="snippet,contentDetails", playlistId=p["id"], maxResults=50, **kw)
+            except Exception:
+                break
+            for i in d.get("items", []):
+                t = i["snippet"].get("title", "")
+                if t in ("Private video", "Deleted video"):
+                    continue
+                items.append({"id": i["contentDetails"]["videoId"], "title": t})
+            page = d.get("nextPageToken")
+            if not page:
+                break
+        if items:
+            out.append({"id": p["id"], "title": p["snippet"]["title"], "desc": p["snippet"].get("description", ""), "items": items})
+    return out
+
+
+def pl_slug(pl):
+    m = mem().setdefault("pl_slugs", {})
+    if pl["id"] not in m:
+        s, used = slugify(pl["title"]), set(m.values())
+        m[pl["id"]] = s if s not in used else s + "-" + pl["id"][-4:].lower()
+    return m[pl["id"]]
+
+
+def hub_intro(pl):
+    sig = hashlib.sha1((pl["title"] + "|".join(i["title"] for i in pl["items"])).encode()).hexdigest()[:12]
+    cache = mem().setdefault("hub_intro", {})
+    hit = cache.get(pl["id"])
+    if hit and hit.get("sig") == sig:
+        return hit["text"]
+    try:
+        text, _ = gemini_text(HUB_PROMPT.format(title=pl["title"], desc=pl["desc"][:500] or "(none)", films="; ".join(i["title"] for i in pl["items"])[:1500]))
+        text = plain(text)
+    except Exception as e:
+        print("hub intro:", clean(e)[:100])
+        text = ""
+    if len(text.split()) < 40:
+        text = pl["desc"].strip() or f"Every Kemet film in the series “{pl['title']}”, in one place, with an in-depth article for each."
+    cache[pl["id"]] = {"sig": sig, "text": text}
+    return text
+
+
+def hub_shell(title, desc, url, ld, meta, h1, deck, body, aside):
+    return f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/><meta content="width=device-width, initial-scale=1" name="viewport"/>
+<meta content="#11120f" name="theme-color"/>
+<title>{esc(title)} | Kemet</title>
+<meta content="{esc(desc)}" name="description"/>
+<meta content="website" property="og:type"/><meta content="{esc(title)}" property="og:title"/><meta content="{esc(desc)}" property="og:description"/><meta content="{esc(SITE_BASE + url)}" property="og:url"/><meta content="Kemet — Stories from the Black Land" property="og:site_name"/><meta content="{SITE_BASE}/social/og-home.png" property="og:image"/><meta content="Kemet Stories from the Black Land social preview" property="og:image:alt"/><meta content="en_US" property="og:locale"/>
+<meta content="summary_large_image" name="twitter:card"/><meta content="{esc(title)}" name="twitter:title"/><meta content="{esc(desc)}" name="twitter:description"/><meta content="{SITE_BASE}/social/og-home.png" name="twitter:image"/>
+<link href="{esc(SITE_BASE + url)}" rel="canonical"/><link href="/brand-mark.svg" rel="icon" type="image/svg+xml"/><link href="https://fonts.googleapis.com" rel="preconnect"/><link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/><link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&amp;family=DM+Sans:wght@400;500;600;700&amp;family=Playfair+Display:ital,wght@0,500;0,600;1,500;1,600&amp;display=swap" rel="stylesheet"/><link href="/styles.css" rel="stylesheet"/>
+<script type="application/ld+json">{json.dumps(ld, indent=1, ensure_ascii=False)}</script>
+</head>
+<body class="article-page">
+<a class="skip-link" href="#main-content">Skip to content</a>
+<header class="site-header"><a aria-label="Kemet home" class="brand" href="/"><span class="brand-icon"><img alt="" src="/brand-mark.svg"/></span><span class="brand-lockup"><strong>KEMET</strong><small>STORIES FROM THE BLACK LAND</small></span></a><button aria-controls="main-nav" aria-expanded="false" aria-label="Open navigation" class="menu-toggle" id="menu-toggle"><span></span><span></span></button><nav aria-label="Main navigation" class="main-nav" id="main-nav"><a href="/#origin">The origin</a><a href="/articles/">The archive</a><a href="/playlists/">The series</a><a href="/#films">The films</a><a href="/about/">The approach</a><a class="nav-cta" href="https://www.youtube.com/@Kemet-ssh" rel="noopener" target="_blank">Watch on YouTube ↗</a></nav></header>
+<main id="main-content">
+<header class="article-hero"><div class="section-shell"><div class="article-meta">{meta}</div><h1>{h1}</h1><p class="article-deck">{esc(deck)}</p></div></header>
+<div class="section-shell article-layout"><article class="article-body">
+{body}
+</article><aside class="article-sources"><h2>Watch &amp; follow</h2>{aside}</aside></div>
+</main>
+<script src="/script.js"></script>
+</body>
+</html>
+'''
+
+
+def build_hubs(root, pls, vid_slug):
+    """One hub page per playlist plus the series index. vid_slug maps a video id to its article slug (if one exists)."""
+    css_p = root / "styles.css"
+    css = css_p.read_text(encoding="utf-8")
+    if HUB_CSS_MARK not in css:
+        css_p.write_text(css.rstrip() + "\n\n" + HUB_CSS, encoding="utf-8")
+    cards, urls = [], []
+    for n, pl in enumerate(pls):
+        slug = pl_slug(pl)
+        url = f"/playlists/{slug}/"
+        urls.append(url)
+        intro = hub_intro(pl)
+        done = sum(1 for i in pl["items"] if i["id"] in vid_slug)
+        lis = []
+        for i in pl["items"]:
+            sl = vid_slug.get(i["id"])
+            href, tag = (f"/articles/{sl}/", "Read the article →") if sl else (f"https://www.youtube.com/watch?v={i['id']}", "Watch on YouTube ↗")
+            ext = "" if sl else ' rel="noopener" target="_blank"'
+            lis.append(f'<li><a class="series-item" href="{esc(href)}"{ext}><img loading="lazy" decoding="async" width="128" height="96" src="https://i.ytimg.com/vi/{esc(i["id"])}/hqdefault.jpg" alt=""/><div><strong>{esc(i["title"])}</strong><span>{tag}</span></div></a></li>')
+        paras = "".join(f"<p>{esc(x.strip())}</p>" for x in re.split(r"\n\s*\n|\n", intro) if x.strip())
+        body = paras + f"<h2>The films in this series</h2><ul class=\"series-list\">{''.join(lis)}</ul>"
+        aside = f'<a href="https://www.youtube.com/playlist?list={esc(pl["id"])}" rel="noopener" target="_blank">Watch the full playlist on YouTube ↗</a><a href="/playlists/">All series</a><a href="/articles/">The archive</a>'
+        desc = (intro.split("\n")[0] if intro else pl["title"])[:155]
+        ld = {"@context": "https://schema.org", "@graph": [
+            {"@type": "CollectionPage", "@id": SITE_BASE + url + "#webpage", "url": SITE_BASE + url, "name": pl["title"], "description": desc, "isPartOf": {"@id": SITE_BASE + "/#website"}, "inLanguage": "en",
+             "mainEntity": {"@type": "ItemList", "numberOfItems": len(pl["items"]), "itemListElement": [
+                 {"@type": "ListItem", "position": k + 1, "url": (SITE_BASE + f"/articles/{vid_slug[i['id']]}/") if i["id"] in vid_slug else f"https://www.youtube.com/watch?v={i['id']}", "name": i["title"]}
+                 for k, i in enumerate(pl["items"])]}},
+            {"@type": "BreadcrumbList", "@id": SITE_BASE + url + "#breadcrumb", "itemListElement": [
+                {"@type": "ListItem", "position": 1, "name": "Kemet", "item": SITE_BASE + "/"},
+                {"@type": "ListItem", "position": 2, "name": "The series", "item": SITE_BASE + "/playlists/"},
+                {"@type": "ListItem", "position": 3, "name": pl["title"], "item": SITE_BASE + url}]}]}
+        meta = f'<span>Kemet / Series</span><span>{len(pl["items"])} films · {done} articles</span>'
+        parts = pl["title"].split(" ")
+        h1 = esc(pl["title"]) if len(parts) < 4 else esc(" ".join(parts[:len(parts) // 2])) + "<br/><em>" + esc(" ".join(parts[len(parts) // 2:])) + "</em>"
+        deck = re.split(r"(?<=[.!?])\s", intro.strip())[0][:260] if intro.strip() else pl["title"]
+        d = root / "playlists" / slug
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "index.html").write_text(hub_shell(pl["title"] + " — a Kemet series", desc, url, ld, meta, h1, deck, body, aside), encoding="utf-8")
+        cls, glyph = ART_LOOKS[n % len(ART_LOOKS)]
+        cards.append(f'<a class="archive-card archive-card--{cls} reveal" href="{url}"><span class="card-top"><span>{n + 1:02d}</span><span aria-hidden="true" class="card-arrow">↗</span></span><span aria-hidden="true" class="card-glyph">{glyph}</span>'
+                     f'<div class="card-bottom"><span class="card-label">{len(pl["items"])} FILMS · {done} ARTICLES</span><h3>{esc(pl["title"])}</h3><p>{esc(desc[:110])}</p><span class="card-link">Open the series <span aria-hidden="true">→</span></span></div></a>')
+    ld = {"@context": "https://schema.org", "@graph": [
+        {"@type": "CollectionPage", "@id": SITE_BASE + "/playlists/#webpage", "url": SITE_BASE + "/playlists/", "name": "The Kemet series", "isPartOf": {"@id": SITE_BASE + "/#website"}, "inLanguage": "en"},
+        {"@type": "BreadcrumbList", "@id": SITE_BASE + "/playlists/#breadcrumb", "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "Kemet", "item": SITE_BASE + "/"},
+            {"@type": "ListItem", "position": 2, "name": "The series", "item": SITE_BASE + "/playlists/"}]}]}
+    body = f'<section class="archive section-shell" aria-label="All series"><div class="archive-grid">{"".join(cards)}</div></section>'
+    page = hub_shell("The Kemet series — every playlist as a reading path", "Every Kemet playlist as a reading path: a series page with the films and an in-depth article for each.", "/playlists/", ld,
+                     f"<span>Kemet / The series</span><span>{len(pls)} series</span>", "The<br/><em>series.</em>",
+                     "Each series mirrors a playlist on the Kemet YouTube channel. Pick one and read the films in order.", "", "")
+    page = re.sub(r'<div class="section-shell article-layout">.*?</aside></div>', lambda m: "", page, count=1, flags=re.S).replace("</main>", body + "\n</main>", 1)
+    (root / "playlists").mkdir(exist_ok=True)
+    (root / "playlists" / "index.html").write_text(page, encoding="utf-8")
+    return urls
+
+
+def add_series_nav(root):
+    """Add 'The series' to the menu of every page that does not have it yet."""
+    for p in root.rglob("index.html"):
+        s = p.read_text(encoding="utf-8")
+        if "/playlists/" in s or '<a href="/articles/">The archive</a>' not in s:
+            continue
+        p.write_text(s.replace('<a href="/articles/">The archive</a>', '<a href="/articles/">The archive</a><a href="/playlists/">The series</a>', 1), encoding="utf-8")
+
+
+def vid_slug_map(root):
+    m = {}
+    for p in (root / "articles").glob("*/index.html"):
+        for vid in re.findall(r'data-yt="([\w-]{11})"', p.read_text(encoding="utf-8")):
+            m.setdefault(vid, p.parent.name)
+    return m
+
+
+def rebuild_site_hubs(root, tok):
+    pls = site_playlists(tok)
+    if not pls:
+        return 0
+    vs = vid_slug_map(root)
+    urls = build_hubs(root, pls, vs)
+    add_series_nav(root)
+    sm = root / "sitemap.xml"
+    if sm.exists():
+        s = sm.read_text(encoding="utf-8")
+        today = datetime.date.today().isoformat()
+        add = "".join(f"  <url><loc>{SITE_BASE}{u}</loc>\n    <lastmod>{today}</lastmod></url>\n" for u in ["/playlists/"] + urls if SITE_BASE + u not in s)
+        sm.write_text(s.replace("</urlset>", add + "</urlset>"), encoding="utf-8")
+    return len(pls)
+
+
+def pack_site(root, d, caption):
+    import zipfile
+    zp = Path(d) / f"kemet-site-{datetime.date.today().strftime('%Y%m%d')}.zip"
+    with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in sorted(root.rglob("*")):
+            if f.is_file():
+                zf.write(f, f.relative_to(root).as_posix())
+    with open(zp, "rb") as f:
+        r = S.post(f"{TGAPI}/sendDocument", data={"chat_id": CHAT, "caption": caption}, files={"document": (zp.name, f, "application/zip")}, timeout=300).json()
+    if r.get("ok"):
+        nid = (r.get("result", {}).get("document") or {}).get("file_id")
+        if nid:
+            mem()["site_zip"] = {"file_id": nid, "name": zp.name, "ts": time.time(), "n": len(list(root.rglob("*")))}
+    return r
+
+
+def cmd_hubs(st):
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("First send me your current site as a .zip file, then try again.")
+    send("🗂 Building a page for each of your YouTube playlists...")
+    tok = yt_token()
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        n = rebuild_site_hubs(root, tok)
+        if not n:
+            return send("I found no playlists with videos on your channel.")
+        r = pack_site(root, d, f"🗂 Site updated: {n} series pages (one per YouTube playlist) and a /playlists/ index. Unzip and upload the CONTENTS to Cloudflare Pages.")
+    if not r.get("ok"):
+        return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
+    send(f"✅ {n} series pages built from your playlists. Each lists its films; a film shows \"Read the article\" once it has one, otherwise it links to YouTube. /articles writes the articles.")
+
+
+def set_description_article(video_id, line, url):
+    """Put 'Read the full article' at the top of a video's description (never twice, never past YouTube's limit)."""
+    tok = yt_token()
+    sn = yt_get("videos", tok, part="snippet", id=video_id)["items"][0]["snippet"]
+    desc = sn.get("description", "")
+    if url in desc or len(line) + 2 + len(desc) > 4990:
+        return False
+    body = {"title": sn["title"], "description": line + "\n\n" + desc, "categoryId": sn.get("categoryId", "27"), "tags": sn.get("tags", [])}
+    if sn.get("defaultLanguage"):
+        body["defaultLanguage"] = sn["defaultLanguage"]
+    r = S.put(f"{YT}/youtube/v3/videos?part=snippet", headers={"Authorization": f"Bearer {tok}"}, json={"id": video_id, "snippet": body}, timeout=60)
+    r.raise_for_status()
+    return True
+
+
+def cmd_articlelinks(st):
+    """For every article that is live on the site, propose a 'Read the full article' line in its video's description (nothing changes until you tap)."""
+    arts = mem().get("articles") or {}
+    if not arts:
+        return send("No articles written yet. Send /articles first.")
+    tok = yt_token()
+    ids = list(arts)[:50]
+    items = {i["id"]: i["snippet"] for i in yt_get("videos", tok, part="snippet", id=",".join(ids)).get("items", [])}
+    pending = {p.get("video_id") for p in st["props"].values() if p.get("type") == "alb"}
+    notlive, have, pids = [], 0, []
+    for vid, a in arts.items():
+        url = f"{SITE_BASE}/articles/{a['slug']}/"
+        try:
+            live = S.get(url, timeout=30).status_code == 200
+        except Exception:
+            live = False
+        if not live:
+            notlive.append(a["title"])
+            continue
+        sn = items.get(vid)
+        if not sn or url in sn.get("description", ""):
+            have += 1
+            continue
+        if vid in pending:
+            continue
+        line = "📖 Read the full article: " + url
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "alb", "video_id": vid, "title": sn.get("title", ""), "line": line, "url": url, "created": time.time()}
+        pids.append(pid)
+        send(f"📖 \"{sn.get('title', '')}\"\nAdd this as the first line of its description:\n{line}", [[btn("✅ Add to description", pid, "al"), btn("Skip", pid, "cs")]])
+    if len(pids) > 1:
+        pa = new_pid(st)
+        st["props"][pa] = {"type": "ala", "pids": pids, "created": time.time()}
+        send(f"Add the article link to all {len(pids)} videos above?", [[btn(f"✅ Add to all {len(pids)}", pa, "aa")]])
+    msg = []
+    if notlive:
+        msg.append("Not live on the site yet (upload the zip first): " + "; ".join(notlive[:5]))
+    if have:
+        msg.append(f"{have} video(s) already link to their article. ✅")
+    if not pids:
+        send("\n".join(msg) or "Nothing to add right now.")
+    elif msg:
+        send("\n".join(msg))
+
+
 def cmd_articles(st):
     sz = mem().get("site_zip")
     if not sz:
@@ -8258,12 +8572,25 @@ def cmd_articles(st):
         cands.append({"id": v["id"], "title": v["snippet"]["title"], "views": int(v.get("statistics", {}).get("viewCount", 0))})
     cands.sort(key=lambda c: -c["views"])
     cands = cands[:5]
-    if not cands:
+    nxt = []
+    try:
+        for pl in site_playlists(tok)[:6]:
+            for it_ in pl["items"]:
+                if it_["id"] not in done:
+                    if not any(c["id"] == it_["id"] for c in cands + nxt):
+                        nxt.append({"id": it_["id"], "title": it_["title"], "views": 0, "series": pl["title"]})
+                    break
+    except Exception as e:
+        print("next in series:", clean(e)[:100])
+    if not cands and not nxt:
         return send("Every video I can see already has an article. 🎉")
+    cands = cands + nxt[:3]
     pid = new_pid(st)
     st["props"][pid] = {"type": "articles", "cands": cands, "ts": time.time()}
     rows = [[btn(f"✍️ {i + 1}. {c['title'][:44]}", pid, "ar", str(i))] for i, c in enumerate(cands)]
-    send("Your most viewed videos that have no article yet:\n\n" + "\n".join(f"{i + 1}. {c['title']} ({c['views']} views)" for i, c in enumerate(cands)) +
+    rows = [[btn((f"▶️ Next in {c['series'][:18]}: " if c.get("series") else f"✍️ {i + 1}. ") + c["title"][:34], pid, "ar", str(i))] for i, c in enumerate(cands)]
+    rows.append([btn("🗂 Build a series page for each playlist", pid, "ah")])
+    send("Your most viewed videos that have no article yet, then the next film in each playlist:\n\n" + "\n".join(f"{i + 1}. {c['title']} (" + (f"next in the series {c['series']}" if c.get("series") else f"{c['views']} views") + ")" for i, c in enumerate(cands)) +
          "\n\nTap one. I research it, write about 2,000 words, check every claim against sources, and send you the full updated site. Nothing goes public until you upload it.\n"
          "Done so far: " + str(len(done)), rows)
 
@@ -8326,10 +8653,34 @@ def write_article(c, st):
             slug += "-" + vid[:5].lower()
         cat = site_catalog(root)
         others = sorted([x for x in cat if x["slug"] != slug], key=lambda x: x["pub"], reverse=True)
-        page = art_page(art, v, slug, srcs, others)
+        series, pls = None, []
+        try:
+            pls = site_playlists(tok)
+            vs0 = vid_slug_map(root)
+            for pl in pls:
+                ids = [i["id"] for i in pl["items"]]
+                if vid in ids:
+                    near = [x for x in pl["items"] if x["id"] != vid and x["id"] in vs0]
+                    cat_by = {x["slug"]: x for x in cat}
+                    others = [cat_by[vs0[x["id"]]] for x in near if vs0[x["id"]] in cat_by] + others
+                    series = {"title": pl["title"], "slug": pl_slug(pl)}
+                    break
+        except Exception as e:
+            print("site playlists:", clean(e)[:120])
+        page = art_page(art, v, slug, srcs, others, series)
         (root / "articles" / slug).mkdir(parents=True, exist_ok=True)
         (root / "articles" / slug / "index.html").write_text(page, encoding="utf-8")
         n = build_listing(root, site_catalog(root))
+        try:
+            if pls:
+                bu = build_hubs(root, pls, vid_slug_map(root))
+                add_series_nav(root)
+                sm_ = root / "sitemap.xml"
+                s_ = sm_.read_text(encoding="utf-8")
+                today_ = datetime.date.today().isoformat()
+                sm_.write_text(s_.replace("</urlset>", "".join(f"  <url><loc>{SITE_BASE}{u}</loc>\n    <lastmod>{today_}</lastmod></url>\n" for u in ["/playlists/"] + bu if SITE_BASE + u not in s_) + "</urlset>"), encoding="utf-8")
+        except Exception as e:
+            print("hubs:", clean(e)[:120])
         zp = Path(d) / f"kemet-site-{datetime.date.today().strftime('%Y%m%d')}.zip"
         import zipfile
         with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -8347,7 +8698,7 @@ def write_article(c, st):
     if newid:
         mem()["site_zip"] = {"file_id": newid, "name": zp.name, "ts": time.time(), "n": sz.get("n", 0)}
     mem().setdefault("articles", {})[vid] = {"slug": slug, "title": art["title"], "ts": time.time()}
-    msg = f"✅ Article ready: {art['title']}\nAddress after you upload it: {SITE_BASE}/articles/{slug}/\n\n{art['deck']}\n\nSections:\n" + "\n".join("• " + s["h"] for s in art["sections"] if s["h"])
+    msg = f"✅ Article ready: {art['title']}" + (f"\nSeries: {series['title']} (its page is updated too)" if series else "\nNot in any playlist yet, so it stands alone.") + f"\nAddress after you upload it: {SITE_BASE}/articles/{slug}/\n\n{art['deck']}\n\nSections:\n" + "\n".join("• " + s["h"] for s in art["sections"] if s["h"])
     if ran:
         msg += f"\n\n🔎 Fact-check of the finished article: ✅ {solid} claims confirmed" + (f", ⚠️ {softened} softened or corrected" if softened else "")
         if notes:
@@ -8357,7 +8708,7 @@ def write_article(c, st):
     if words < 1500:
         msg += f"\n\n⚠️ It came out shorter than planned ({words} words)."
     msg += "\n\nSources used (shown on the page):\n" + "\n".join(f"• {t[:70]}: {u}" for t, u in srcs[:8])
-    msg += "\n\nAI can be wrong: open the sources for anything surprising. Then /articles again for the next video."
+    msg += "\n\nAI can be wrong: open the sources for anything surprising. After you upload the site, send /articlelinks to add the article link to the video's description (with your tap). Then /articles again for the next one."
     send(msg[:3900])
 
 
@@ -8552,6 +8903,7 @@ def main():
             {"command": "checklast", "description": "Check the video you uploaded on YouTube"},
             {"command": "image", "description": "AI picture + real photo of a subject"},
             {"command": "articles", "description": "Long website articles from my top videos"},
+            {"command": "articlelinks", "description": "Put article links in video descriptions"},
             {"command": "visuals", "description": "Real photos, a mix, or AI images"},
             {"command": "audited", "description": "Kemet Audited: check a claim and make the video"},
             {"command": "scout", "description": "What works on other Egypt channels"},
