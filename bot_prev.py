@@ -9,6 +9,7 @@ import base64
 import calendar
 import datetime
 import hashlib
+import html
 import random
 import urllib.parse
 import json
@@ -40,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.73"
+BOT_VERSION = "v10.76"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2758,6 +2759,8 @@ def on_prop(jid, act, st):
         st["props"].pop(jid, None)
         cfg = fb_cfg()
         return send("✅ Posted to your Facebook Page " + cfg.get("page_name", "") + ".\nhttps://www.facebook.com/" + str(pid_ or cfg.get("page_id", "")))
+    if act == "ar" and kind == "articles":
+        return write_article(prop["cands"][int(st.get("_val", "0"))], st)
     if act == "ls" and kind == "longs":
         return write_long(prop["concepts"][int(st.get("_val", "0"))])
     if act == "ad" and kind == "claims":
@@ -2934,11 +2937,21 @@ Give 5 NEW video ideas that are historically solid and each has a strong first-3
 Prefer patterns that worked for this channel. Return JSON only:
 {{"ideas": [{{"title": "max 70 chars", "hook": "the opening line", "why": "one short line"}}]}}"""
 
+HOOK_RULES = ("HOOK ENGINE (the first 3 seconds decide whether a viewer stays). Structure: 0-2 s THE STOPPER, a surprising question, a visual contradiction or a specific mystery, with no logo, greeting or historical introduction; "
+              "2-5 s THE CURIOSITY GAP, one unexpected true detail that makes the viewer want the explanation; from 5 s THE PAYOFF, evidence and an answer, a new question only if it advances the story. "
+              "Three styles: mystery (why did they do this? best for rituals, tombs, sacred animals, open questions), surprising fact (one precise fact the video can prove; best for writing, maths, technology, daily life), "
+              "visual reveal (open on a striking artefact or reconstruction, then ask what we are looking at and why it mattered). "
+              "Process: privately write FIVE candidate openings, score each 1-5 for clarity, curiosity, visual impact, historical accuracy and payoff, reject any that rests on an invented fact, an unsupported claim or misleading clickbait, then use only the best one. "
+              "The first sentence is under 14 words, names one concrete thing the viewer can picture, and the first picture must show what the narration names. "
+              "Prefer the style that has worked best on this channel if its numbers are given; if the numbers cannot tell the styles apart, vary them. No absolute words the evidence does not allow.")
+
+
 SCRIPT_PROMPT = """Write a 45-60 second YouTube Shorts script for the channel "Kemet | Ancient Egypt".
 Topic: {title}. Opening hook idea: {hook}
 Use web search to check every fact (names, dates, places). Format exactly:
 HOOK (first 3 seconds) / BEAT 1 / BEAT 2 / BEAT 3 / CLOSE (end with a question for comments).
 Under 150 spoken words. Cinematic, mysterious but accurate. English.
+""" + HOOK_RULES + """
 After the script add a line "CHECK:" listing any claim you could not confirm, or "CHECK: none".
 {style}"""
 
@@ -3357,6 +3370,7 @@ UNSUPPORTED = no good evidence for it, but it is not disproven (typical for clai
 CONTRADICTED = solid direct evidence shows it is wrong.
 For "first", "oldest" or "earliest" claims write "the earliest known" or "the earliest documented", and never argue "no earlier record exists, so the claim is well-founded": missing records are not proof.
 Break the claim into its parts (place, period, actor, mechanism) and judge each part. Keep sites and periods apart: a similar thing at another site or in a later era does not prove it for this one. Separate what a source directly shows (artifact, inscription, excavation) from what scholars only infer. Silence is not proof: write "I found no published evidence for X in the sources reviewed", never "X never happened", unless the evidence directly rules it out. Treat "ritual", "engineering", "political show" and "fraud" as different readings; never claim intent without direct evidence.
+""" + HOOK_RULES + """
 Never use CONTRADICTED for a claim about why or how something happened unless the evidence directly rules it out. Never write the words 'debunked', 'disproven' or 'officially' in the script unless the verdict is CONTRADICTED. In the script, say what the evidence shows and what it does not, in plain calm words.
 Return JSON only: {{"verdict": "SUPPORTED" or "MOSTLY SUPPORTED" or "DISPUTED" or "UNSUPPORTED" or "CONTRADICTED",
  "score": integer 0-100 (how strongly the evidence supports the claim),
@@ -6420,10 +6434,45 @@ def cmd_hook(st):
     hooks = [h for h in out.get("hooks", []) if isinstance(h, dict) and h.get("line")][:3]
     if not hooks:
         return send("I could not write hooks right now. Try again later.")
+    perf = ""
+    try:
+        perf = hook_performance(tok)
+    except Exception as e:
+        print("hook perf:", clean(e)[:100])
     send("🎣 Opening lines for your next Short (say them in your own voice)\n\n"
          + (f"What your best videos share: {out['pattern']}\n\n" if out.get("pattern") else "")
          + "\n\n".join(f"{n + 1}. {h['line']}\n   Topic: {h.get('topic', '')}" for n, h in enumerate(hooks))
+         + ("\n\n" + perf if perf else "")
          + "\n\nTap /idea if you want a full fact-checked script for one of them. For YOUR exact drop-offs, use /retention.")
+
+
+def hook_performance(tok):
+    """Which opening style held viewers on YouTube (average % watched) for the Audited videos the bot made. Matches each logged video to the channel by title."""
+    import difflib
+    log = [h for h in (mem().get("hook_log") or []) if time.time() - h.get("ts", 0) > 5 * 86400]
+    if not log:
+        return ""
+    vids, _ = my_videos(tok, 50)
+    by = {}
+    for h in log:
+        best, sc = None, 0
+        for v in vids:
+            r_ = max(difflib.SequenceMatcher(None, h["title"].lower(), v["snippet"]["title"].lower()).ratio(),
+                     difflib.SequenceMatcher(None, h["claim"].lower()[:60], v["snippet"]["title"].lower()).ratio())
+            if r_ > sc:
+                best, sc = v, r_
+        if not best or sc < 0.6:
+            continue
+        pct, views = an_query(tok, "averageViewPercentage,views", 90, "video==" + best["id"])
+        if views:
+            by.setdefault(h["style"], []).append(pct)
+    if not by:
+        return ""
+    lines = [f"• {k}: {sum(v) / len(v):.0f}% watched on average, {len(v)} video(s)" for k, v in sorted(by.items())]
+    enough = all(len(v) >= 3 for v in by.values()) and len(by) > 1
+    return ("📊 Opening styles on YouTube (videos the bot made):\n" + "\n".join(lines) +
+            ("\nStill too few videos to name a winner, so I keep varying the styles." if not enough else "\nEnough videos to lean on the best style; I keep testing the others now and then.") +
+            "\nA style that gets views but a low % watched needs a better story structure, not a louder opening.")
 
 
 def goal_line(tok, goal):
@@ -6692,7 +6741,7 @@ Choose the action. Actions: idea (wants video ideas), script (gave a topic to wr
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes), sources (add sources to the descriptions of older videos), patterns (what the owner's own numbers show about titles and formats), brief (a summary of everything that needs him),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"), audited (same, and also make the finished video; put the claim in "topic"),
-funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), visuals (choose real photos only, a mix, or AI images only for videos; put real, mix or ai in "topic"), image (make an AI picture plus a real photo of a subject, for a thumbnail or post; put the subject in "topic"), checklast (check and fix the newest video, for example one he uploaded straight to YouTube because it was too big for Telegram), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), pins (check and fix the pinned comment of every video), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), fullrefresh (refresh everything the bot knows with the newest data in one go), script (write a fact-checked Shorts script on a topic in the owner's style; topic is the subject), affiliate (find real affiliate programs and sponsors that fit the channel), translate (translated subtitles in Spanish, Portuguese, Hindi), shortcuts (the best moments of a long video to cut into Shorts), playlists (build themed playlists), watch (check the channel for problems), learned (everything the bot has learned from your numbers and viewers' comments, and pause/forget it), lessons (short list of past lessons), health (is everything working),
+articles (write long website articles from the most viewed videos), funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), visuals (choose real photos only, a mix, or AI images only for videos; put real, mix or ai in "topic"), image (make an AI picture plus a real photo of a subject, for a thumbnail or post; put the subject in "topic"), checklast (check and fix the newest video, for example one he uploaded straight to YouTube because it was too big for Telegram), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), pins (check and fix the pinned comment of every video), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), fullrefresh (refresh everything the bot knows with the newest data in one go), script (write a fact-checked Shorts script on a topic in the owner's style; topic is the subject), affiliate (find real affiliate programs and sponsors that fit the channel), translate (translated subtitles in Spanish, Portuguese, Hindi), shortcuts (the best moments of a long video to cut into Shorts), playlists (build themed playlists), watch (check the channel for problems), learned (everything the bot has learned from your numbers and viewers' comments, and pause/forget it), lessons (short list of past lessons), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -6780,6 +6829,8 @@ def run_action(action, topic, st, text=""):
         return cmd_visuals(topic or "")
     if action == "image":
         return cmd_image(st, topic or text)
+    if action == "articles":
+        return cmd_articles(st)
     if action == "checklast":
         return cmd_checkvideo(st, None)
     if action in ("community", "starter", "pins", "sublines", "hook", "demand", "refresh", "calendar", "subs", "praise", "voice", "poll", "goal"):
@@ -6946,6 +6997,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/recheck - full checkup of all videos\n"
         "/checklast - check my YouTube upload (or paste link)\n"
         "/image <subject> - AI picture + real photo\n"
+        "/articles - long website articles from my top videos\n"
         "/visuals - real, mix or AI pictures\n"
         "/schedule - pick a publish time (/autoschedule on|off, /besthour 17)\n"
         "/trends - what is hot now in the niche (tags, topics)\n"
@@ -7041,6 +7093,8 @@ def on_message(msg, st):
     doc = msg.get("document") or {}
     if str(doc.get("file_name", "")).lower().endswith(".py"):
         return cmd_update(msg)
+    if str(doc.get("file_name", "")).lower().endswith(".zip"):
+        return store_site_zip(msg)
     if msg.get("video") or str(doc.get("mime_type", "")).startswith("video/") or \
             str(doc.get("file_name", "")).lower().endswith((".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".3gp")):
         return start_job(msg, st)       # a video sent "as a file" often has an odd mime type, so the name counts too
@@ -7224,6 +7278,8 @@ def on_message(msg, st):
             send("Nothing waiting. Send me a video any time.")
     elif (text.startswith("/check") and YT_LINK.search(raw)) or (YT_LINK.search(raw) and len(YT_LINK.sub("", raw).strip()) < 30):
         cmd_checkvideo(st, YT_LINK.search(raw).group(1))
+    elif text.startswith("/articles"):
+        cmd_articles(st)
     elif text.startswith("/visuals"):
         cmd_visuals(raw.split(None, 1)[1] if len(raw.split(None, 1)) > 1 else "")
     elif text.startswith("/image"):
@@ -7254,7 +7310,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -7522,6 +7578,7 @@ EVIDENCE AGAINST: {con}
 NOT CONFIRMED: {unsure}
 DRAFT SCRIPT: {script}
 ACCURACY RULES: never use absolute words (entirely, always, never, consistently, completely, all, every, only, nothing, proved) unless the audit above says exactly that. Prefer "most", "mainly", "usually", "the evidence suggests". Do not add any fact that is not in the audit.
+""" + HOOK_RULES + """
 SERIES RULES: the first spoken words (first 1-2 seconds) must name the object, site or question, with no intro or logo talk. Give the first concrete piece of evidence early, by the start of part 2. Say the period and place whenever you contrast another site or era. Describe the number as the "editorial evidence score", never as a probability. Use only the words supported, mixed, unsupported or unknown for the verdict, matching the verdict above. Keep ritual, engineering, political show and fraud apart; never state intent without direct evidence. Close: one specific question people can answer, then a short follow invitation. Never promise virality.
 {pov}
 Return JSON only:
@@ -7530,7 +7587,8 @@ Return JSON only:
  "image_prompts": ["exactly 5 different scene descriptions for AI illustrations that match the story in order, each one sentence, concrete (place, object, light), calm documentary look, no text in the picture. These are illustrations only: never draw hieroglyph or inscription text, never draw a specific named artifact, named person or excavation as if it were real documentation, and keep one site and one period per picture"],
  "image_queries": ["exactly 5 different Wikimedia Commons search phrases for real photos or museum objects matching the story (backup if a picture cannot be made), concrete, no people names unless historical"],
  "titles": ["3 title options, each under 70 characters, honest to the verdict"],
- "pinned_comment": "one specific question for a pinned comment"}}"""
+ "pinned_comment": "one specific question for a pinned comment",
+ "hook_style": "mystery or fact or visual: the style of the opening you used in part 1"}}"""
 
 POV_RULE = ("FORMAT: POV then proof. Part 1 puts the viewer inside the scene at human eye height (what they would see and hear at this site and period, "
             "clearly an illustration, never a fake eyewitness, never testimony from a named person), then part 2 breaks the illusion and shows the real evidence. "
@@ -7648,6 +7706,26 @@ AI_IMG_LOG = []          # why a picture could not be made (shown to the owner i
 POLLINATIONS = "https://image.pollinations.ai/prompt/"
 
 
+def av_img_post(m, body, label):
+    """One Gemini image call. A per-minute 429 waits the time Google asks and tries again (up to 3 times); a daily-quota 429 does not wait. Returns the response or None."""
+    for attempt in range(3):
+        r = S.post(f"{GBASE}/v1beta/models/{m}:generateContent", headers={"x-goog-api-key": GKEY}, json=body, timeout=180)
+        if r.status_code == 200:
+            return r
+        txt = r.text if isinstance(getattr(r, "text", None), str) else ""
+        try:
+            why = (r.json().get("error") or {}).get("message", "")[:90]
+        except Exception:
+            why = ""
+        wait = tts_wait_seconds(txt)
+        if r.status_code == 429 and wait and "PerDay" not in txt and attempt < 2:
+            time.sleep(wait)
+            continue
+        AI_IMG_LOG.append(f"{label} {m}: HTTP {r.status_code} {why}".strip() + (" (daily quota used up)" if "PerDay" in txt else ""))
+        return None
+    return None
+
+
 def av_ai_image(prompt, dest):
     """One AI picture (portrait, no lettering). Tries Gemini first, then the free Pollinations (FLUX) service.
     Returns "Gemini" or "Pollinations" when saved, else False. The reasons for any failure go to AI_IMG_LOG."""
@@ -7656,14 +7734,8 @@ def av_ai_image(prompt, dest):
     body = {"contents": [{"parts": [{"text": full}]}], "generationConfig": {"responseModalities": ["IMAGE"]}}
     for m in AV_IMG_MODELS:
         try:
-            r = S.post(f"{GBASE}/v1beta/models/{m}:generateContent", headers={"x-goog-api-key": GKEY}, json=body, timeout=180)
-            if r.status_code != 200:
-                why = ""
-                try:
-                    why = (r.json().get("error") or {}).get("message", "")[:90]
-                except Exception:
-                    pass
-                AI_IMG_LOG.append(f"Gemini {m}: HTTP {r.status_code} {why}".strip())
+            r = av_img_post(m, body, "Gemini")
+            if r is None:
                 continue
             for p in r.json()["candidates"][0]["content"]["parts"]:
                 d = (p.get("inlineData") or {}).get("data")
@@ -7703,9 +7775,8 @@ def av_ai_edit(src, dest):
         "generationConfig": {"responseModalities": ["IMAGE"]}}
     for m in AV_IMG_MODELS:
         try:
-            r = S.post(f"{GBASE}/v1beta/models/{m}:generateContent", headers={"x-goog-api-key": GKEY}, json=body, timeout=180)
-            if r.status_code != 200:
-                AI_IMG_LOG.append(f"Gemini photo edit {m}: HTTP {r.status_code}")
+            r = av_img_post(m, body, "Gemini photo edit")
+            if r is None:
                 continue
             for p in r.json()["candidates"][0]["content"]["parts"]:
                 d = (p.get("inlineData") or {}).get("data")
@@ -7891,6 +7962,405 @@ def send_factcheck_notes(prop, a, segs, srcs):
     shutil.rmtree(p.parent, ignore_errors=True)
 
 
+# ---------------- website articles (kemet-stories.pages.dev) ----------------
+SITE_BASE = os.getenv("SITE_BASE", "https://kemet-stories.pages.dev")
+SEED_CARDS = {
+    "egyptian-gods-and-goddesses": ("gods", "☼", "DIVINE POWERS", "Gods &amp;<br/><em>goddesses</em>", "Sun, storm, death, rebirth — meet the forces that made sense of the universe.", "Enter the pantheon"),
+    "pharaohs-living-gods": ("rulers", "𓋹", "POWER &amp; LEGACY", "Pharaohs<br/><em>&amp; living gods</em>", "Ambition, diplomacy, ritual, and the people who carried a kingdom forward.", "Meet the rulers"),
+    "egyptian-tombs-and-afterlife": ("mysteries", "𓂀", "SECRETS IN STONE", "Tombs &amp;<br/><em>the afterlife</em>", "Sacred spaces, royal tombs, and the evidence hiding in plain sight.", "Look closer"),
+    "life-along-the-nile": ("nile", "≈", "LIFE ALONG THE RIVER", "Life along<br/><em>the Nile</em>", "What people ate, wore, built, believed, and celebrated every day.", "Walk the river"),
+    "ancient-egyptian-architecture": ("architecture", "▦", "SACRED &amp; CIVIC SPACE", "Building<br/><em>for eternity</em>", "Mastabas, pyramids, temples, columns, and the people who made stone speak.", "Read the built world"),
+}
+ART_LOOKS = [("gods", "☼"), ("rulers", "𓋹"), ("mysteries", "𓂀"), ("nile", "≈"), ("architecture", "▦")]
+
+ARTICLE_PROMPT = """Write a long, in-depth reading article for the website of the history channel "Kemet | Ancient Egypt". It grows from this YouTube video.
+VIDEO TITLE: {title}
+VIDEO DESCRIPTION: {desc}
+WHAT THE VIDEO SAYS: {about}
+Write for curious adults who may know nothing about Egypt. Calm, vivid, precise, evidence-first English. 1,700 to 2,300 words. 7 to 9 sections.
+Structure: an opening that starts on the most interesting concrete thing (an object, a place, a question), the evidence, what scholars directly know versus what they infer, what is still debated, why it matters, and what to look at next.
+RULES: Use only facts from the FACT SHEET below. Name the type of source in the text ("according to the British Museum", "excavation reports from Giza") but never invent a source, quote, date or number.
+Never use absolute words (always, never, entirely, proved, all, nothing) unless the sources say exactly that; prefer "most", "usually", "the evidence suggests". Keep sites and periods apart. Do not copy sentences from any source.
+Say plainly when something is unknown or disputed. No hype, no "you will not believe", no clickbait.
+FORMAT (exactly, one item per line, plain text, no markdown, no bullets):
+TITLE: article title, 45 to 65 characters, true and curious
+DECK: one or two sentences (max 260 characters)
+DESCRIPTION: search description, 120 to 155 characters
+KEYWORDS: 6 to 8 comma separated search keywords
+SECTION: a section heading written as a sentence or a question
+Then 2 to 4 paragraphs of plain text, each on its own line.
+Use at most 2 lines starting with "CALLOUT:" in the whole article, for the one thing the reader must not misread.
+Repeat SECTION: for each section. Do not write a conclusion called "Conclusion"; end with a section on why the evidence still matters."""
+
+ABOUT_VIDEO_PROMPT = """Watch this YouTube video of the channel "Kemet | Ancient Egypt". Return JSON only:
+{"narration": "what the narrator says, as a faithful 120-200 word summary", "claims": ["each factual claim the video makes, max 8, one plain sentence each"]}"""
+
+
+def iso_seconds(d):
+    m = re.fullmatch(r"P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", d or "")
+    if not m:
+        return 0
+    dd, h, mi, s = (int(x or 0) for x in m.groups())
+    return dd * 86400 + h * 3600 + mi * 60 + s
+
+
+def slugify(t):
+    s = re.sub(r"[^a-z0-9]+", "-", re.sub(r"[’'`]", "", str(t).lower())).strip("-")
+    return s[:70].strip("-") or "article"
+
+
+def parse_article(text):
+    art = {"title": "", "deck": "", "desc": "", "kw": [], "sections": []}
+    cur = None
+    for line in str(text).splitlines():
+        t = line.strip()
+        if not t:
+            continue
+        m = re.match(r"^(TITLE|DECK|DESCRIPTION|KEYWORDS|SECTION|CALLOUT)\s*:\s*(.*)$", t)
+        if m:
+            k, v = m.group(1), m.group(2).strip()
+            if k == "TITLE":
+                art["title"] = v
+            elif k == "DECK":
+                art["deck"] = v
+            elif k == "DESCRIPTION":
+                art["desc"] = v
+            elif k == "KEYWORDS":
+                art["kw"] = [x.strip() for x in v.split(",") if x.strip()][:10]
+            elif k == "SECTION":
+                cur = {"h": v, "items": []}
+                art["sections"].append(cur)
+            elif k == "CALLOUT" and cur is not None and v:
+                cur["items"].append(("c", v))
+            continue
+        if cur is None:
+            cur = {"h": "", "items": []}
+            art["sections"].append(cur)
+        cur["items"].append(("p", re.sub(r"^[-•*]\s+", "", t)))
+    return art
+
+
+def article_words(art):
+    return sum(len(x[1].split()) for s in art["sections"] for x in s["items"])
+
+
+def article_body_text(art):
+    out = []
+    for s in art["sections"]:
+        out.append("SECTION: " + s["h"])
+        out += [("CALLOUT: " if k == "c" else "") + v for k, v in s["items"]]
+    return "\n".join(out)
+
+
+def art_fact_check(art, title):
+    """Check the finished article against sources in two halves (the checker reads about 9,000 characters at a time) and soften what is not solid."""
+    secs = art["sections"]
+    half = max(1, len(secs) // 2)
+    sources, solid, softened, notes, ran = [], 0, 0, [], False
+    for part in (secs[:half], secs[half:]):
+        if not part:
+            continue
+        txt = article_body_text({"sections": part})
+        try:
+            vt, s3 = gemini_text(VERIFY_PROMPT.format(script=txt[:9000]), search=True, topic=title)
+        except Exception as e:
+            print("article verify:", clean(e)[:100])
+            continue
+        sources += s3
+        vo = parse_obj(vt)
+        res = [r for r in vo.get("results", []) if isinstance(r, dict) and r.get("claim")]
+        if not res or "NOT verified" in vt:
+            continue
+        ran = True
+        solid += sum(1 for r in res if str(r.get("status", "")).lower() == "solid")
+        bad = [r for r in res if str(r.get("status", "")).lower() != "solid"]
+        fixed = str(vo.get("corrected_script") or "").strip()
+        if bad and len(fixed) > 0.6 * len(txt):
+            new = parse_article(plain(fixed))["sections"]
+            if len(new) >= max(1, len(part) - 1):
+                part[:] = new
+        softened += len(bad)
+        notes += [f"{r['claim']}: {r.get('note', '')}" for r in bad[:3]]
+    art["sections"] = [s for s in secs[:half] + secs[half:] if s["items"]]
+    return sources, solid, softened, notes, ran
+
+
+def esc(s):
+    return html.escape(str(s), quote=True)
+
+
+def art_page(art, v, slug, sources, others):
+    """One full article page in the site's design. v = video facts (id, title, published, secs, views)."""
+    url = f"/articles/{slug}/"
+    full = SITE_BASE + url
+    title = art["title"]
+    words = article_words(art)
+    mins = max(3, round(words / 200))
+    thumb = f"https://i.ytimg.com/vi/{v['id']}/maxresdefault.jpg"
+    short = v["secs"] and v["secs"] <= 180
+    pub = (v.get("published") or "")[:10] or datetime.date.today().isoformat()
+    today = datetime.date.today().isoformat()
+    h1 = esc(title)
+    parts = title.split(" ")
+    if len(parts) > 3:
+        cut = len(parts) // 2
+        h1 = esc(" ".join(parts[:cut])) + "<br/><em>" + esc(" ".join(parts[cut:])) + "</em>"
+    body = []
+    for i, s in enumerate(art["sections"]):
+        if s["h"]:
+            body.append(f"<h2>{esc(s['h'])}</h2>")
+        for kind, txt in s["items"]:
+            body.append(f'<div class="article-callout"><p><strong>{esc(txt)}</strong></p></div>' if kind == "c" else f"<p>{esc(txt)}</p>")
+        if i == 1:
+            body.append(f'<figure class="video-embed" data-yt="{esc(v["id"])}" data-ratio="{"short" if short else "wide"}"><a class="video-embed-link" href="https://www.youtube.com/watch?v={esc(v["id"])}" rel="noopener" target="_blank" aria-label="Play the Kemet video: {esc(v["title"])}"><img loading="lazy" decoding="async" width="480" height="360" src="https://i.ytimg.com/vi/{esc(v["id"])}/hqdefault.jpg" alt="Video thumbnail: {esc(v["title"])}"/><span class="video-embed-play" aria-hidden="true">▶</span></a><figcaption>{esc(v["title"])} · the Kemet film behind this article · plays here, no cookies until you press play</figcaption></figure>')
+    rel = "".join(f'<a href="/articles/{esc(o["slug"])}/">Continue: {esc(o["title"])} →</a><br/>' for o in others[:2])
+    src = "".join(f'<a href="{esc(u)}" rel="noopener" target="_blank">{esc(t)[:90]} ↗</a>' for t, u in sources[:8])
+    src += f'<a href="https://www.youtube.com/watch?v={esc(v["id"])}" rel="noopener" target="_blank">Kemet · {esc(v["title"])[:80]} ↗</a>'
+    ld = {"@context": "https://schema.org", "@graph": [
+        {"@type": "Article", "@id": full + "#article", "headline": title, "description": art["desc"], "inLanguage": "en", "datePublished": pub, "dateModified": today,
+         "mainEntityOfPage": {"@id": full + "#webpage"}, "author": {"@id": SITE_BASE + "/#organization"}, "publisher": {"@id": SITE_BASE + "/#organization"},
+         "keywords": ", ".join(art["kw"]), "image": {"@type": "ImageObject", "url": thumb, "width": 1280, "height": 720},
+         "video": {"@id": full + "#video"}, "wordCount": words, "isBasedOn": [u for _, u in sources[:8]]},
+        {"@type": "VideoObject", "@id": full + "#video", "name": v["title"], "description": (v.get("desc") or art["desc"])[:300], "thumbnailUrl": thumb,
+         "uploadDate": v.get("published") or pub, "duration": v.get("iso") or "", "embedUrl": f"https://www.youtube.com/embed/{v['id']}", "contentUrl": f"https://www.youtube.com/watch?v={v['id']}"},
+        {"@type": "WebPage", "@id": full + "#webpage", "url": full, "name": title, "isPartOf": {"@id": SITE_BASE + "/#website"}, "inLanguage": "en"},
+        {"@type": "Organization", "@id": SITE_BASE + "/#organization", "name": "Kemet", "url": SITE_BASE + "/"},
+        {"@type": "WebSite", "@id": SITE_BASE + "/#website", "url": SITE_BASE + "/", "name": "Kemet — Stories from the Black Land", "publisher": {"@id": SITE_BASE + "/#organization"}, "inLanguage": "en"},
+        {"@type": "BreadcrumbList", "@id": full + "#breadcrumb", "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "Kemet", "item": SITE_BASE + "/"},
+            {"@type": "ListItem", "position": 2, "name": "The Archive", "item": SITE_BASE + "/articles/"},
+            {"@type": "ListItem", "position": 3, "name": title, "item": full}]}]}
+    ld = [e for e in ld["@graph"]]
+    ld = {"@context": "https://schema.org", "@graph": [e for e in ld if not (e["@type"] == "VideoObject" and not e.get("duration"))]}
+    label = esc((art["kw"] or ["History"])[0].title())
+    return f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/><meta content="width=device-width, initial-scale=1" name="viewport"/>
+<meta content="#11120f" name="theme-color"/>
+<title>{esc(title)} | Kemet</title>
+<meta content="{esc(art["desc"])}" name="description"/>
+<meta content="{esc(", ".join(art["kw"]))}" name="keywords"/><meta content="Kemet" name="author"/>
+<meta content="article" property="og:type"/><meta content="{esc(title)}" property="og:title"/><meta content="{esc(art["desc"])}" property="og:description"/><meta content="{esc(full)}" property="og:url"/><meta content="Kemet — Stories from the Black Land" property="og:site_name"/><meta content="{esc(thumb)}" property="og:image"/><meta content="{esc(title)}" property="og:image:alt"/><meta content="en_US" property="og:locale"/>
+<meta content="{pub}" property="article:published_time"/><meta content="{today}" property="article:modified_time"/>
+<meta content="summary_large_image" name="twitter:card"/><meta content="{esc(title)}" name="twitter:title"/><meta content="{esc(art["desc"])}" name="twitter:description"/><meta content="{esc(thumb)}" name="twitter:image"/>
+<link href="{esc(full)}" rel="canonical"/><link href="/brand-mark.svg" rel="icon" type="image/svg+xml"/><link href="https://fonts.googleapis.com" rel="preconnect"/><link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/><link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&amp;family=DM+Sans:wght@400;500;600;700&amp;family=Playfair+Display:ital,wght@0,500;0,600;1,500;1,600&amp;display=swap" rel="stylesheet"/><link href="/styles.css" rel="stylesheet"/>
+<script type="application/ld+json">{json.dumps(ld, indent=1, ensure_ascii=False)}</script>
+</head>
+<body class="article-page">
+<a class="skip-link" href="#main-content">Skip to content</a>
+<header class="site-header"><a aria-label="Kemet home" class="brand" href="/"><span class="brand-icon"><img alt="" src="/brand-mark.svg"/></span><span class="brand-lockup"><strong>KEMET</strong><small>STORIES FROM THE BLACK LAND</small></span></a><button aria-controls="main-nav" aria-expanded="false" aria-label="Open navigation" class="menu-toggle" id="menu-toggle"><span></span><span></span></button><nav aria-label="Main navigation" class="main-nav" id="main-nav"><a href="/#origin">The origin</a><a href="/articles/">The archive</a><a href="/#films">The films</a><a href="/about/">The approach</a><a class="nav-cta" href="https://www.youtube.com/watch?v={esc(v["id"])}" rel="noopener" target="_blank">Watch the film ↗</a></nav></header>
+<main id="main-content">
+<header class="article-hero"><div class="section-shell"><div class="article-meta"><span>Kemet / {label}</span><span>Reading note · {mins} min</span></div><h1>{h1}</h1><p class="article-deck">{esc(art["deck"])}</p></div></header>
+<div class="section-shell article-layout"><article class="article-body">
+{chr(10).join(body)}
+<a class="button button-primary article-video" href="https://www.youtube.com/watch?v={esc(v["id"])}" rel="noopener" target="_blank">Watch the Kemet film <span aria-hidden="true">↗</span></a>
+<div class="article-related">{rel}<a href="/about/">How Kemet checks the past →</a></div>
+<a class="article-back" href="/articles/">← Back to the archive</a>
+</article><aside class="article-sources"><h2>Sources &amp; further reading</h2>{src}</aside></div>
+</main>
+<script src="/script.js"></script>
+</body>
+</html>
+'''
+
+
+def site_catalog(root):
+    """Every article already in the site folder: slug, title, description, label."""
+    cat = []
+    for p in sorted((root / "articles").glob("*/index.html")):
+        s = p.read_text(encoding="utf-8")
+        t = re.search(r"<title>(.*?)</title>", s)
+        d = re.search(r'<meta content="([^"]*)" name="description"', s)
+        lab = re.search(r'article-meta"><span>Kemet / ([^<]*)</span>', s)
+        pub = re.search(r'<meta content="([^"]*)" property="article:published_time"', s)
+        title = html.unescape(re.sub(r"\s*[|—-]\s*Kemet\s*$", "", t.group(1))) if t else p.parent.name
+        cat.append({"slug": p.parent.name, "title": title, "desc": html.unescape(d.group(1)) if d else "", "label": html.unescape(lab.group(1)) if lab else "History",
+                    "pub": pub.group(1) if pub else ""})
+    return cat
+
+
+def build_listing(root, cat):
+    """Regenerate the archive page cards and the sitemap from every article found in the site folder."""
+    cards, seeded, extra = [], [c for c in cat if c["slug"] in SEED_CARDS], [c for c in cat if c["slug"] not in SEED_CARDS]
+    order = seeded + sorted(extra, key=lambda c: c["pub"], reverse=True)
+    for i, c in enumerate(order):
+        if c["slug"] in SEED_CARDS:
+            cls, glyph, label, h3, blurb, link = SEED_CARDS[c["slug"]]
+        else:
+            cls, glyph = ART_LOOKS[i % len(ART_LOOKS)]
+            label, h3, blurb, link = esc(c["label"]).upper(), esc(c["title"]), esc(c["desc"][:120]), "Read the article"
+        cards.append(f'<a class="archive-card archive-card--{cls} reveal" href="/articles/{c["slug"]}/"><span class="card-top"><span>{i + 1:02d}</span><span aria-hidden="true" class="card-arrow">↗</span></span>'
+                     f'<span aria-hidden="true" class="card-glyph">{glyph}</span><div class="card-bottom"><span class="card-label">{label}</span><h3>{h3}</h3><p>{blurb}</p><span class="card-link">{link} <span aria-hidden="true">→</span></span></div></a>')
+    lp = root / "articles" / "index.html"
+    if lp.exists():
+        s = lp.read_text(encoding="utf-8")
+        s2 = re.sub(r'(<div class="archive-grid">).*?(</div></section>)', lambda m: m.group(1) + "".join(cards) + m.group(2), s, count=1, flags=re.S)
+        s2 = re.sub(r"<span>\d+ articles</span>", f"<span>{len(order)} articles</span>", s2, count=1)
+        lp.write_text(s2, encoding="utf-8")
+    today = datetime.date.today().isoformat()
+    urls = ["/", "/about/", "/articles/"] + [f"/articles/{c['slug']}/" for c in order]
+    sm = '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' + "".join(
+        f"  <url><loc>{SITE_BASE}{u}</loc>\n    <lastmod>{today}</lastmod></url>\n" for u in urls) + "</urlset>\n"
+    (root / "sitemap.xml").write_text(sm, encoding="utf-8")
+    return len(order)
+
+
+def site_zip_from(file_id, dest_dir):
+    """Download the stored site zip and unpack it; the folder that holds index.html is returned."""
+    import zipfile
+    z = Path(dest_dir) / "site.zip"
+    tg_download(file_id, z)
+    with zipfile.ZipFile(z) as zf:
+        zf.extractall(Path(dest_dir) / "site")
+    base = Path(dest_dir) / "site"
+    for p in [base] + [d for d in base.iterdir() if d.is_dir()]:
+        if (p / "index.html").exists() and (p / "styles.css").exists():
+            return p
+    raise RuntimeError("the stored site zip has no index.html and styles.css at its top level")
+
+
+def store_site_zip(msg):
+    """The owner sends his site zip once; its Telegram file id is kept so each new article can be added to the full site."""
+    import zipfile
+    doc = msg.get("document") or {}
+    if int(doc.get("file_size") or 0) > 15 * 1024 * 1024:
+        return send("That zip is over 15 MB. A Kemet site zip should be well under that.")
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "s.zip"
+        tg_download(doc["file_id"], p)
+        try:
+            with zipfile.ZipFile(p) as zf:
+                names = zf.namelist()
+        except Exception:
+            return send("I could not open that zip file.")
+    tops = {n.split("/")[0] for n in names}
+    root_ok = "index.html" in names or any(n.endswith("/index.html") and n.count("/") == 1 and "articles" not in n for n in names)
+    if not root_ok or not any(n.endswith("styles.css") for n in names):
+        return send("That zip does not look like your Kemet site (I need index.html and styles.css). It was not saved.")
+    mem()["site_zip"] = {"file_id": doc["file_id"], "name": doc.get("file_name", "site.zip"), "ts": time.time(), "n": len(names)}
+    send("✅ Saved your site zip (" + str(len(names)) + " files). Now /articles writes a long article for your most viewed videos and sends you the updated full site to upload to Cloudflare.")
+
+
+def cmd_articles(st):
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("First send me your current site as a .zip file (the kemet-site-v2.zip I made you, or the newest one) as a normal file attachment in this chat. "
+                    "I keep it, add each new article to it, and send you back the full updated site. Then send /articles again.")
+    send("Looking at your most viewed videos...")
+    tok = yt_token()
+    vids, _ = my_videos(tok, 50)
+    done = (mem().get("articles") or {})
+    cands = []
+    for v in vids:
+        if v["id"] in done:
+            continue
+        cands.append({"id": v["id"], "title": v["snippet"]["title"], "views": int(v.get("statistics", {}).get("viewCount", 0))})
+    cands.sort(key=lambda c: -c["views"])
+    cands = cands[:5]
+    if not cands:
+        return send("Every video I can see already has an article. 🎉")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "articles", "cands": cands, "ts": time.time()}
+    rows = [[btn(f"✍️ {i + 1}. {c['title'][:44]}", pid, "ar", str(i))] for i, c in enumerate(cands)]
+    send("Your most viewed videos that have no article yet:\n\n" + "\n".join(f"{i + 1}. {c['title']} ({c['views']} views)" for i, c in enumerate(cands)) +
+         "\n\nTap one. I research it, write about 2,000 words, check every claim against sources, and send you the full updated site. Nothing goes public until you upload it.\n"
+         "Done so far: " + str(len(done)), rows)
+
+
+def write_article(c, st):
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("I do not have your site zip yet. Send it as a file first.")
+    vid = c["id"]
+    send("✍️ Writing the article for: " + c["title"] + "\nResearch, writing and a claim-by-claim fact-check take about 3 to 6 minutes.")
+    tok = yt_token()
+    it = (yt_get("videos", tok, part="snippet,statistics,contentDetails", id=vid).get("items") or [None])[0]
+    if not it:
+        return send("I could not read that video on YouTube.")
+    sn = it["snippet"]
+    v = {"id": vid, "title": sn["title"], "desc": sn.get("description", ""), "published": sn.get("publishedAt", ""),
+         "iso": it["contentDetails"].get("duration", ""), "secs": iso_seconds(it["contentDetails"].get("duration", ""))}
+    about, claims = "", []
+    try:
+        j = gemini([{"file_data": {"file_uri": f"https://www.youtube.com/watch?v={vid}"}}, {"text": ABOUT_VIDEO_PROMPT}])
+        about = str(j.get("narration", ""))[:1500]
+        claims = [str(x) for x in (j.get("claims") or [])][:8]
+    except Exception as e:
+        print("watch video:", clean(e)[:120])
+    if not about:
+        about = "(I could not watch the video. Use the title and description only.)"
+    sources, unverified = [], False
+    try:
+        facts, s1 = gemini_text(RESEARCH_PROMPT.format(title=v["title"]), search=True, cache=True, topic=v["title"])
+        sources += s1
+        if "NOT verified" in facts:
+            facts, unverified = "", True
+    except Exception as e:
+        print("research:", clean(e)[:120])
+        facts, unverified = "", True
+    prompt = ARTICLE_PROMPT.format(title=v["title"], desc=v["desc"][:700], about=about + (" Claims: " + "; ".join(claims) if claims else ""))
+    if facts:
+        prompt += "\n\nFACT SHEET (rely on it; CONFIRMED facts as plain statements; SINGLE SOURCE or DISPUTED ones with 'according to' or 'most likely'):\n" + facts[:7000]
+    art = None
+    for attempt in range(2):
+        text, s2 = gemini_text(prompt + ("\n\nYour last answer was too short or badly formatted. Follow the FORMAT exactly and reach at least 1,700 words." if attempt else ""), search=True, topic=v["title"])
+        sources += s2
+        if "NOT verified" in text:
+            unverified = True
+        cand = parse_article(text)
+        if cand["title"] and len(cand["sections"]) >= 5 and article_words(cand) >= 1100:
+            art = cand
+            break
+        art = art or cand
+    if not art or not art["sections"]:
+        return send("The article did not come out in a usable form. Tap it again in a minute.")
+    s3, solid, softened, notes, ran = art_fact_check(art, v["title"])
+    sources += s3
+    srcs = dedupe_sources(sources, 10)
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        slug = slugify(art["title"] or v["title"])
+        taken = {x["slug"] for x in site_catalog(root)}
+        if slug in taken:
+            slug += "-" + vid[:5].lower()
+        cat = site_catalog(root)
+        others = sorted([x for x in cat if x["slug"] != slug], key=lambda x: x["pub"], reverse=True)
+        page = art_page(art, v, slug, srcs, others)
+        (root / "articles" / slug).mkdir(parents=True, exist_ok=True)
+        (root / "articles" / slug / "index.html").write_text(page, encoding="utf-8")
+        n = build_listing(root, site_catalog(root))
+        zp = Path(d) / f"kemet-site-{datetime.date.today().strftime('%Y%m%d')}.zip"
+        import zipfile
+        with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in sorted(root.rglob("*")):
+                if f.is_file():
+                    zf.write(f, f.relative_to(root).as_posix())
+        words = article_words(art)
+        cap = (f"📰 Site updated: {art['title']} ({words} words, {n} articles in total).\n"
+               "Unzip, then upload the CONTENTS of the folder to Cloudflare Pages (Workers & Pages, your project, Create deployment).")
+        with open(zp, "rb") as f:
+            r = S.post(f"{TGAPI}/sendDocument", data={"chat_id": CHAT, "caption": cap}, files={"document": (zp.name, f, "application/zip")}, timeout=300).json()
+    if not r.get("ok"):
+        return send("The article is ready but Telegram refused the file: " + str(r.get("description", ""))[:120])
+    newid = (r.get("result", {}).get("document") or {}).get("file_id")
+    if newid:
+        mem()["site_zip"] = {"file_id": newid, "name": zp.name, "ts": time.time(), "n": sz.get("n", 0)}
+    mem().setdefault("articles", {})[vid] = {"slug": slug, "title": art["title"], "ts": time.time()}
+    msg = f"✅ Article ready: {art['title']}\nAddress after you upload it: {SITE_BASE}/articles/{slug}/\n\n{art['deck']}\n\nSections:\n" + "\n".join("• " + s["h"] for s in art["sections"] if s["h"])
+    if ran:
+        msg += f"\n\n🔎 Fact-check of the finished article: ✅ {solid} claims confirmed" + (f", ⚠️ {softened} softened or corrected" if softened else "")
+        if notes:
+            msg += "\n" + "\n".join("• " + x[:160] for x in notes[:4])
+    if unverified or not ran:
+        msg += "\n\n⚠️ Search was busy, so part of the fact-check did not run. Read the sources before you upload."
+    if words < 1500:
+        msg += f"\n\n⚠️ It came out shorter than planned ({words} words)."
+    msg += "\n\nSources used (shown on the page):\n" + "\n".join(f"• {t[:70]}: {u}" for t, u in srcs[:8])
+    msg += "\n\nAI can be wrong: open the sources for anything surprising. Then /articles again for the next video."
+    send(msg[:3900])
+
+
 VISUAL_STYLES = {"real": "📷 Real photos only", "mix": "🎨 Mix of real photos and AI", "ai": "🤖 AI images only"}
 
 
@@ -8039,6 +8509,11 @@ def make_audited_video(prop, st, pov=False, style=None, backup_voice=False):
     except Exception as e:
         print("notes:", clean(e))
     mem()["pending_audit"] = {"claim": claim, "verdict": prop["verdict"], "sources": srcs}
+    hs = str(plan.get("hook_style") or "").lower().strip()
+    hs = hs if hs in ("mystery", "fact", "visual") else "mystery"
+    hl = mem().setdefault("hook_log", [])
+    hl.append({"claim": claim[:140], "title": (titles[0] if titles else claim)[:100], "style": hs, "ts": time.time()})
+    del hl[:-40]
     # the upload review must compare THIS video with THIS script, never with an older /script from another topic
     mem()["cleared"] = {"title": claim, "script": "\n\n".join(segs), "sources": srcs, "ts": time.time(), "verified": True, "bot_made": True}
     mem().pop("script_sources", None)
@@ -8076,6 +8551,7 @@ def main():
             {"command": "pins", "description": "Check and fix pinned comments"},
             {"command": "checklast", "description": "Check the video you uploaded on YouTube"},
             {"command": "image", "description": "AI picture + real photo of a subject"},
+            {"command": "articles", "description": "Long website articles from my top videos"},
             {"command": "visuals", "description": "Real photos, a mix, or AI images"},
             {"command": "audited", "description": "Kemet Audited: check a claim and make the video"},
             {"command": "scout", "description": "What works on other Egypt channels"},
