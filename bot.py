@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.80"
+BOT_VERSION = "v10.81"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -8258,7 +8258,7 @@ def build_listing(root, cat):
             cls, glyph, label, h3, blurb, link = SEED_CARDS[c["slug"]]
         else:
             cls, glyph = ART_LOOKS[i % len(ART_LOOKS)]
-            label, h3, blurb, link = esc(c["label"]).upper(), esc(c["title"]), esc(c["desc"][:120]), "Read the article"
+            label, h3, blurb, link = esc(c["label"]).upper(), esc(c["title"]), esc(cut_words(c["desc"], 120)), "Read the article"
         cards.append(f'<a class="archive-card archive-card--{cls} reveal" href="/articles/{c["slug"]}/"><span class="card-top"><span>{i + 1:02d}</span><span aria-hidden="true" class="card-arrow">↗</span></span>'
                      f'<span aria-hidden="true" class="card-glyph">{glyph}</span><div class="card-bottom"><span class="card-label">{label}</span><h3>{h3}</h3><p>{blurb}</p><span class="card-link">{link} <span aria-hidden="true">→</span></span></div></a>')
     lp = root / "articles" / "index.html"
@@ -8382,6 +8382,22 @@ def pl_slug(pl):
     return m[key]
 
 
+def cut_words(text, n):
+    """Shorten at a word (better: a sentence) boundary, never in the middle of a word."""
+    t = " ".join(str(text).split())
+    if len(t) <= n:
+        return t
+    head = t[:n]
+    k = max(head.rfind(". "), head.rfind("? "), head.rfind("! "))
+    if k > n * 0.5:
+        return head[:k + 1]
+    return head[:head.rfind(" ")].rstrip(" ,;:-") + "…"
+
+
+def plural(n, word):
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
 def hub_intro(pl):
     sig = hashlib.sha1((pl["title"] + "|".join(i["title"] for i in pl["items"])).encode()).hexdigest()[:12]
     cache = mem().setdefault("hub_intro", {})
@@ -8394,13 +8410,16 @@ def hub_intro(pl):
     except Exception as e:
         print("hub intro:", clean(e)[:100])
         text = ""
-    if len(text.split()) < 40:
-        text = pl["desc"].strip() or f"Every Kemet film in the series “{pl['title']}”, in one place, with an in-depth article for each."
+    if len(text.split()) < 40:                       # no generated text: describe the series from its own film titles (not cached, so the next rebuild tries again)
+        names = [i["title"] for i in pl["items"]][:3]
+        return (f"{plural(len(pl['items']), 'Kemet film')} in this series, from “{names[0]}”" + (f" to “{names[-1]}”" if len(names) > 1 else "") +
+                ". Open a film to read its in-depth article when there is one, or watch it on YouTube.")
     cache[pl["id"]] = {"sig": sig, "text": text}
     return text
 
 
-def hub_shell(title, desc, url, ld, meta, h1, deck, body, aside):
+def hub_shell(title, desc, url, ld, meta, h1, deck, body, aside, img=None):
+    img = img or f"{SITE_BASE}/social/og-home.png"
     return f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -8408,8 +8427,8 @@ def hub_shell(title, desc, url, ld, meta, h1, deck, body, aside):
 <meta content="#11120f" name="theme-color"/>
 <title>{esc(title)} | Kemet</title>
 <meta content="{esc(desc)}" name="description"/>
-<meta content="website" property="og:type"/><meta content="{esc(title)}" property="og:title"/><meta content="{esc(desc)}" property="og:description"/><meta content="{esc(SITE_BASE + url)}" property="og:url"/><meta content="Kemet — Stories from the Black Land" property="og:site_name"/><meta content="{SITE_BASE}/social/og-home.png" property="og:image"/><meta content="Kemet Stories from the Black Land social preview" property="og:image:alt"/><meta content="en_US" property="og:locale"/>
-<meta content="summary_large_image" name="twitter:card"/><meta content="{esc(title)}" name="twitter:title"/><meta content="{esc(desc)}" name="twitter:description"/><meta content="{SITE_BASE}/social/og-home.png" name="twitter:image"/>
+<meta content="website" property="og:type"/><meta content="{esc(title)}" property="og:title"/><meta content="{esc(desc)}" property="og:description"/><meta content="{esc(SITE_BASE + url)}" property="og:url"/><meta content="Kemet — Stories from the Black Land" property="og:site_name"/><meta content="{esc(img)}" property="og:image"/><meta content="{esc(title)}" property="og:image:alt"/><meta content="en_US" property="og:locale"/>
+<meta content="summary_large_image" name="twitter:card"/><meta content="{esc(title)}" name="twitter:title"/><meta content="{esc(desc)}" name="twitter:description"/><meta content="{esc(img)}" name="twitter:image"/>
 <link href="{esc(SITE_BASE + url)}" rel="canonical"/><link href="/brand-mark.svg" rel="icon" type="image/svg+xml"/><link href="https://fonts.googleapis.com" rel="preconnect"/><link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/><link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&amp;family=DM+Sans:wght@400;500;600;700&amp;family=Playfair+Display:ital,wght@0,500;0,600;1,500;1,600&amp;display=swap" rel="stylesheet"/><link href="/styles.css" rel="stylesheet"/>
 <script type="application/ld+json">{json.dumps(ld, indent=1, ensure_ascii=False)}</script>
 </head>
@@ -8450,7 +8469,7 @@ def build_hubs(root, pls, vid_slug):
         paras = "".join(f"<p>{esc(x.strip())}</p>" for x in re.split(r"\n\s*\n|\n", intro) if x.strip())
         body = paras + f"<h2>The films in this series</h2><ul class=\"series-list\">{''.join(lis)}</ul>"
         aside = f'<a href="https://www.youtube.com/playlist?list={esc(pl["id"])}" rel="noopener" target="_blank">Watch the full playlist on YouTube ↗</a><a href="/playlists/">All series</a><a href="/articles/">The archive</a>'
-        desc = (intro.split("\n")[0] if intro else pl["title"])[:155]
+        desc = cut_words(intro.split("\n")[0] if intro else pl["title"], 155)
         ld = {"@context": "https://schema.org", "@graph": [
             {"@type": "CollectionPage", "@id": SITE_BASE + url + "#webpage", "url": SITE_BASE + url, "name": pl["title"], "description": desc, "isPartOf": {"@id": SITE_BASE + "/#website"}, "inLanguage": "en",
              "mainEntity": {"@type": "ItemList", "numberOfItems": len(pl["items"]), "itemListElement": [
@@ -8460,24 +8479,24 @@ def build_hubs(root, pls, vid_slug):
                 {"@type": "ListItem", "position": 1, "name": "Kemet", "item": SITE_BASE + "/"},
                 {"@type": "ListItem", "position": 2, "name": "The series", "item": SITE_BASE + "/playlists/"},
                 {"@type": "ListItem", "position": 3, "name": pl["title"], "item": SITE_BASE + url}]}]}
-        meta = f'<span>Kemet / Series</span><span>{len(pl["items"])} films · {done} articles</span>'
+        meta = f'<span>Kemet / Series</span><span>{plural(len(pl["items"]), "film")} · {plural(done, "article")}</span>'
         parts = pl["title"].split(" ")
         h1 = esc(pl["title"]) if len(parts) < 4 else esc(" ".join(parts[:len(parts) // 2])) + "<br/><em>" + esc(" ".join(parts[len(parts) // 2:])) + "</em>"
-        deck = re.split(r"(?<=[.!?])\s", intro.strip())[0][:260] if intro.strip() else pl["title"]
+        deck = cut_words(re.split(r"(?<=[.!?])\s", intro.strip())[0], 260) if intro.strip() else pl["title"]
         d = root / "playlists" / slug
         d.mkdir(parents=True, exist_ok=True)
-        (d / "index.html").write_text(hub_shell(pl["title"] + " — a Kemet series", desc, url, ld, meta, h1, deck, body, aside), encoding="utf-8")
+        (d / "index.html").write_text(hub_shell(pl["title"] + " — a Kemet series", desc, url, ld, meta, h1, deck, body, aside, img=f"https://i.ytimg.com/vi/{pl['items'][0]['id']}/hqdefault.jpg"), encoding="utf-8")
         cls, glyph = ART_LOOKS[n % len(ART_LOOKS)]
         cards.append(f'<a class="archive-card archive-card--{cls} reveal" href="{url}"><span class="card-top"><span>{n + 1:02d}</span><span aria-hidden="true" class="card-arrow">↗</span></span><span aria-hidden="true" class="card-glyph">{glyph}</span>'
-                     f'<div class="card-bottom"><span class="card-label">{len(pl["items"])} FILMS · {done} ARTICLES</span><h3>{esc(pl["title"])}</h3><p>{esc(desc[:110])}</p><span class="card-link">Open the series <span aria-hidden="true">→</span></span></div></a>')
+                     f'<div class="card-bottom"><span class="card-label">{plural(len(pl["items"]), "FILM")} · {plural(done, "ARTICLE")}</span><h3>{esc(pl["title"])}</h3><p>{esc(cut_words(desc, 110))}</p><span class="card-link">Open the series <span aria-hidden="true">→</span></span></div></a>')
     ld = {"@context": "https://schema.org", "@graph": [
         {"@type": "CollectionPage", "@id": SITE_BASE + "/playlists/#webpage", "url": SITE_BASE + "/playlists/", "name": "The Kemet series", "isPartOf": {"@id": SITE_BASE + "/#website"}, "inLanguage": "en"},
         {"@type": "BreadcrumbList", "@id": SITE_BASE + "/playlists/#breadcrumb", "itemListElement": [
             {"@type": "ListItem", "position": 1, "name": "Kemet", "item": SITE_BASE + "/"},
             {"@type": "ListItem", "position": 2, "name": "The series", "item": SITE_BASE + "/playlists/"}]}]}
     body = f'<section class="archive section-shell" aria-label="All series"><div class="archive-grid">{"".join(cards)}</div></section>'
-    page = hub_shell("The Kemet series — every playlist as a reading path", "Every Kemet playlist as a reading path: a series page with the films and an in-depth article for each.", "/playlists/", ld,
-                     f"<span>Kemet / The series</span><span>{len(pls)} series</span>", "The<br/><em>series.</em>",
+    page = hub_shell("The Kemet series — every playlist as a reading path", "Every Kemet playlist as a reading path: a series page with its films and in-depth articles as they are published.", "/playlists/", ld,
+                     f"<span>Kemet / The series</span><span>{plural(len(pls), "series").replace("seriess", "series")}</span>", "The<br/><em>series.</em>",
                      "Each series mirrors a playlist on the Kemet YouTube channel. Pick one and read the films in order.", "", "")
     page = re.sub(r'<div class="section-shell article-layout">.*?</aside></div>', lambda m: "", page, count=1, flags=re.S).replace("</main>", body + "\n</main>", 1)
     (root / "playlists").mkdir(exist_ok=True)
