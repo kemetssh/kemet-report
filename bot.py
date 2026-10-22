@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.82"
+BOT_VERSION = "v10.83"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -8397,7 +8397,7 @@ def cut_words(text, n):
 
 
 def plural(n, word):
-    return f"{n} {word}" + ("" if n == 1 else "s")
+    return f"{n} {word}" + ("" if n == 1 else "S" if word.isupper() else "s")
 
 
 def hub_intro(pl):
