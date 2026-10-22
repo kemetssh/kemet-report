@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.78"
+BOT_VERSION = "v10.80"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2759,6 +2759,27 @@ def on_prop(jid, act, st):
         st["props"].pop(jid, None)
         cfg = fb_cfg()
         return send("✅ Posted to your Facebook Page " + cfg.get("page_name", "") + ".\nhttps://www.facebook.com/" + str(pid_ or cfg.get("page_id", "")))
+    if act == "pd" and kind == "pldup":
+        try:
+            msg_ = do_dupe(prop)
+        except Exception as e:
+            return send("YouTube did not accept the change: " + clean(e)[:160])
+        if msg_.startswith("✅"):
+            st["props"].pop(jid, None)
+        return send(msg_ + ("\nAfter this, send /seriespages so the website matches." if msg_.startswith("✅") else ""))
+    if act == "pe" and kind == "pldupall":
+        out = []
+        for p in prop["pids"]:
+            pr = st["props"].get(p)
+            if pr and pr.get("type") == "pldup":
+                try:
+                    out.append(do_dupe(pr))
+                    if out[-1].startswith("✅"):
+                        st["props"].pop(p, None)
+                except Exception as e:
+                    out.append(f"⚠️ {pr['title']}: " + clean(e)[:80])
+        st["props"].pop(jid, None)
+        return send("\n".join(out)[:3500] + "\nThen send /seriespages so the website matches.")
     if act == "al" and kind == "alb":
         try:
             ok_ = set_description_article(prop["video_id"], prop["line"], prop["url"])
@@ -7009,10 +7030,10 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/hashtags - refresh old hashtags from what is trending now\n"
         "/learned - what I learned (forget or pause any time)\n"
         "/fullrefresh - one tap: refresh everything I know with the newest data\n"
-        "/script - write a fact-checked script on a topic you give me, in your style\n"
+        "/script - fact-checked script on your topic, in your style\n"
         "/affiliate - find real affiliate programs and sponsors that fit the channel\n"
         "/translate - Spanish, Portuguese and Hindi subtitles for my latest video\n"
-        "/shortcuts - the best moments of my latest long video to cut into Shorts\n"
+        "/shortcuts - best moments of my long video, for Shorts\n"
         "/playlists - build themed playlists for my videos (you approve)\n"
         "/watch - check the channel for problems (also runs by itself)\n"
         "/recheck - full checkup of all videos\n"
@@ -7020,6 +7041,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/image <subject> - AI picture + real photo\n"
         "/articles - website articles\n"
         "/articlelinks - link articles in descriptions\n"
+        "/dupes - merge duplicate playlists\n"
         "/visuals - real, mix or AI pics\n"
         "/schedule - pick a publish time (/autoschedule on|off, /besthour 17)\n"
         "/trends - what is hot now in the niche (tags, topics)\n"
@@ -7300,6 +7322,8 @@ def on_message(msg, st):
             send("Nothing waiting. Send me a video any time.")
     elif (text.startswith("/check") and YT_LINK.search(raw)) or (YT_LINK.search(raw) and len(YT_LINK.sub("", raw).strip()) < 30):
         cmd_checkvideo(st, YT_LINK.search(raw).group(1))
+    elif text.startswith("/dupes"):
+        cmd_dupes(st)
     elif text.startswith("/articlelinks"):
         cmd_articlelinks(st)
     elif text.startswith("/seriespages"):
@@ -7336,7 +7360,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -8111,6 +8135,19 @@ def art_fact_check(art, title):
     return sources, solid, softened, notes, ran
 
 
+GOOD_SRC = ("britishmuseum.org", "metmuseum.org", "si.edu", "nationalgeographic", "ucl.ac.uk", "ox.ac.uk", "cam.ac.uk", ".edu", ".ac.uk", ".gov", "smarthistory.org", "sciencedirect.com",
+            "nature.com", "jstor.org", "oup.com", "cambridge.org", "worldhistory.org", "louvre.fr", "brooklynmuseum.org", "penn.museum", "arce.org", "archaeology.org", "science.org",
+            "smithsonianmag.com", "egyptianmuseum", "griffith", "pnas.org", "plos.org", "springer.com", "tandfonline.com", "wiley.com", "harvard.edu", "mfa.org", "getty.edu")
+BAD_SRC = ("pinterest.", "quora.", "reddit.", "facebook.", "youtube.", "youtu.be", "tiktok.", "blogspot.", "wordpress.com", "medium.com", "tripadvisor.", "instagram.", "twitter.", "x.com", "fandom.")
+
+
+def rank_sources(srcs):
+    """Museums, universities and journals first; social media, forums and blogs dropped."""
+    good = [x for x in srcs if any(g in x[1].lower() for g in GOOD_SRC)]
+    rest = [x for x in srcs if x not in good and not any(b in x[1].lower() for b in BAD_SRC)]
+    return good + rest
+
+
 def esc(s):
     return html.escape(str(s), quote=True)
 
@@ -8294,7 +8331,7 @@ HUB_CSS = HUB_CSS_MARK + """
 """
 
 
-def site_playlists(tok):
+def site_playlists(tok, merge=True):
     """The channel's own playlists with their videos, in order (a few cheap YouTube calls)."""
     pls = yt_get("playlists", tok, part="snippet,contentDetails", mine="true", maxResults=50).get("items", [])
     out = []
@@ -8316,15 +8353,33 @@ def site_playlists(tok):
                 break
         if items:
             out.append({"id": p["id"], "title": p["snippet"]["title"], "desc": p["snippet"].get("description", ""), "items": items})
-    return out
+    return merge_playlists(out) if merge else out
+
+
+def merge_playlists(pls):
+    """Playlists that share a title (duplicates made by repeated builds) become ONE series: films joined, no repeats."""
+    merged = {}
+    for p in pls:
+        key = re.sub(r"[^a-z0-9]+", " ", p["title"].lower().replace("&", " and ")).strip()
+        m = merged.get(key)
+        if not m:
+            merged[key] = {"id": p["id"], "ids": [p["id"]], "key": key, "title": p["title"], "desc": p["desc"], "items": list(p["items"])}
+            continue
+        m["ids"].append(p["id"])
+        have = {i["id"] for i in m["items"]}
+        m["items"] += [i for i in p["items"] if i["id"] not in have]
+        if len(p["desc"]) > len(m["desc"]):
+            m["desc"] = p["desc"]
+    return list(merged.values())
 
 
 def pl_slug(pl):
-    m = mem().setdefault("pl_slugs", {})
-    if pl["id"] not in m:
+    m = mem().setdefault("pl_slugs2", {})
+    key = pl.get("key") or re.sub(r"[^a-z0-9]+", " ", pl["title"].lower().replace("&", " and ")).strip()
+    if key not in m:
         s, used = slugify(pl["title"]), set(m.values())
-        m[pl["id"]] = s if s not in used else s + "-" + pl["id"][-4:].lower()
-    return m[pl["id"]]
+        m[key] = s if s not in used else s + "-" + str(len(used) + 1)
+    return m[key]
 
 
 def hub_intro(pl):
@@ -8427,6 +8482,10 @@ def build_hubs(root, pls, vid_slug):
     page = re.sub(r'<div class="section-shell article-layout">.*?</aside></div>', lambda m: "", page, count=1, flags=re.S).replace("</main>", body + "\n</main>", 1)
     (root / "playlists").mkdir(exist_ok=True)
     (root / "playlists" / "index.html").write_text(page, encoding="utf-8")
+    keep = {u.strip("/").split("/")[-1] for u in urls}
+    for dd in (root / "playlists").iterdir():           # hubs of playlists that no longer exist or were duplicates
+        if dd.is_dir() and dd.name not in keep:
+            shutil.rmtree(dd, ignore_errors=True)
     return urls
 
 
@@ -8458,7 +8517,8 @@ def rebuild_site_hubs(root, tok):
     if sm.exists():
         s = sm.read_text(encoding="utf-8")
         today = datetime.date.today().isoformat()
-        add = "".join(f"  <url><loc>{SITE_BASE}{u}</loc>\n    <lastmod>{today}</lastmod></url>\n" for u in ["/playlists/"] + urls if SITE_BASE + u not in s)
+        s = re.sub(r"  <url><loc>[^<]*/playlists/[^<]+</loc>\n    <lastmod>[^<]*</lastmod></url>\n", "", s)
+        add = "".join(f"  <url><loc>{SITE_BASE}{u}</loc>\n    <lastmod>{today}</lastmod></url>\n" for u in ["/playlists/"] + urls)
         sm.write_text(s.replace("</urlset>", add + "</urlset>"), encoding="utf-8")
     return len(pls)
 
@@ -8509,6 +8569,65 @@ def set_description_article(video_id, line, url):
     r = S.put(f"{YT}/youtube/v3/videos?part=snippet", headers={"Authorization": f"Bearer {tok}"}, json={"id": video_id, "snippet": body}, timeout=60)
     r.raise_for_status()
     return True
+
+
+def cmd_dupes(st):
+    """Playlists with the same title: propose merging each group into the biggest one (films copied over, then the extra playlists deleted). Nothing changes until you tap."""
+    send("Looking for duplicate playlists...")
+    tok = yt_token()
+    raw = site_playlists(tok, merge=False)
+    groups = {}
+    for p in raw:
+        groups.setdefault(re.sub(r"[^a-z0-9]+", " ", p["title"].lower().replace("&", " and ")).strip(), []).append(p)
+    dup = [g for g in groups.values() if len(g) > 1]
+    if not dup:
+        return send("No duplicate playlists. ✅")
+    pids = []
+    for g in dup:
+        g.sort(key=lambda p: -len(p["items"]))
+        keep, drop = g[0], g[1:]
+        have = {i["id"] for i in keep["items"]}
+        add = []
+        for p in drop:
+            for i in p["items"]:
+                if i["id"] not in have:
+                    have.add(i["id"])
+                    add.append(i["id"])
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "pldup", "title": keep["title"], "keep": keep["id"], "drop": [p["id"] for p in drop], "add": add, "created": time.time()}
+        pids.append(pid)
+        send(f"🗂 \"{keep['title']}\" exists {len(g)} times.\nI keep the one with the most films ({len(keep['items'])}), copy over {len(add)} film(s) it is missing, and delete the other {len(drop)} playlist(s). The videos themselves are not deleted.",
+             [[btn("✅ Merge them", pid, "pd"), btn("Skip", pid, "cs")]])
+    if len(pids) > 1:
+        pa = new_pid(st)
+        st["props"][pa] = {"type": "pldupall", "pids": pids, "created": time.time()}
+        send(f"Merge all {len(pids)} groups above in one go?", [[btn(f"✅ Merge all {len(pids)}", pa, "pe")]])
+
+
+def do_dupe(prop):
+    """Copy the missing films into the kept playlist, and only then delete the duplicates. Returns a short result line."""
+    tok = yt_token()
+    h = {"Authorization": f"Bearer {tok}"}
+    failed = 0
+    for vid in prop["add"]:
+        body = {"snippet": {"playlistId": prop["keep"], "resourceId": {"kind": "youtube#video", "videoId": vid}}}
+        ok = False
+        for wait in (0, 3, 8):
+            if wait:
+                time.sleep(wait)
+            r = S.post(f"{YT}/youtube/v3/playlistItems?part=snippet", headers=h, json=body, timeout=60)
+            if r.status_code < 400 or (r.status_code == 409 and "AlreadyInPlaylist" in r.text):
+                ok = True
+                break
+        failed += 0 if ok else 1
+    if failed:
+        return f"⚠️ \"{prop['title']}\": {failed} film(s) could not be copied, so I deleted nothing. Try again later."
+    gone = 0
+    for pl in prop["drop"]:
+        r = S.delete(f"{YT}/youtube/v3/playlists?id={pl}", headers=h, timeout=60)
+        if r.status_code < 400:
+            gone += 1
+    return f"✅ \"{prop['title']}\": {len(prop['add'])} film(s) copied, {gone} duplicate playlist(s) deleted."
 
 
 def cmd_articlelinks(st):
@@ -8644,7 +8763,7 @@ def write_article(c, st):
         return send("The article did not come out in a usable form. Tap it again in a minute.")
     s3, solid, softened, notes, ran = art_fact_check(art, v["title"])
     sources += s3
-    srcs = dedupe_sources(sources, 10)
+    srcs = rank_sources(dedupe_sources(sources, 14))[:8]
     with tempfile.TemporaryDirectory() as d:
         root = site_zip_from(sz["file_id"], d)
         slug = slugify(art["title"] or v["title"])
@@ -8676,9 +8795,9 @@ def write_article(c, st):
                 bu = build_hubs(root, pls, vid_slug_map(root))
                 add_series_nav(root)
                 sm_ = root / "sitemap.xml"
-                s_ = sm_.read_text(encoding="utf-8")
+                s_ = re.sub(r"  <url><loc>[^<]*/playlists/[^<]+</loc>\n    <lastmod>[^<]*</lastmod></url>\n", "", sm_.read_text(encoding="utf-8"))
                 today_ = datetime.date.today().isoformat()
-                sm_.write_text(s_.replace("</urlset>", "".join(f"  <url><loc>{SITE_BASE}{u}</loc>\n    <lastmod>{today_}</lastmod></url>\n" for u in ["/playlists/"] + bu if SITE_BASE + u not in s_) + "</urlset>"), encoding="utf-8")
+                sm_.write_text(s_.replace("</urlset>", "".join(f"  <url><loc>{SITE_BASE}{u}</loc>\n    <lastmod>{today_}</lastmod></url>\n" for u in ["/playlists/"] + bu) + "</urlset>"), encoding="utf-8")
         except Exception as e:
             print("hubs:", clean(e)[:120])
         zp = Path(d) / f"kemet-site-{datetime.date.today().strftime('%Y%m%d')}.zip"
@@ -8904,6 +9023,7 @@ def main():
             {"command": "image", "description": "AI picture + real photo of a subject"},
             {"command": "articles", "description": "Long website articles from my top videos"},
             {"command": "articlelinks", "description": "Put article links in video descriptions"},
+            {"command": "dupes", "description": "Merge duplicate playlists"},
             {"command": "visuals", "description": "Real photos, a mix, or AI images"},
             {"command": "audited", "description": "Kemet Audited: check a claim and make the video"},
             {"command": "scout", "description": "What works on other Egypt channels"},
