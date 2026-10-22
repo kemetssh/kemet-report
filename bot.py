@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.83"
+BOT_VERSION = "v10.85"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2759,6 +2759,8 @@ def on_prop(jid, act, st):
         st["props"].pop(jid, None)
         cfg = fb_cfg()
         return send("✅ Posted to your Facebook Page " + cfg.get("page_name", "") + ".\nhttps://www.facebook.com/" + str(pid_ or cfg.get("page_id", "")))
+    if act == "ax" and kind == "artfix":
+        return deepen_article(prop["items"][int(st.get("_val", "0"))], st)
     if act == "pd" and kind == "pldup":
         try:
             msg_ = do_dupe(prop)
@@ -7031,7 +7033,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/learned - what I learned (forget or pause any time)\n"
         "/fullrefresh - one tap: refresh everything I know with the newest data\n"
         "/script - fact-checked script on your topic, in your style\n"
-        "/affiliate - find real affiliate programs and sponsors that fit the channel\n"
+        "/affiliate - real affiliate programs and sponsors that fit\n"
         "/translate - Spanish, Portuguese and Hindi subtitles for my latest video\n"
         "/shortcuts - best moments of my long video, for Shorts\n"
         "/playlists - build themed playlists for my videos (you approve)\n"
@@ -7042,12 +7044,13 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/articles - website articles\n"
         "/articlelinks - link articles in descriptions\n"
         "/dupes - merge duplicate playlists\n"
+        "/articlecheck - deepen short articles\n"
         "/visuals - real, mix or AI pics\n"
         "/schedule - pick a publish time (/autoschedule on|off, /besthour 17)\n"
         "/trends - what is hot now in the niche (tags, topics)\n"
         "/thumbtest - 3 thumbnail options and how to test them\n"
         "/post - 3 Community posts (poll, fact, teaser) to paste into YouTube\n"
-        "/fbsetup - link your Facebook Page (then /crosspost gets a post button)\n"
+        "/fbsetup - link your Facebook Page (for /crosspost)\n"
         "/news - fresh Egypt news to turn into videos\n"
         "/pins - fix repeated or weak pinned comments (you tap)\n"
         "/audit - Kemet Audited: test a myth against evidence (or /audit your claim)\n"
@@ -7057,7 +7060,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/collab - draft messages to similar channels\n"
         "/community - posts to share your newest video\n"
         "/starter - a question under your video that gets comments\n"
-        "/sublines - rotate the subscribe line and learn which brings subscribers\n"
+        "/sublines - rotate the subscribe line, learn what works\n"
         "/hook - 3 opening lines for your next Short\n"
         "/goal 100 - set a subscriber goal and track it\n"
         "/demand - what people really search for (or /demand your topic)\n"
@@ -7322,6 +7325,8 @@ def on_message(msg, st):
             send("Nothing waiting. Send me a video any time.")
     elif (text.startswith("/check") and YT_LINK.search(raw)) or (YT_LINK.search(raw) and len(YT_LINK.sub("", raw).strip()) < 30):
         cmd_checkvideo(st, YT_LINK.search(raw).group(1))
+    elif text.startswith("/articlecheck"):
+        cmd_articlecheck(st)
     elif text.startswith("/dupes"):
         cmd_dupes(st)
     elif text.startswith("/articlelinks"):
@@ -7360,7 +7365,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -8102,6 +8107,15 @@ def article_body_text(art):
     return "\n".join(out)
 
 
+EXPAND_PROMPT = """Below is a draft article for the Kemet website that is too short ({words} words). Rewrite it as a fuller article of at least 1,700 words in the SAME format (TITLE, DECK, DESCRIPTION, KEYWORDS, then SECTION lines with paragraphs; at most 2 CALLOUT lines).
+Deepen it ONLY with: context and explanation of facts already in the draft or in the FACT SHEET, what the evidence directly shows versus what scholars infer, the competing explanations, what remains unknown, and why it matters. Do NOT add any new fact, date, name, number or source that is not in the draft or the FACT SHEET. If the sources give too little for 1,700 honest words, write as much as they support rather than padding.
+Keep careful wording (no absolute words). Plain text only, one item per line.
+FACT SHEET:
+{facts}
+DRAFT:
+{draft}"""
+
+
 def art_fact_check(art, title):
     """Check the finished article against sources in two halves (the checker reads about 9,000 characters at a time) and soften what is not solid."""
     secs = art["sections"]
@@ -8546,7 +8560,7 @@ def rebuild_site_hubs(root, tok):
 
 def pack_site(root, d, caption):
     import zipfile
-    zp = Path(d) / f"kemet-site-{datetime.date.today().strftime('%Y%m%d')}.zip"
+    zp = Path(d) / f"kemet-site-{datetime.datetime.now().strftime('%Y%m%d-%H%M')}.zip"
     with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in sorted(root.rglob("*")):
             if f.is_file():
@@ -8649,6 +8663,143 @@ def do_dupe(prop):
         if r.status_code < 400:
             gone += 1
     return f"✅ \"{prop['title']}\": {len(prop['add'])} film(s) copied, {gone} duplicate playlist(s) deleted."
+
+
+ART_MIN_WORDS = 1700
+
+
+def page_article(htm):
+    """Read an article page of the site back into the article structure (title, deck, description, keywords, sections), the video it is built around, and its sources."""
+    g = lambda pat: (re.search(pat, htm, re.S) or [None, ""])[1]
+    t = re.sub(r"\s*[|—-]\s*Kemet\s*$", "", html.unescape(g(r"<title>(.*?)</title>")))
+    body = g(r'<article class="article-body">(.*?)</article>')
+    art = {"title": t, "deck": html.unescape(re.sub(r"<[^>]+>", "", g(r'<p class="article-deck">(.*?)</p>'))), "desc": html.unescape(g(r'<meta content="([^"]*)" name="description"')),
+           "kw": [x.strip() for x in html.unescape(g(r'<meta content="([^"]*)" name="keywords"')).split(",") if x.strip()], "sections": []}
+    cur = None
+    body = re.sub(r'<figure class="video-embed".*?</figure>', "", body, flags=re.S)        # the player sits inside the text on bot-made pages
+    cut = re.search(r'<a class="button button-primary article-video"|<div class="article-related"', body)
+    body = body[:cut.start()] if cut else body
+    for m in re.finditer(r'<h2>(.*?)</h2>|<div class="article-callout"><p>(.*?)</p></div>|<p>(.*?)</p>', body, re.S):
+        clean_ = lambda x: html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", x))).strip()
+        if m.group(1) is not None:
+            cur = {"h": clean_(m.group(1)), "items": []}
+            art["sections"].append(cur)
+            continue
+        if cur is None:
+            cur = {"h": "", "items": []}
+            art["sections"].append(cur)
+        if m.group(2) is not None:
+            cur["items"].append(("c", clean_(m.group(2))))
+        else:
+            cur["items"].append(("p", clean_(m.group(3))))
+    vid = g(r'data-yt="([\w-]{11})"') or g(r"watch\?v=([\w-]{11})")
+    aside = g(r'<aside class="article-sources">(.*?)</aside>')
+    srcs = [(html.unescape(re.sub(r"\s*↗\s*$", "", re.sub(r"<[^>]+>", "", t_))).strip(), html.unescape(u)) for u, t_ in re.findall(r'<a href="([^"]+)"[^>]*>(.*?)</a>', aside, re.S)
+            if "youtube.com" not in u]
+    return art, vid, g(r'<meta content="([^"]*)" property="article:published_time"'), srcs
+
+
+def page_word_count(htm):
+    return article_words(page_article(htm)[0])
+
+
+def cmd_articlecheck(st):
+    """List the articles on the site with their length; short ones can be deepened with a tap."""
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("First send me your current site as a .zip file, then try again.")
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        rows = []
+        for p in sorted((root / "articles").glob("*/index.html")):
+            art = page_article(p.read_text(encoding="utf-8"))[0]
+            rows.append({"slug": p.parent.name, "title": art["title"], "words": article_words(art)})
+    short = [r for r in rows if r["words"] < ART_MIN_WORDS]
+    lines = [f"{'✅' if r['words'] >= ART_MIN_WORDS else '⚠️'} {r['words']} words: {r['title']}" for r in sorted(rows, key=lambda r: r["words"])]
+    if not short:
+        return send(f"All {len(rows)} articles have {ART_MIN_WORDS}+ words. ✅\n\n" + "\n".join(lines))
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "artfix", "items": short, "created": time.time()}
+    send(f"{len(short)} of {len(rows)} articles are under {ART_MIN_WORDS} words:\n\n" + "\n".join(lines) +
+         "\n\nTap one: I research it again, deepen it from sources (no invented facts), check the claims, and send you the updated site. The address and the video stay the same.",
+         [[btn(f"🔧 {r['title'][:30]} ({r['words']})", pid, "ax", str(i))] for i, r in enumerate(short[:8])])
+
+
+def deepen_article(item, st):
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("I do not have your site zip yet. Send it as a file first.")
+    send("🔧 Deepening: " + item["title"] + "\nResearch, rewriting and the claim-by-claim check take about 3 to 6 minutes.")
+    tok = yt_token()
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        pg = root / "articles" / item["slug"] / "index.html"
+        if not pg.exists():
+            return send("That article is no longer in the site zip.")
+        art, vid, pub, old_srcs = page_article(pg.read_text(encoding="utf-8"))
+        before = article_words(art)
+        sources, unverified = [list(x) for x in old_srcs], False
+        try:
+            facts, s1 = gemini_text(RESEARCH_PROMPT.format(title=art["title"]), search=True, cache=True, topic=art["title"])
+            sources += [list(x) for x in s1]
+            if "NOT verified" in facts:
+                facts, unverified = "", True
+        except Exception as e:
+            print("research:", clean(e)[:120])
+            facts, unverified = "", True
+        for _round in range(3):
+            if article_words(art) >= ART_MIN_WORDS:
+                break
+            head = f"TITLE: {art['title']}\nDECK: {art['deck']}\nDESCRIPTION: {art['desc']}\nKEYWORDS: {', '.join(art['kw'])}\n"
+            try:
+                t2, _ = gemini_text(EXPAND_PROMPT.format(words=article_words(art), facts=(facts or "(no fact sheet)")[:7000], draft=head + article_body_text(art)), search=False)
+            except Exception as e:
+                print("expand:", clean(e)[:100])
+                break
+            c2 = parse_article(t2)
+            if c2["title"] and len(c2["sections"]) >= 5 and article_words(c2) > article_words(art) * 1.15:
+                c2["title"] = art["title"]                      # the title and address of a published article stay as they are
+                art = c2
+            else:
+                break
+        after = article_words(art)
+        if after <= before * 1.15:
+            return send(f"I could not make it meaningfully longer from the sources I found ({before} → {after} words), so I left it as it is. Try again later when search is not busy.")
+        s3, solid, softened, notes, ran = art_fact_check(art, art["title"])
+        sources += [list(x) for x in s3]
+        srcs = rank_sources(dedupe_sources([tuple(x) for x in sources], 16))[:8]
+        v = {"id": vid, "title": art["title"], "desc": "", "published": pub, "iso": "", "secs": 0}
+        try:
+            it = (yt_get("videos", tok, part="snippet,contentDetails", id=vid).get("items") or [None])[0]
+            if it:
+                v.update(title=it["snippet"]["title"], desc=it["snippet"].get("description", ""), published=it["snippet"].get("publishedAt", pub),
+                         iso=it["contentDetails"].get("duration", ""), secs=iso_seconds(it["contentDetails"].get("duration", "")))
+        except Exception as e:
+            print("video facts:", clean(e)[:100])
+        cat = site_catalog(root)
+        others = sorted([x for x in cat if x["slug"] != item["slug"]], key=lambda x: x["pub"], reverse=True)
+        series = None
+        try:
+            for pl in site_playlists(tok):
+                if vid in [i["id"] for i in pl["items"]]:
+                    series = {"title": pl["title"], "slug": pl_slug(pl)}
+                    break
+        except Exception as e:
+            print("series:", clean(e)[:100])
+        pg.write_text(art_page(art, v, item["slug"], srcs, others, series), encoding="utf-8")
+        build_listing(root, site_catalog(root))
+        r = pack_site(root, d, f"🔧 Site updated: {art['title']} now has {after} words (was {before}). Unzip and upload the CONTENTS to Cloudflare Pages as Production.")
+    if not r.get("ok"):
+        return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
+    msg = f"✅ Deepened: {art['title']} ({before} → {after} words). Same address, same video."
+    if ran:
+        msg += f"\n🔎 Fact-check: ✅ {solid} confirmed" + (f", ⚠️ {softened} softened or corrected" if softened else "")
+        msg += ("\n" + "\n".join("• " + x[:160] for x in notes[:3])) if notes else ""
+    if unverified or not ran:
+        msg += "\n⚠️ Search was busy, so part of the fact-check did not run. Read the sources before you upload."
+    if after < ART_MIN_WORDS:
+        msg += f"\n⚠️ Still under {ART_MIN_WORDS} words: the sources I found support only that much. Run /articlecheck later to try again."
+    send(msg)
 
 
 def cmd_articlelinks(st):
@@ -8782,6 +8933,20 @@ def write_article(c, st):
         art = art or cand
     if not art or not art["sections"]:
         return send("The article did not come out in a usable form. Tap it again in a minute.")
+    for _round in range(2):                        # too short: deepen it from the same facts (no new facts allowed)
+        if article_words(art) >= 1500:
+            break
+        try:
+            head = f"TITLE: {art['title']}\nDECK: {art['deck']}\nDESCRIPTION: {art['desc']}\nKEYWORDS: {', '.join(art['kw'])}\n"
+            t2, s_ = gemini_text(EXPAND_PROMPT.format(words=article_words(art), facts=(facts or "(no fact sheet)")[:7000], draft=head + article_body_text(art)), search=False)
+            c2 = parse_article(t2)
+            if c2["title"] and len(c2["sections"]) >= 5 and article_words(c2) > article_words(art) * 1.15:
+                art = c2
+            else:
+                break
+        except Exception as e:
+            print("expand:", clean(e)[:100])
+            break
     s3, solid, softened, notes, ran = art_fact_check(art, v["title"])
     sources += s3
     srcs = rank_sources(dedupe_sources(sources, 14))[:8]
@@ -8821,7 +8986,7 @@ def write_article(c, st):
                 sm_.write_text(s_.replace("</urlset>", "".join(f"  <url><loc>{SITE_BASE}{u}</loc>\n    <lastmod>{today_}</lastmod></url>\n" for u in ["/playlists/"] + bu) + "</urlset>"), encoding="utf-8")
         except Exception as e:
             print("hubs:", clean(e)[:120])
-        zp = Path(d) / f"kemet-site-{datetime.date.today().strftime('%Y%m%d')}.zip"
+        zp = Path(d) / f"kemet-site-{datetime.datetime.now().strftime('%Y%m%d-%H%M')}.zip"
         import zipfile
         with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in sorted(root.rglob("*")):
@@ -9043,6 +9208,7 @@ def main():
             {"command": "checklast", "description": "Check the video you uploaded on YouTube"},
             {"command": "image", "description": "AI picture + real photo of a subject"},
             {"command": "articles", "description": "Long website articles from my top videos"},
+            {"command": "articlecheck", "description": "Check article length, deepen short ones"},
             {"command": "articlelinks", "description": "Put article links in video descriptions"},
             {"command": "dupes", "description": "Merge duplicate playlists"},
             {"command": "visuals", "description": "Real photos, a mix, or AI images"},
