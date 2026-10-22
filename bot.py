@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.81"
+BOT_VERSION = "v10.82"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -8316,7 +8316,9 @@ HUB_PROMPT = """Write the introduction for a series page on the website of the h
 Playlist description: {desc}
 Films in it (in order): {films}
 Write 2 short paragraphs (110 to 170 words in total), calm, concrete, inviting, evidence-first English. Say what questions the series follows and why they matter.
-Use ONLY what the title, description and film titles tell you. Add no new facts, dates, names or numbers. Plain text, no markdown, no lists, no headings."""
+Use ONLY what the title, description and film titles tell you. Add no new facts, dates, names or numbers. Plain text, no markdown, no lists, no headings.
+OPENING: start with a concrete question or image that belongs to THIS series only. Never start with "Step into", "Welcome to", "Explore", "Dive into", "This series" or the channel name, and never write the channel name with a vertical bar. Do not repeat the playlist description.
+The first sentence must stand alone as a summary of the series (under 150 characters)."""
 
 HUB_CSS_MARK = "/* kemet playlist hubs */"
 HUB_CSS = HUB_CSS_MARK + """
@@ -8399,7 +8401,7 @@ def plural(n, word):
 
 
 def hub_intro(pl):
-    sig = hashlib.sha1((pl["title"] + "|".join(i["title"] for i in pl["items"])).encode()).hexdigest()[:12]
+    sig = hashlib.sha1(("v2|" + pl["title"] + "|".join(i["title"] for i in pl["items"])).encode()).hexdigest()[:12]
     cache = mem().setdefault("hub_intro", {})
     hit = cache.get(pl["id"])
     if hit and hit.get("sig") == sig:
