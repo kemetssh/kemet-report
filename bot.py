@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.88"
+BOT_VERSION = "v10.89"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -8288,6 +8288,30 @@ def site_catalog(root):
     return cat
 
 
+def refresh_home_reads(root, extra):
+    """Keep the home page's 'More in-depth reads' list at the 12 newest articles (the 5 original cards are not repeated)."""
+    hp = root / "index.html"
+    if not hp.exists():
+        return
+    s = hp.read_text(encoding="utf-8")
+    new = sorted(extra, key=lambda c: (c["pub"], c["slug"]), reverse=True)[:12]
+    if not new:
+        return
+    rows = "".join(f'<a class="more-read" href="/articles/{c["slug"]}/"><strong>{esc(re.sub(chr(10) + "+", " ", c["title"]))}</strong><span>{esc(cut_words(c["desc"], 150))}</span></a>' for c in new)
+    block = f'<div class="more-reads reveal"><h3>More in-depth reads</h3><div class="more-reads-grid">{rows}</div></div>'
+    if 'class="more-reads' in s:
+        s2 = re.sub(r'<div class="more-reads[^"]*">.*?</div></div>', lambda m: block, s, count=1, flags=re.S)
+    else:
+        i = s.find('<section aria-labelledby="films-title"')
+        if i < 0:
+            return
+        j = s.rfind("</section>", 0, i)
+        j = s.rfind("</div>", 0, j) + len("</div>")
+        s2 = s[:j] + "\n" + block + s[j:]
+    if s2 != s:
+        hp.write_text(s2, encoding="utf-8")
+
+
 def build_listing(root, cat):
     """Regenerate the archive page cards and the sitemap from every article found in the site folder."""
     cards, seeded, extra = [], [c for c in cat if c["slug"] in SEED_CARDS], [c for c in cat if c["slug"] not in SEED_CARDS]
@@ -8306,6 +8330,10 @@ def build_listing(root, cat):
         s2 = re.sub(r'(<div class="archive-grid">).*?(</div></section>)', lambda m: m.group(1) + "".join(cards) + m.group(2), s, count=1, flags=re.S)
         s2 = re.sub(r"<span>\d+ articles</span>", f"<span>{len(order)} articles</span>", s2, count=1)
         lp.write_text(s2, encoding="utf-8")
+    try:
+        refresh_home_reads(root, extra)
+    except Exception as e:
+        print("home reads:", clean(e)[:120])
     today = datetime.date.today().isoformat()
     urls = ["/", "/about/", "/articles/"] + [f"/articles/{c['slug']}/" for c in order]
     sm = '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' + "".join(
@@ -8743,6 +8771,8 @@ def rebuild_site_hubs(root, tok):
 
 
 def pack_site(root, d, caption):
+    if cf_cfg():
+        caption = re.sub(r"Unzip and upload the CONTENTS to Cloudflare Pages( as Production)?\.", "Tap 🚀 Publish below to put it live.", caption)
     import zipfile
     zp = Path(d) / f"kemet-site-{datetime.datetime.now().strftime('%Y%m%d-%H%M')}.zip"
     with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -9233,7 +9263,7 @@ def write_article(c, st):
                     zf.write(f, f.relative_to(root).as_posix())
         words = article_words(art)
         cap = (f"📰 Site updated: {art['title']} ({words} words, {n} articles in total).\n"
-               "Unzip, then upload the CONTENTS of the folder to Cloudflare Pages (Workers & Pages, your project, Create deployment).")
+               + ("Tap 🚀 Publish below to put it live." if cf_cfg() else "Unzip, then upload the CONTENTS of the folder to Cloudflare Pages (Workers & Pages, your project, Create deployment)."))
         with open(zp, "rb") as f:
             r = S.post(f"{TGAPI}/sendDocument", data={"chat_id": CHAT, "caption": cap}, files={"document": (zp.name, f, "application/zip")}, timeout=300).json()
     if not r.get("ok"):
