@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.94"
+BOT_VERSION = "v10.95"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -8300,6 +8300,28 @@ def site_catalog(root):
     return cat
 
 
+SITE_CSS_FIXES = """
+/* kemet-fixes-1: the decorative glyph sits in the free space of the card, never over the text */
+.archive-card .card-glyph { position: static; transform: none; margin: auto; flex: 0 0 auto; padding: 14px 0; font-size: 7rem; }
+@media (max-width: 960px) { .archive-card .card-glyph { font-size: 5.2rem; } }
+@media (max-width: 640px) { .archive-card .card-glyph { font-size: 4.4rem; } .archive-card h3 { overflow-wrap: anywhere; hyphens: auto; } }
+"""
+
+
+def ensure_site_css(root):
+    """Append the stylesheet fixes once (safe to run again). Returns True when the file changed."""
+    css = Path(root) / "styles.css"
+    if not css.exists():
+        return False
+    t = css.read_text(encoding="utf-8")
+    if "kemet-fixes-1" in t:
+        return False
+    css.write_text(t.rstrip() + "\n" + SITE_CSS_FIXES, encoding="utf-8")
+    return True
+
+
+
+
 KEY_SRC_CSS = """
 .key-sources { margin: 0 0 34px; padding: 16px 18px; border: 1px solid var(--line-gold); border-radius: 12px; font-size: .86rem; line-height: 1.7; color: var(--sand-muted); }
 .key-sources strong { display: block; margin-bottom: 6px; font: 500 .62rem var(--mono); letter-spacing: .11em; text-transform: uppercase; color: var(--gold); }
@@ -8372,6 +8394,7 @@ def build_listing(root, cat):
         lp.write_text(s2, encoding="utf-8")
     try:
         add_key_sources(root)
+        ensure_site_css(root)
     except Exception as e:
         print("key sources:", clean(e)[:120])
     try:
@@ -8535,6 +8558,7 @@ LOGO_LOCKUP_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 5
 def apply_site_logo(root):
     """Replace the site's mark (header, favicon, search-engine logo) with the hieroglyph logo and add the full lockup. Returns the number of pages whose text changed."""
     root = Path(root)
+    ensure_site_css(root)
     (root / "brand-mark.svg").write_text(LOGO_MARK_SVG, encoding="utf-8")
     (root / "logo").mkdir(exist_ok=True)
     (root / "logo" / "kemet-logo-lockup.svg").write_text(LOGO_LOCKUP_SVG, encoding="utf-8")
