@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.85"
+BOT_VERSION = "v10.87"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2759,6 +2759,8 @@ def on_prop(jid, act, st):
         st["props"].pop(jid, None)
         cfg = fb_cfg()
         return send("✅ Posted to your Facebook Page " + cfg.get("page_name", "") + ".\nhttps://www.facebook.com/" + str(pid_ or cfg.get("page_id", "")))
+    if act == "cp" and kind == "sitepub":
+        return do_site_publish(prop, st)
     if act == "ax" and kind == "artfix":
         return deepen_article(prop["items"][int(st.get("_val", "0"))], st)
     if act == "pd" and kind == "pldup":
@@ -7015,7 +7017,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/idea - fresh video ideas, then a fact-checked script\n"
         "/titles - better titles for your older videos (you approve each)\n"
         "/comments - draft replies to comments with no reply (you approve each)\n"
-        "/comments redo - bring back comments you skipped and check them again\n"
+        "/comments redo - bring back skipped comments\n"
         "/subtitles - English + Arabic subtitles for your latest video\n"
         "/crosspost - captions for TikTok, Reels, Facebook\n"
         "/series - add your latest video to a playlist\n"
@@ -7031,10 +7033,10 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/watchnext - add 'Watch next' links to old descriptions\n"
         "/hashtags - refresh old hashtags from what is trending now\n"
         "/learned - what I learned (forget or pause any time)\n"
-        "/fullrefresh - one tap: refresh everything I know with the newest data\n"
+        "/fullrefresh - refresh everything I know\n"
         "/script - fact-checked script on your topic, in your style\n"
         "/affiliate - real affiliate programs and sponsors that fit\n"
-        "/translate - Spanish, Portuguese and Hindi subtitles for my latest video\n"
+        "/translate - ES, PT, HI subtitles for my latest video\n"
         "/shortcuts - best moments of my long video, for Shorts\n"
         "/playlists - build themed playlists for my videos (you approve)\n"
         "/watch - check the channel for problems (also runs by itself)\n"
@@ -7042,9 +7044,12 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/checklast - check my YouTube upload (or paste link)\n"
         "/image <subject> - AI picture + real photo\n"
         "/articles - website articles\n"
-        "/articlelinks - link articles in descriptions\n"
+        "/articlelinks - links in descriptions\n"
         "/dupes - merge duplicate playlists\n"
-        "/articlecheck - deepen short articles\n"
+        "/merge - merge playlists\n"
+        "/publish - put the site live\n"
+        "/cfsetup - 1-tap site publishing\n"
+        "/articlecheck - deepen articles\n"
         "/visuals - real, mix or AI pics\n"
         "/schedule - pick a publish time (/autoschedule on|off, /besthour 17)\n"
         "/trends - what is hot now in the niche (tags, topics)\n"
@@ -7053,7 +7058,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/fbsetup - link your Facebook Page (for /crosspost)\n"
         "/news - fresh Egypt news to turn into videos\n"
         "/pins - fix repeated or weak pinned comments (you tap)\n"
-        "/audit - Kemet Audited: test a myth against evidence (or /audit your claim)\n"
+        "/audit - Kemet Audited: test a myth (or /audit your claim)\n"
         "/audited - /audit + video (Charon); add pov first for POV version\n"
         "/longform - plan long videos (they earn more)\n"
         "/batch - 5 scripts to film in one sitting\n"
@@ -7327,6 +7332,17 @@ def on_message(msg, st):
         cmd_checkvideo(st, YT_LINK.search(raw).group(1))
     elif text.startswith("/articlecheck"):
         cmd_articlecheck(st)
+    elif text.startswith("/cfconnect"):
+        cmd_cfconnect(msg, st, raw)
+    elif text == "/cfsetup":
+        cmd_cfsetup(st)
+    elif text == "/cfoff":
+        mem().pop("cf", None)
+        send("Cloudflare key removed. I will send zips again instead of a Publish button.")
+    elif text.startswith("/publish"):
+        cmd_publish(st)
+    elif text.startswith("/merge"):
+        cmd_merge(st)
     elif text.startswith("/dupes"):
         cmd_dupes(st)
     elif text.startswith("/articlelinks"):
@@ -7365,7 +7381,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -8325,6 +8341,102 @@ def store_site_zip(msg):
     send("✅ Saved your site zip (" + str(len(names)) + " files). Now /articles writes a long article for your most viewed videos and sends you the updated full site to upload to Cloudflare.")
 
 
+# ---------------- one-tap publishing to Cloudflare Pages (no manual zip upload) ----------------
+CF_API = "https://api.cloudflare.com/client/v4"
+CF_SETUP_HELP = (
+    "🚀 Let me publish the website for you (free, one-time setup, about 3 minutes).\n\n"
+    "1. Open dash.cloudflare.com → Workers & Pages. On the right side copy your Account ID.\n"
+    "2. Tap your profile icon (top right) → My Profile → API Tokens → Create Token → Create Custom Token. "
+    "Name it Kemet. Permissions: Account → Cloudflare Pages → Edit. Account Resources: include your account. Create Token, then copy the token (it is shown once).\n"
+    "3. Send me ONE message (I delete it at once):\n"
+    "/cfconnect TOKEN ACCOUNT_ID kemet-stories\n\n"
+    "(kemet-stories is your Pages project name.) I keep it encrypted in my notes. After that, every time I update the site you get a "
+    "🚀 Publish button: nothing goes live until you tap it. /cfoff removes the key. "
+    "If a screen looks different, send me a screenshot and I will adapt the steps."
+)
+
+
+def cf_cfg():
+    return mem().get("cf") or {}
+
+
+def cmd_cfsetup(st):
+    send(CF_SETUP_HELP)
+
+
+def cmd_cfconnect(msg, st, raw):
+    parts = raw.split()
+    forget_message(msg)
+    if len(parts) < 3:
+        return send("I need: /cfconnect TOKEN ACCOUNT_ID kemet-stories. I deleted what you sent. Send /cfsetup for the steps.")
+    token, acct = parts[1], parts[2]
+    proj = parts[3] if len(parts) > 3 else "kemet-stories"
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", acct):
+        return send("The Account ID is 32 letters and numbers (find it on the right side of Workers & Pages). I deleted your message. Send it again, or /cfsetup.")
+    try:
+        r = S.get(f"{CF_API}/accounts/{acct}/pages/projects/{proj}", headers={"Authorization": f"Bearer {token}"}, timeout=40)
+        j = r.json()
+    except Exception as e:
+        return send("I could not reach Cloudflare: " + clean(e)[:160])
+    if not j.get("success"):
+        err = "; ".join(str(e.get("message", ""))[:100] for e in (j.get("errors") or [])[:2]) or f"HTTP {r.status_code}"
+        return send("Cloudflare did not accept that: " + err + "\nCheck the token has Cloudflare Pages: Edit, the Account ID is right and the project name is exactly as in Workers & Pages. I deleted your message; send it again.")
+    res = j.get("result") or {}
+    mem()["cf"] = {"token": token, "account": acct, "project": proj, "branch": res.get("production_branch") or "main", "ts": time.time()}
+    send(f"✅ Connected to your Cloudflare Pages project {res.get('name', proj)}. Your message is deleted and the key is kept encrypted.\n"
+         "From now on, after each site update you get a 🚀 Publish button. /publish puts the current site live (with your tap).")
+
+
+def cf_deploy(file_id):
+    """Upload the stored site zip to Cloudflare Pages as the Production deployment. Returns (ok, text)."""
+    cfg = cf_cfg()
+    if not cfg:
+        return False, "Cloudflare is not connected. Send /cfsetup."
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(file_id, d)
+        env = dict(os.environ, CLOUDFLARE_API_TOKEN=cfg["token"], CLOUDFLARE_ACCOUNT_ID=cfg["account"], WRANGLER_SEND_METRICS="false", CI="true")
+        cmd = ["npx", "--yes", "wrangler@3", "pages", "deploy", str(root), "--project-name", cfg["project"], "--branch", cfg.get("branch", "main"), "--commit-dirty=true"]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900, env=env, cwd=d)
+        except Exception as e:
+            return False, clean(e)[:200]
+        out = (r.stdout or "") + "\n" + (r.stderr or "")
+        if r.returncode != 0:
+            out = out.replace(cfg["token"], "***")
+            return False, "Cloudflare refused the upload: " + clean(out.strip().splitlines()[-1] if out.strip() else "no details")[:240]
+        m = re.search(r"https://[\w.-]+\.pages\.dev", out)
+        return True, m.group(0) if m else ""
+
+
+def offer_publish(st):
+    """After the site changed: a Publish button (only if Cloudflare is connected). Nothing goes live without the tap."""
+    sz = mem().get("site_zip")
+    if not cf_cfg() or not sz:
+        return
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "sitepub", "file_id": sz["file_id"], "created": time.time()}
+    send("Ready to put this version live on your website?", [[btn("🚀 Publish now", pid, "cp"), btn("Not now", pid, "cs")]])
+
+
+def cmd_publish(st):
+    if not cf_cfg():
+        return send("Cloudflare is not connected yet, so I cannot publish for you. Send /cfsetup (3 minutes, free).")
+    if not mem().get("site_zip"):
+        return send("I have no site yet. Send me your site .zip first.")
+    sz = mem()["site_zip"]
+    send(f"The site I hold is {sz.get('name', 'site.zip')}.")
+    offer_publish(st)
+
+
+def do_site_publish(prop, st):
+    send("🚀 Publishing...")
+    ok, info = cf_deploy(prop["file_id"])
+    st["props"].pop(next((k for k, v in st["props"].items() if v is prop), ""), None)
+    if not ok:
+        return send("⚠️ " + info + "\nNothing changed on the website. You can still upload the zip by hand.")
+    send("✅ Published to your website: " + SITE_BASE + "/\n" + (f"This deployment: {info}\n" if info else "") + "The main address can take a few minutes to show the update.")
+
+
 # ---------------- playlist hubs: every YouTube playlist is a section of the site ----------------
 HUB_PROMPT = """Write the introduction for a series page on the website of the history channel "Kemet | Ancient Egypt". The series mirrors the YouTube playlist "{title}".
 Playlist description: {desc}
@@ -8589,6 +8701,7 @@ def cmd_hubs(st):
     if not r.get("ok"):
         return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
     send(f"✅ {n} series pages built from your playlists. Each lists its films; a film shows \"Read the article\" once it has one, otherwise it links to YouTube. /articles writes the articles.")
+    offer_publish(st)
 
 
 def set_description_article(video_id, line, url):
@@ -8639,6 +8752,50 @@ def cmd_dupes(st):
         send(f"Merge all {len(pids)} groups above in one go?", [[btn(f"✅ Merge all {len(pids)}", pa, "pe")]])
 
 
+MERGE_IDEAS = [
+    (("historical origins", "geography and origins"), "Origins and Geography of Kemet"),
+    (("construction and engineering", "architectural enigmas"), "Building Kemet: Construction, Engineering and Trade"),
+    (("gods of kemet", "deities and rulers"), "Gods of Kemet"),
+    (("mathematical wonders", "technology and ritual"), "Science, Technology and Ritual in Kemet"),
+]
+
+
+def cmd_merge(st):
+    """Suggest merging playlists that overlap in topic. Shows the films that would move; nothing changes until you tap."""
+    send("Looking for playlists that overlap...")
+    tok = yt_token()
+    raw = site_playlists(tok)
+    pids = []
+    for keys, newname in MERGE_IDEAS:
+        g = [next((p for p in raw if k in p["title"].lower()), None) for k in keys]
+        if not all(g) or g[0]["id"] == g[1]["id"]:
+            continue
+        g.sort(key=lambda p: -len(p["items"]))
+        keep, drop = g[0], g[1:]
+        have = {i["id"] for i in keep["items"]}
+        add, names = [], []
+        for p in drop:
+            for i in p["items"]:
+                if i["id"] not in have:
+                    have.add(i["id"])
+                    add.append(i["id"])
+                    names.append(i["title"])
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "pldup", "title": keep["title"], "keep": keep["id"], "drop": [p["id"] for p in drop], "add": add, "rename": newname, "created": time.time()}
+        pids.append(pid)
+        listing = "\n".join("• " + n[:70] for n in names[:12]) + (f"\n… and {len(names) - 12} more" if len(names) > 12 else "")
+        send(f"🗂 Merge \"{keep['title']}\" ({len(keep['items'])} films) with " + " + ".join(f"\"{p['title']}\" ({len(p['items'])})" for p in drop)
+             + f".\nNew name: \"{newname}\".\n{len(add)} film(s) move over:\n{listing}\nThe videos themselves are not deleted.",
+             [[btn("✅ Merge", pid, "pd"), btn("Skip", pid, "cs")]])
+    if not pids:
+        return send("I found nothing left to merge. ✅")
+    if len(pids) > 1:
+        pa = new_pid(st)
+        st["props"][pa] = {"type": "pldupall", "pids": pids, "created": time.time()}
+        send(f"Or merge all {len(pids)} in one go:", [[btn(f"✅ Merge all {len(pids)}", pa, "pe")]])
+    send("After merging, send /seriespages to rebuild the site's series pages.")
+
+
 def do_dupe(prop):
     """Copy the missing films into the kept playlist, and only then delete the duplicates. Returns a short result line."""
     tok = yt_token()
@@ -8662,7 +8819,16 @@ def do_dupe(prop):
         r = S.delete(f"{YT}/youtube/v3/playlists?id={pl}", headers=h, timeout=60)
         if r.status_code < 400:
             gone += 1
-    return f"✅ \"{prop['title']}\": {len(prop['add'])} film(s) copied, {gone} duplicate playlist(s) deleted."
+    renamed = ""
+    if prop.get("rename") and prop["rename"] != prop["title"]:
+        try:
+            cur = yt_get("playlists", tok, part="snippet", id=prop["keep"])["items"][0]["snippet"]
+            body = {"id": prop["keep"], "snippet": {"title": prop["rename"], "description": cur.get("description", ""), "defaultLanguage": cur.get("defaultLanguage", "en")}}
+            rr = S.put(f"{YT}/youtube/v3/playlists?part=snippet", headers=h, json=body, timeout=60)
+            renamed = f" Renamed to \"{prop['rename']}\"." if rr.status_code < 400 else " (Rename failed, name unchanged.)"
+        except Exception:
+            renamed = " (Rename failed, name unchanged.)"
+    return f"✅ \"{prop['title']}\": {len(prop['add'])} film(s) copied, {gone} playlist(s) deleted.{renamed}"
 
 
 ART_MIN_WORDS = 1700
@@ -8800,6 +8966,7 @@ def deepen_article(item, st):
     if after < ART_MIN_WORDS:
         msg += f"\n⚠️ Still under {ART_MIN_WORDS} words: the sources I found support only that much. Run /articlecheck later to try again."
     send(msg)
+    offer_publish(st)
 
 
 def cmd_articlelinks(st):
@@ -9013,8 +9180,9 @@ def write_article(c, st):
     if words < 1500:
         msg += f"\n\n⚠️ It came out shorter than planned ({words} words)."
     msg += "\n\nSources used (shown on the page):\n" + "\n".join(f"• {t[:70]}: {u}" for t, u in srcs[:8])
-    msg += "\n\nAI can be wrong: open the sources for anything surprising. After you upload the site, send /articlelinks to add the article link to the video's description (with your tap). Then /articles again for the next one."
+    msg += "\n\nAI can be wrong: open the sources for anything surprising. After the site is live, send /articlelinks to add the article link to the video's description (with your tap). Then /articles again for the next one."
     send(msg[:3900])
+    offer_publish(st)
 
 
 VISUAL_STYLES = {"real": "📷 Real photos only", "mix": "🎨 Mix of real photos and AI", "ai": "🤖 AI images only"}
@@ -9211,6 +9379,9 @@ def main():
             {"command": "articlecheck", "description": "Check article length, deepen short ones"},
             {"command": "articlelinks", "description": "Put article links in video descriptions"},
             {"command": "dupes", "description": "Merge duplicate playlists"},
+            {"command": "merge", "description": "Merge overlapping playlists"},
+            {"command": "publish", "description": "Put the website live"},
+            {"command": "cfsetup", "description": "Link Cloudflare for one-tap publish"},
             {"command": "visuals", "description": "Real photos, a mix, or AI images"},
             {"command": "audited", "description": "Kemet Audited: check a claim and make the video"},
             {"command": "scout", "description": "What works on other Egypt channels"},
