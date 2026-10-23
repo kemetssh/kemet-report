@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.90"
+BOT_VERSION = "v10.91"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2761,6 +2761,8 @@ def on_prop(jid, act, st):
         return send("✅ Posted to your Facebook Page " + cfg.get("page_name", "") + ".\nhttps://www.facebook.com/" + str(pid_ or cfg.get("page_id", "")))
     if act == "cp" and kind == "sitepub":
         return do_site_publish(prop, st)
+    if act == "sr" and kind == "srcfix":
+        return resource_article(prop["items"][int(st.get("_val", "0"))], st)
     if act == "ax" and kind == "artfix":
         return deepen_article(prop["items"][int(st.get("_val", "0"))], st)
     if act == "pd" and kind == "pldup":
@@ -7390,7 +7392,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -8550,6 +8552,79 @@ def site_check(root):
     return out, len([r for r in pages if r.startswith("articles/") and r.count("/") == 2])
 
 
+def weak_articles(root):
+    """Articles whose source list has no museum, university or journal."""
+    out = []
+    for p in sorted((Path(root) / "articles").glob("*/index.html")):
+        art, _v, _p, srcs = page_article(p.read_text(encoding="utf-8"))
+        if not any(any(g in u.lower() for g in GOOD_SRC) for _, u in srcs):
+            out.append({"slug": p.parent.name, "title": art["title"]})
+    return out
+
+
+def resource_article(item, st):
+    """Look for museum, university and journal sources for an article, check its claims against them, soften what they do not support, and add the good sources."""
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("I do not have your site zip yet. Send it as a file first.")
+    send("🏛 Looking for museum and university sources for: " + item["title"] + "\nThis takes about 3 to 5 minutes.")
+    tok = yt_token()
+    found = []
+    for q in (item["title"] + " British Museum", item["title"] + " Metropolitan Museum of Art", item["title"] + " Egyptology university research",
+              item["title"] + " archaeology journal study"):
+        try:
+            found += [(x["title"], x["url"]) for x in web_search(q, 6) if any(g in x["url"].lower() for g in GOOD_SRC)]
+        except Exception as e:
+            print("resource search:", clean(e)[:100])
+    found = dedupe_sources(found, 8)
+    if not found:
+        return send("I could not find a museum, university or journal page for this topic right now (search may be busy). I left the article as it is. Try again later.")
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        pg = root / "articles" / item["slug"] / "index.html"
+        if not pg.exists():
+            return send("That article is no longer in the site zip.")
+        art, vid, pub, old_srcs = page_article(pg.read_text(encoding="utf-8"))
+        before = article_words(art)
+        s3, solid, softened, notes, ran = art_fact_check(art, art["title"])
+        srcs = rank_sources(dedupe_sources([tuple(x) for x in list(found) + list(s3) + list(old_srcs)], 16))[:8]
+        if not any(any(g in u.lower() for g in GOOD_SRC) for _, u in srcs):
+            return send("The pages I found were not from museums, universities or journals, so I changed nothing.")
+        v = {"id": vid, "title": art["title"], "desc": "", "published": pub, "iso": "", "secs": 0}
+        try:
+            it = (yt_get("videos", tok, part="snippet,contentDetails", id=vid).get("items") or [None])[0]
+            if it:
+                v.update(title=it["snippet"]["title"], desc=it["snippet"].get("description", ""), published=it["snippet"].get("publishedAt", pub),
+                         iso=it["contentDetails"].get("duration", ""), secs=iso_seconds(it["contentDetails"].get("duration", "")))
+        except Exception as e:
+            print("video facts:", clean(e)[:100])
+        cat = site_catalog(root)
+        others = sorted([x for x in cat if x["slug"] != item["slug"]], key=lambda x: x["pub"], reverse=True)
+        series = None
+        try:
+            for pl in site_playlists(tok):
+                if vid in [i["id"] for i in pl["items"]]:
+                    series = {"title": pl["title"], "slug": pl_slug(pl)}
+                    break
+        except Exception as e:
+            print("series:", clean(e)[:100])
+        pg.write_text(art_page(art, v, item["slug"], srcs, others, series), encoding="utf-8")
+        build_listing(root, site_catalog(root))
+        r = pack_site(root, d, f"🏛 Site updated: better sources for {art['title']}.")
+    if not r.get("ok"):
+        return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
+    good_n = sum(1 for _, u in srcs if any(g in u.lower() for g in GOOD_SRC))
+    msg = f"✅ {art['title']}: {good_n} museum, university or journal source(s) now listed (the page also shows a Key sources box)."
+    if ran:
+        msg += f"\n🔎 Claims checked: ✅ {solid} confirmed" + (f", ⚠️ {softened} softened" if softened else "")
+        msg += ("\n" + "\n".join("• " + x[:160] for x in notes[:3])) if notes else ""
+    else:
+        msg += "\n⚠️ Search was busy, so the claim check did not run."
+    msg += f"\nWords: {before} → {article_words(art)}."
+    send(msg)
+    offer_publish(st)
+
+
 def site_week(st, auto=False):
     """Weekly: check the site, then offer the next articles and the short ones to deepen. Nothing is changed or published without a tap."""
     sz = mem().get("site_zip")
@@ -8559,6 +8634,7 @@ def site_week(st, auto=False):
         with tempfile.TemporaryDirectory() as d:
             root = site_zip_from(sz["file_id"], d)
             found, n = site_check(root)
+            weak = weak_articles(root)
     except Exception as e:
         return None if auto else send("I could not read the site zip: " + clean(e)[:160])
     send(f"🌐 Weekly website check: {n} articles.\n" + ("\n".join(found) if found else "✅ No broken links, every page has its tags, every article is long enough and has sources."))
@@ -8571,6 +8647,11 @@ def site_week(st, auto=False):
             cmd_articlecheck(st)
         except Exception as e:
             print("siteweek check:", clean(e)[:120])
+    if weak:
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "srcfix", "items": weak[:6], "created": time.time()}
+        send("These articles need better sources. Tap one and I look for museum, university and journal pages, check the claims against them, and rebuild the page:",
+             [[btn("🏛 " + w["title"][:48], pid, "sr", str(i))] for i, w in enumerate(weak[:6])])
     offer_publish(st)
 
 
