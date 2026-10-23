@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.89"
+BOT_VERSION = "v10.90"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -8062,6 +8062,7 @@ Structure: an opening that starts on the most interesting concrete thing (an obj
 RULES: Use only facts from the FACT SHEET below. Name the type of source in the text ("according to the British Museum", "excavation reports from Giza") but never invent a source, quote, date or number.
 Never use absolute words (always, never, entirely, proved, all, nothing) unless the sources say exactly that; prefer "most", "usually", "the evidence suggests". Keep sites and periods apart. Do not copy sentences from any source.
 Say plainly when something is unknown or disputed. No hype, no "you will not believe", no clickbait.
+EVIDENCE FIRST: every section must contain at least one concrete, checkable detail from the fact sheet (a site, object, date, measurement, excavation or named institution or researcher). Never write a paragraph that is only mood or atmosphere. Keep imagery to one short sentence at the start of a section, then move to evidence. Name a scholar or institution only if the fact sheet names it. Label the strength of claims with plain words: "excavation reports show", "researchers infer", "some scholars argue", "no source I found confirms".
 FORMAT (exactly, one item per line, plain text, no markdown, no bullets):
 TITLE: article title, 45 to 65 characters, true and curious
 DECK: one or two sentences (max 260 characters)
@@ -8288,6 +8289,34 @@ def site_catalog(root):
     return cat
 
 
+KEY_SRC_CSS = """
+.key-sources { margin: 0 0 34px; padding: 16px 18px; border: 1px solid var(--line-gold); border-radius: 12px; font-size: .86rem; line-height: 1.7; color: var(--sand-muted); }
+.key-sources strong { display: block; margin-bottom: 6px; font: 500 .62rem var(--mono); letter-spacing: .11em; text-transform: uppercase; color: var(--gold); }
+.key-sources a { color: var(--sand); text-decoration: underline; text-decoration-color: var(--line-gold); text-underline-offset: 3px; }
+"""
+
+
+def add_key_sources(root):
+    """A 'Key sources' box at the top of each article: up to 3 museum, university or journal sources from its own source list. Safe to run again."""
+    n = 0
+    for p in (root / "articles").glob("*/index.html"):
+        t = p.read_text(encoding="utf-8")
+        aside = (re.search(r'<aside class="article-sources">(.*?)</aside>', t, re.S) or [None, ""])[1]
+        good = [(html.unescape(re.sub(r"<[^>]+>|\s*↗\s*$", "", ti)).strip(), html.unescape(u)) for u, ti in re.findall(r'<a href="([^"]+)"[^>]*>(.*?)</a>', aside, re.S)
+                if any(g in u.lower() for g in GOOD_SRC)][:3]
+        t2 = re.sub(r'<div class="key-sources">.*?</div>\n?', "", t, count=1, flags=re.S)
+        if good:
+            box = '<div class="key-sources"><strong>Key sources</strong>' + " · ".join(f'<a href="{esc(u)}" rel="noopener" target="_blank">{esc(ti[:70])}</a>' for ti, u in good) + "</div>\n"
+            t2 = t2.replace('<article class="article-body">\n', '<article class="article-body">\n' + box, 1) if '<article class="article-body">\n' in t2 else t2.replace('<article class="article-body">', '<article class="article-body">' + box, 1)
+        if t2 != t:
+            p.write_text(t2, encoding="utf-8")
+            n += 1
+    css = root / "styles.css"
+    if css.exists() and ".key-sources" not in css.read_text(encoding="utf-8"):
+        css.write_text(css.read_text(encoding="utf-8") + KEY_SRC_CSS, encoding="utf-8")
+    return n
+
+
 def refresh_home_reads(root, extra):
     """Keep the home page's 'More in-depth reads' list at the 12 newest articles (the 5 original cards are not repeated)."""
     hp = root / "index.html"
@@ -8330,6 +8359,10 @@ def build_listing(root, cat):
         s2 = re.sub(r'(<div class="archive-grid">).*?(</div></section>)', lambda m: m.group(1) + "".join(cards) + m.group(2), s, count=1, flags=re.S)
         s2 = re.sub(r"<span>\d+ articles</span>", f"<span>{len(order)} articles</span>", s2, count=1)
         lp.write_text(s2, encoding="utf-8")
+    try:
+        add_key_sources(root)
+    except Exception as e:
+        print("key sources:", clean(e)[:120])
     try:
         refresh_home_reads(root, extra)
     except Exception as e:
@@ -8480,7 +8513,7 @@ def site_check(root):
     root = Path(root)
     pages = {p.relative_to(root).as_posix(): p for p in root.rglob("*.html")}
     sm = (root / "sitemap.xml").read_text(encoding="utf-8") if (root / "sitemap.xml").exists() else ""
-    broken, nometa, thin, fewsrc, nomap = [], [], [], [], []
+    broken, nometa, thin, fewsrc, nomap, weak = [], [], [], [], [], []
     for rel, p in pages.items():
         t = p.read_text(encoding="utf-8", errors="ignore")
         if rel != "404.html" and not (re.search(r"<title>[^<]{5,}</title>", t) and 'rel="canonical"' in t and re.search(r'name="description"', t)):
@@ -8497,6 +8530,8 @@ def site_check(root):
                 thin.append(art[0]["title"])
             if len(art[3]) < 3:
                 fewsrc.append(art[0]["title"])
+            if not any(any(g in u.lower() for g in GOOD_SRC) for _, u in art[3]):
+                weak.append(art[0]["title"])
             if f"{SITE_BASE}/{rel.rsplit('/', 1)[0]}/" not in sm:
                 nomap.append(rel.rsplit("/", 1)[0])
     out = []
@@ -8508,6 +8543,8 @@ def site_check(root):
         out.append(f"📏 {len(thin)} article(s) under {ART_MIN_WORDS} words: " + "; ".join(t[:40] for t in thin[:4]))
     if fewsrc:
         out.append(f"📚 {len(fewsrc)} article(s) with fewer than 3 sources: " + "; ".join(t[:40] for t in fewsrc[:4]))
+    if weak:
+        out.append(f"🏛 {len(weak)} article(s) have no museum, university or journal source (only general sites): " + "; ".join(t[:40] for t in weak[:4]))
     if nomap:
         out.append(f"🗺 {len(nomap)} article(s) missing from the sitemap: " + ", ".join(nomap[:4]))
     return out, len([r for r in pages if r.startswith("articles/") and r.count("/") == 2])
@@ -8529,7 +8566,7 @@ def site_week(st, auto=False):
         cmd_articles(st)
     except Exception as e:
         print("siteweek articles:", clean(e)[:120])
-    if any("under" in f for f in found):
+    if any(f.startswith("📏") for f in found):
         try:
             cmd_articlecheck(st)
         except Exception as e:
@@ -8753,12 +8790,47 @@ def vid_slug_map(root):
     return m
 
 
+def relink_series(root, pls):
+    """After playlists were merged or renamed: point each article's series link (and breadcrumb) at the playlist its film is in now. Returns how many pages changed."""
+    live = {pl_slug(pl): pl for pl in pls}
+    by_vid = {}
+    for pl in pls:
+        for it in pl["items"]:
+            by_vid.setdefault(it["id"], pl)
+    n = 0
+    for p in (root / "articles").glob("*/index.html"):
+        t = p.read_text(encoding="utf-8")
+        m = re.search(r'/playlists/([a-z0-9-]+)/">Part of the series: ([^<]*?) →', t)
+        vid = (re.search(r'data-yt="([\w-]{11})"', t) or re.search(r"watch\?v=([\w-]{11})", t) or [None, ""])[1]
+        pl = by_vid.get(vid)
+        if not m or not pl:
+            continue
+        old, oldt, new, newt = m.group(1), m.group(2), pl_slug(pl), esc(pl["title"])
+        if old == new and oldt == newt:
+            continue
+        t2 = t.replace(f'/playlists/{old}/">Part of the series: {oldt} →', f'/playlists/{new}/">Part of the series: {newt} →')
+        t2 = t2.replace(f'/playlists/{old}/"', f'/playlists/{new}/"').replace(f'{SITE_BASE}/playlists/{old}/', f'{SITE_BASE}/playlists/{new}/')
+        t2 = re.sub(r'("name": )"' + re.escape(html.unescape(oldt)) + r'"', lambda mm: mm.group(1) + json.dumps(pl["title"], ensure_ascii=False), t2)
+        if t2 != t:
+            p.write_text(t2, encoding="utf-8")
+            n += 1
+    return n
+
+
 def rebuild_site_hubs(root, tok):
     pls = site_playlists(tok)
     if not pls:
         return 0
+    try:
+        build_listing(root, site_catalog(root))          # also refreshes the home page list and the key-sources boxes
+    except Exception as e:
+        print("listing:", clean(e)[:120])
     vs = vid_slug_map(root)
     urls = build_hubs(root, pls, vs)
+    try:
+        relink_series(root, pls)
+    except Exception as e:
+        print("relink:", clean(e)[:120])
     add_series_nav(root)
     sm = root / "sitemap.xml"
     if sm.exists():
@@ -9248,6 +9320,7 @@ def write_article(c, st):
         try:
             if pls:
                 bu = build_hubs(root, pls, vid_slug_map(root))
+                relink_series(root, pls)
                 add_series_nav(root)
                 sm_ = root / "sitemap.xml"
                 s_ = re.sub(r"  <url><loc>[^<]*/playlists/[^<]+</loc>\n    <lastmod>[^<]*</lastmod></url>\n", "", sm_.read_text(encoding="utf-8"))
