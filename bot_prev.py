@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.91"
+BOT_VERSION = "v10.92"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -9226,7 +9226,19 @@ def deepen_article(item, st):
 
 def cmd_articlelinks(st):
     """For every article that is live on the site, propose a 'Read the full article' line in its video's description (nothing changes until you tap)."""
-    arts = mem().get("articles") or {}
+    arts = dict(mem().get("articles") or {})
+    try:                                                    # articles made before the bot (and any not in my notes) are found in the site itself
+        sz = mem().get("site_zip")
+        if sz:
+            with tempfile.TemporaryDirectory() as d:
+                root = site_zip_from(sz["file_id"], d)
+                taken = {a["slug"] for a in arts.values()}
+                for vid, slug in vid_slug_map(root).items():
+                    if vid not in arts and slug not in taken:
+                        arts[vid] = {"slug": slug, "title": page_article((root / "articles" / slug / "index.html").read_text(encoding="utf-8"))[0]["title"]}
+                        taken.add(slug)
+    except Exception as e:
+        print("articlelinks site scan:", clean(e)[:120])
     if not arts:
         return send("No articles written yet. Send /articles first.")
     tok = yt_token()
