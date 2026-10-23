@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.92"
+BOT_VERSION = "v10.94"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -7024,7 +7024,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "I will check it and give you choices to tap. Nothing goes on YouTube without your tap.\n\n"
         "/idea - fresh video ideas, then a fact-checked script\n"
         "/titles - better titles for your older videos (you approve each)\n"
-        "/comments - draft replies to comments with no reply (you approve each)\n"
+        "/comments - draft replies to comments (you approve)\n"
         "/comments redo - bring back skipped comments\n"
         "/subtitles - English + Arabic subtitles for your latest video\n"
         "/crosspost - captions for TikTok, Reels, Facebook\n"
@@ -7034,7 +7034,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/scout - what works on other Egypt channels, and ideas\n"
         "/bigsetup - let me handle videos over 20 MB (I shrink them for you)\n"
         "/ytauth - new YouTube login so I can post comments and captions\n"
-        "/asked - turn viewer questions into videos (You Asked, Kemet Answered)\n"
+        "/asked - viewer questions into videos\n"
         "/review - weekly self-review now (also runs by itself on Sundays)\n"
         "/funnel - point your Shorts viewers to a long video\n"
         "/besttime - when to post, from your own data\n"
@@ -7057,13 +7057,15 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/merge - merge playlists\n"
         "/publish - put the site live\n"
         "/siteweek - website check\n"
-        "/cfsetup - 1-tap publishing\n"
+        "/searchdata - Google search ideas\n"
+        "/sitelogo - hieroglyph logo on site\n"
+        "/cfsetup - 1-tap publish\n"
         "/articlecheck - deepen articles\n"
         "/visuals - real, mix or AI pics\n"
         "/schedule - pick a publish time (/autoschedule on|off, /besthour 17)\n"
         "/trends - what is hot now in the niche (tags, topics)\n"
         "/thumbtest - 3 thumbnail options and how to test them\n"
-        "/post - 3 Community posts (poll, fact, teaser) to paste into YouTube\n"
+        "/post - 3 Community posts to paste into YouTube\n"
         "/fbsetup - link your Facebook Page (for /crosspost)\n"
         "/news - fresh Egypt news to turn into videos\n"
         "/pins - fix repeated or weak pinned comments (you tap)\n"
@@ -7154,8 +7156,11 @@ def on_message(msg, st):
     doc = msg.get("document") or {}
     if str(doc.get("file_name", "")).lower().endswith(".py"):
         return cmd_update(msg)
-    if str(doc.get("file_name", "")).lower().endswith(".zip"):
-        return store_site_zip(msg)
+    fn_ = str(doc.get("file_name", "")).lower()
+    if fn_.endswith(".csv"):
+        return handle_gsc_file(msg, st)
+    if fn_.endswith(".zip"):
+        return store_site_zip(msg, st)
     if msg.get("video") or str(doc.get("mime_type", "")).startswith("video/") or \
             str(doc.get("file_name", "")).lower().endswith((".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".3gp")):
         return start_job(msg, st)       # a video sent "as a file" often has an odd mime type, so the name counts too
@@ -7341,6 +7346,10 @@ def on_message(msg, st):
         cmd_checkvideo(st, YT_LINK.search(raw).group(1))
     elif text.startswith("/articlecheck"):
         cmd_articlecheck(st)
+    elif text.startswith("/sitelogo"):
+        cmd_sitelogo(st)
+    elif text.startswith("/searchdata"):
+        cmd_searchdata(st)
     elif text.startswith("/siteweek"):
         site_week(st)
     elif text.startswith("/cfconnect"):
@@ -8391,7 +8400,170 @@ def site_zip_from(file_id, dest_dir):
     raise RuntimeError("the stored site zip has no index.html and styles.css at its top level")
 
 
-def store_site_zip(msg):
+# ---------------- Search Console: topics real people search for (a CSV export you send me; no login needed) ----------------
+GSC_STOP = set("a an and are as at be by can did do does for from how in is it its of on or the this that to was were what when where which who why with your you ancient egypt egyptian egyptians kemet pharaoh pharaohs pharaonic myth truth mystery secret secrets history".split())
+
+
+def gsc_tokens(text):
+    out = set()
+    for w in re.findall(r"[a-z0-9]+", str(text).lower()):
+        if w in GSC_STOP or len(w) < 3:
+            continue
+        out.add(w[:-1] if w.endswith("s") and len(w) > 4 else w)
+    return out
+
+
+def parse_gsc_csv(raw):
+    """A Search Console export of Queries or Pages: [(text, clicks, impressions, position)]. Works with the English column names."""
+    import csv, io
+    txt = raw.decode("utf-8-sig", errors="replace")
+    rows = list(csv.reader(io.StringIO(txt)))
+    if not rows:
+        return []
+    head = [h.strip().lower() for h in rows[0]]
+    def col(*names):
+        for n in names:
+            for i, h in enumerate(head):
+                if h == n or h.startswith(n):
+                    return i
+        return None
+    iq, ic, ii, ip = col("top queries", "query", "queries"), col("clicks"), col("impressions"), col("position")
+    if iq is None or ii is None:
+        return []
+    out = []
+    for r in rows[1:]:
+        try:
+            out.append((r[iq].strip(), int(float(r[ic] or 0)) if ic is not None else 0, int(float(r[ii] or 0)), float(r[ip]) if ip is not None and r[ip] else 0.0))
+        except Exception:
+            continue
+    return out
+
+
+def gsc_ideas(queries, films, have_vids, articles):
+    """Match each search phrase to the film (and article) it fits best. Returns (new, improve): films without an article that people search for, and existing articles that show up in search."""
+    new, improve = {}, {}
+    for q, clicks, imp, pos in queries:
+        qt = gsc_tokens(q)
+        if not qt or imp <= 0:
+            continue
+        best, bs = None, 0
+        for f in films:
+            ft = gsc_tokens(f["title"])
+            sc = len(qt & ft) / max(1, len(qt)) + 0.01 * len(qt & ft)
+            common = qt & ft
+            if (len(common) >= 2 or (common and max(len(w) for w in common) >= 7) or (len(qt) == 1 and common)) and sc > bs:
+                best, bs = f, sc
+        if not best:
+            continue
+        if best["id"] in have_vids:
+            e = improve.setdefault(best["id"], {"title": articles.get(best["id"], best["title"]), "imp": 0, "clicks": 0, "qs": [], "pos": []})
+        else:
+            e = new.setdefault(best["id"], {"id": best["id"], "title": best["title"], "imp": 0, "clicks": 0, "qs": [], "pos": []})
+        e["imp"] += imp
+        e["clicks"] += clicks
+        e["qs"].append(q)
+        e["pos"].append(pos)
+    n = sorted(new.values(), key=lambda e: -e["imp"])
+    i = sorted(improve.values(), key=lambda e: -e["imp"])
+    return n, i
+
+
+def handle_gsc_file(msg, st):
+    """The owner sends the Search Console export (the zip, or Queries.csv). Reply with article ideas from real searches."""
+    import zipfile
+    doc = msg.get("document") or {}
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "f"
+        tg_download(doc["file_id"], p)
+        raw = None
+        if str(doc.get("file_name", "")).lower().endswith(".zip"):
+            with zipfile.ZipFile(p) as zf:
+                for n in zf.namelist():
+                    if n.lower().endswith("queries.csv"):
+                        raw = zf.read(n)
+        else:
+            raw = p.read_bytes()
+    queries = parse_gsc_csv(raw or b"")
+    if not queries:
+        return send("I could not read search phrases from that file. In Search Console open Performance, tap Export (top right), choose Download CSV, and send me the zip or the Queries file.")
+    tok = yt_token()
+    films = []
+    for pl in site_playlists(tok):
+        films += pl["items"]
+    sz = mem().get("site_zip")
+    have, titles = set((mem().get("articles") or {})), {k: v.get("title", "") for k, v in (mem().get("articles") or {}).items()}
+    if sz:
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                root = site_zip_from(sz["file_id"], d)
+                for vid, slug in vid_slug_map(root).items():
+                    have.add(vid)
+                    titles.setdefault(vid, slug.replace("-", " "))
+        except Exception as e:
+            print("gsc site scan:", clean(e)[:100])
+    new, improve = gsc_ideas(queries, films, have, titles)
+    tot = sum(q[2] for q in queries)
+    lines = [f"🔎 Search Console: {len(queries)} search phrases, {tot} impressions, {sum(q[1] for q in queries)} clicks."]
+    if tot < 30:
+        lines.append("That is still very little data (a new site needs a few weeks), so treat these as hints.")
+    if improve:
+        lines.append("\nArticles already showing in search:")
+        for e in improve[:5]:
+            lines.append(f"• {e['title'][:55]}: {e['imp']} impressions, average position {sum(e['pos']) / len(e['pos']):.0f} for \"{e['qs'][0][:40]}\"")
+    if not new:
+        send("\n".join(lines) + "\n\nNo new article idea yet: none of the phrases people used matches a film that has no article.")
+        return
+    cands = [{"id": e["id"], "title": e["title"], "views": e["imp"]} for e in new[:5]]
+    lines.append("\nFilms people are searching for that have no article yet:")
+    for i, e in enumerate(new[:5]):
+        lines.append(f"{i + 1}. {e['title'][:60]} ({e['imp']} impressions, e.g. \"{e['qs'][0][:40]}\")")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "articles", "cands": cands, "ts": time.time()}
+    send("\n".join(lines) + "\n\nTap one and I write the article.", [[btn(f"✍️ {i + 1}. {c['title'][:44]}", pid, "ar", str(i))] for i, c in enumerate(cands)])
+
+
+def cmd_searchdata(st):
+    send("📈 Which topics do people search for? In Search Console (search.google.com/search-console) open Performance, tap Export (top right), choose Download CSV, then send me the file here. "
+         "I match the search phrases to your films and tell you which ones deserve an article first. Nothing is changed or published.")
+
+
+# ---------------- the Kemet hieroglyph logo on the website ----------------
+LOGO_MARK_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="t d"><title id="t">Kemet hieroglyph mark</title><desc id="d">Kemet in Egyptian hieroglyphs, gold on black.</desc><rect width="160" height="160" rx="14" fill="#11120f"/><circle cx="80.0" cy="80.0" r="75.19999999999999" fill="none" stroke="#cda35a" stroke-width="3.2"/><g transform="translate(80.0 49.8) scale(0.0697 -0.0697) translate(-556.5 -342.5)"><path d="M49 0Q88 48 146.0 95.0Q204 142 280 176L83 192Q108 217 149.5 246.5Q191 276 244.5 304.0Q298 332 355 352Q306 357 251.0 361.5Q196 366 151 370Q190 398 243.0 427.5Q296 457 352.5 481.5Q409 506 458 519Q423 523 386.5 527.0Q350 531 321 535Q363 567 407.0 594.5Q451 622 504.0 642.5Q557 663 624.5 674.0Q692 685 781 685H1064V0Z" fill="#cda35a" opacity=".30"/><path d="M92 20H1045V666H781Q673 666 599.5 650.5Q526 635 473.0 608.5Q420 582 373 549L522 531V512Q476 507 419.0 486.5Q362 466 306.0 438.5Q250 411 207 384L409 367L411 350Q350 333 296.0 308.0Q242 283 199.5 256.5Q157 230 130 208L325 192L327 175Q245 141 187.0 100.0Q129 59 92 20Z" fill="#cda35a" opacity=".30"/><path d="M49 0Q88 48 146.0 95.0Q204 142 280 176L83 192Q108 217 149.5 246.5Q191 276 244.5 304.0Q298 332 355 352Q306 357 251.0 361.5Q196 366 151 370Q190 398 243.0 427.5Q296 457 352.5 481.5Q409 506 458 519Q423 523 386.5 527.0Q350 531 321 535Q363 567 407.0 594.5Q451 622 504.0 642.5Q557 663 624.5 674.0Q692 685 781 685H1064V0ZM92 20H1045V666H781Q673 666 599.5 650.5Q526 635 473.0 608.5Q420 582 373 549L522 531V512Q476 507 419.0 486.5Q362 466 306.0 438.5Q250 411 207 384L409 367L411 350Q350 333 296.0 308.0Q242 283 199.5 256.5Q157 230 130 208L325 192L327 175Q245 141 187.0 100.0Q129 59 92 20Z" fill="#e6bd71" stroke="#e6bd71" stroke-width="34" stroke-linejoin="round"/></g><g transform="translate(60.5 114.3) scale(0.0508 -0.0508) translate(-558.0 -491.5)"><path d="M67 -18 49 -4 68 22Q78 35 86.0 45.5Q94 56 124 56H258V292Q258 321 254.5 360.0Q251 399 244.0 441.5Q237 484 225 520L151 609Q118 648 98.0 688.5Q78 729 78 791Q78 839 86.5 892.5Q95 946 115 1001H355Q371 961 382.5 914.5Q394 868 396 821Q428 811 465.0 788.5Q502 766 524 746Q553 735 572.0 718.5Q591 702 604 683L1067 33L1017 -10L884 125L939 6L737 23L638 215L586 246L605 144L587 136L507 179V56H604Q634 56 642.0 45.5Q650 35 659 22L679 -4L659 -18L647 0H285L272 -18L254 -4L257 0H80Z" fill="#cda35a" opacity=".30"/><path d="M298 17H635L619 39H511L488 56V195L497 208L581 163L562 266L574 276L655 228L752 42L905 29L844 164L382 512Q365 525 340.5 544.5Q316 564 297.0 592.0Q278 620 278 660Q278 699 302.0 720.5Q326 742 361.5 751.0Q397 760 431 760Q456 760 478 757Q453 773 424.5 788.0Q396 803 376 810Q376 852 365.5 899.5Q355 947 341 981H129Q112 930 104.5 881.0Q97 832 97 785Q97 745 109.0 714.5Q121 684 137.0 661.5Q153 639 165 623L395 344Q426 307 437.5 270.5Q449 234 449 185V56L428 39H313Z" fill="#cda35a" opacity=".30"/><path d="M304 864Q289 864 279.0 874.0Q269 884 269 899Q269 913 279.0 923.5Q289 934 304 934Q318 934 328.0 923.5Q338 913 338 899Q338 884 328.0 874.0Q318 864 304 864Z" fill="#cda35a" opacity=".30"/><path d="M167 864Q152 864 142.0 874.0Q132 884 132 899Q132 913 142.0 923.5Q152 934 167 934Q181 934 191.5 923.5Q202 913 202 899Q202 884 191.5 874.0Q181 864 167 864Z" fill="#cda35a" opacity=".30"/><path d="M304 880Q311 880 316.5 886.0Q322 892 322 899Q322 907 316.5 912.0Q311 917 304 917Q285 917 285 899Q285 892 290.5 886.0Q296 880 304 880Z" fill="#cda35a" opacity=".30"/><path d="M167 880Q175 880 180.5 886.0Q186 892 186 899Q186 907 180.5 912.0Q175 917 167 917Q160 917 154.0 912.0Q148 907 148 899Q148 892 154.0 886.0Q160 880 167 880Z" fill="#cda35a" opacity=".30"/><path d="M228 774 195 863 213 870 236 808 255 870 272 865 244 774Z" fill="#cda35a" opacity=".30"/><path d="M1019 15 1043 37 589 671Q567 703 530.5 722.5Q494 742 436 742Q404 742 372.0 735.0Q340 728 318.5 709.5Q297 691 297 657Q297 616 326.5 586.5Q356 557 400 523L860 179Z" fill="#cda35a" opacity=".30"/><path d="M93 17H270L273 22Q281 33 288.0 43.0Q295 53 317 55V232L334 245L429 167V186Q429 237 417.0 270.5Q405 304 381 332L254 484Q267 442 272.5 395.5Q278 349 278 299V56L257 39H108Z" fill="#cda35a" opacity=".30"/><path d="M336 56H429V140L336 216Z" fill="#cda35a" opacity=".30"/><path d="M67 -18 49 -4 68 22Q78 35 86.0 45.5Q94 56 124 56H258V292Q258 321 254.5 360.0Q251 399 244.0 441.5Q237 484 225 520L151 609Q118 648 98.0 688.5Q78 729 78 791Q78 839 86.5 892.5Q95 946 115 1001H355Q371 961 382.5 914.5Q394 868 396 821Q428 811 465.0 788.5Q502 766 524 746Q553 735 572.0 718.5Q591 702 604 683L1067 33L1017 -10L884 125L939 6L737 23L638 215L586 246L605 144L587 136L507 179V56H604Q634 56 642.0 45.5Q650 35 659 22L679 -4L659 -18L647 0H285L272 -18L254 -4L257 0H80ZM298 17H635L619 39H511L488 56V195L497 208L581 163L562 266L574 276L655 228L752 42L905 29L844 164L382 512Q365 525 340.5 544.5Q316 564 297.0 592.0Q278 620 278 660Q278 699 302.0 720.5Q326 742 361.5 751.0Q397 760 431 760Q456 760 478 757Q453 773 424.5 788.0Q396 803 376 810Q376 852 365.5 899.5Q355 947 341 981H129Q112 930 104.5 881.0Q97 832 97 785Q97 745 109.0 714.5Q121 684 137.0 661.5Q153 639 165 623L395 344Q426 307 437.5 270.5Q449 234 449 185V56L428 39H313ZM304 864Q289 864 279.0 874.0Q269 884 269 899Q269 913 279.0 923.5Q289 934 304 934Q318 934 328.0 923.5Q338 913 338 899Q338 884 328.0 874.0Q318 864 304 864ZM167 864Q152 864 142.0 874.0Q132 884 132 899Q132 913 142.0 923.5Q152 934 167 934Q181 934 191.5 923.5Q202 913 202 899Q202 884 191.5 874.0Q181 864 167 864ZM304 880Q311 880 316.5 886.0Q322 892 322 899Q322 907 316.5 912.0Q311 917 304 917Q285 917 285 899Q285 892 290.5 886.0Q296 880 304 880ZM167 880Q175 880 180.5 886.0Q186 892 186 899Q186 907 180.5 912.0Q175 917 167 917Q160 917 154.0 912.0Q148 907 148 899Q148 892 154.0 886.0Q160 880 167 880ZM228 774 195 863 213 870 236 808 255 870 272 865 244 774ZM1019 15 1043 37 589 671Q567 703 530.5 722.5Q494 742 436 742Q404 742 372.0 735.0Q340 728 318.5 709.5Q297 691 297 657Q297 616 326.5 586.5Q356 557 400 523L860 179ZM93 17H270L273 22Q281 33 288.0 43.0Q295 53 317 55V232L334 245L429 167V186Q429 237 417.0 270.5Q405 304 381 332L254 484Q267 442 272.5 395.5Q278 349 278 299V56L257 39H108ZM336 56H429V140L336 216Z" fill="#e6bd71" stroke="#e6bd71" stroke-width="34" stroke-linejoin="round"/></g><g transform="translate(107.6 102.2) scale(0.0636 -0.0636) translate(-316.5 -334.0)"><path d="M49 202V225Q49 255 63.5 295.5Q78 336 110.0 375.0Q142 414 193.0 440.0Q244 466 316 466Q389 466 440.0 440.0Q491 414 523.0 375.0Q555 336 569.5 295.5Q584 255 584 225V202Z" fill="#cda35a" opacity=".30"/><path d="M68 222H564Q564 249 550.5 286.5Q537 324 508.0 361.0Q479 398 431.5 422.5Q384 447 316 447Q248 447 200.5 422.5Q153 398 124.0 361.0Q95 324 81.5 286.5Q68 249 68 222Z" fill="#cda35a" opacity=".30"/><path d="M49 202V225Q49 255 63.5 295.5Q78 336 110.0 375.0Q142 414 193.0 440.0Q244 466 316 466Q389 466 440.0 440.0Q491 414 523.0 375.0Q555 336 569.5 295.5Q584 255 584 225V202ZM68 222H564Q564 249 550.5 286.5Q537 324 508.0 361.0Q479 398 431.5 422.5Q384 447 316 447Q248 447 200.5 422.5Q153 398 124.0 361.0Q95 324 81.5 286.5Q68 249 68 222Z" fill="#e6bd71" stroke="#e6bd71" stroke-width="34" stroke-linejoin="round"/></g><g transform="translate(107.6 125.0) scale(0.0439 -0.0439) translate(-340.0 -267.0)"><path d="M340 -24Q280 -24 227.0 -1.5Q174 21 134.0 61.0Q94 101 71.5 154.0Q49 207 49 267Q49 327 71.5 380.0Q94 433 134.0 473.0Q174 513 227.0 535.5Q280 558 340 558Q400 558 452.5 535.5Q505 513 545.5 473.0Q586 433 608.5 380.0Q631 327 631 267Q631 207 608.5 154.0Q586 101 545.5 61.0Q505 21 452.5 -1.5Q400 -24 340 -24Z" fill="#cda35a" opacity=".30"/><path d="M340 356 480 499Q449 518 413.5 528.5Q378 539 340 539Q301 539 265.5 528.5Q230 518 199 499Z" fill="#cda35a" opacity=".30"/><path d="M183 46 340 205 497 46Q516 59 532.0 75.0Q548 91 561 110L402 267L561 424Q548 443 532.0 459.0Q516 475 497 488L340 329L183 488Q145 462 119 424L278 267L119 110Q145 72 183 46Z" fill="#cda35a" opacity=".30"/><path d="M108 126 250 267 108 408Q89 377 78.5 341.0Q68 305 68 267Q68 228 78.5 192.5Q89 157 108 126Z" fill="#cda35a" opacity=".30"/><path d="M572 126Q611 190 611 267Q611 344 572 408L429 267Z" fill="#cda35a" opacity=".30"/><path d="M340 -4Q416 -4 480 35L340 178L199 35Q263 -4 340 -4Z" fill="#cda35a" opacity=".30"/><path d="M340 -24Q280 -24 227.0 -1.5Q174 21 134.0 61.0Q94 101 71.5 154.0Q49 207 49 267Q49 327 71.5 380.0Q94 433 134.0 473.0Q174 513 227.0 535.5Q280 558 340 558Q400 558 452.5 535.5Q505 513 545.5 473.0Q586 433 608.5 380.0Q631 327 631 267Q631 207 608.5 154.0Q586 101 545.5 61.0Q505 21 452.5 -1.5Q400 -24 340 -24ZM340 356 480 499Q449 518 413.5 528.5Q378 539 340 539Q301 539 265.5 528.5Q230 518 199 499ZM183 46 340 205 497 46Q516 59 532.0 75.0Q548 91 561 110L402 267L561 424Q548 443 532.0 459.0Q516 475 497 488L340 329L183 488Q145 462 119 424L278 267L119 110Q145 72 183 46ZM108 126 250 267 108 408Q89 377 78.5 341.0Q68 305 68 267Q68 228 78.5 192.5Q89 157 108 126ZM572 126Q611 190 611 267Q611 344 572 408L429 267ZM340 -4Q416 -4 480 35L340 178L199 35Q263 -4 340 -4Z" fill="#e6bd71" stroke="#e6bd71" stroke-width="34" stroke-linejoin="round"/></g></svg>'''
+LOGO_LOCKUP_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 520" role="img" aria-labelledby="t d"><title id="t">Kemet logo with name</title><desc id="d">Kemet in hieroglyphs beside the name KEMET and the words Ancient Egypt.</desc><rect width="1600" height="520" fill="#11120f"/><circle cx="260.0" cy="260.0" r="236.6" fill="none" stroke="#cda35a" stroke-width="6"/><circle cx="260.0" cy="260.0" r="156.0" fill="#cda35a" opacity=".13"/><g transform="translate(260.0 178.1) scale(0.1886 -0.1886) translate(-556.5 -342.5)"><path d="M49 0Q88 48 146.0 95.0Q204 142 280 176L83 192Q108 217 149.5 246.5Q191 276 244.5 304.0Q298 332 355 352Q306 357 251.0 361.5Q196 366 151 370Q190 398 243.0 427.5Q296 457 352.5 481.5Q409 506 458 519Q423 523 386.5 527.0Q350 531 321 535Q363 567 407.0 594.5Q451 622 504.0 642.5Q557 663 624.5 674.0Q692 685 781 685H1064V0Z" fill="#cda35a" opacity=".30"/><path d="M92 20H1045V666H781Q673 666 599.5 650.5Q526 635 473.0 608.5Q420 582 373 549L522 531V512Q476 507 419.0 486.5Q362 466 306.0 438.5Q250 411 207 384L409 367L411 350Q350 333 296.0 308.0Q242 283 199.5 256.5Q157 230 130 208L325 192L327 175Q245 141 187.0 100.0Q129 59 92 20Z" fill="#cda35a" opacity=".30"/><path d="M49 0Q88 48 146.0 95.0Q204 142 280 176L83 192Q108 217 149.5 246.5Q191 276 244.5 304.0Q298 332 355 352Q306 357 251.0 361.5Q196 366 151 370Q190 398 243.0 427.5Q296 457 352.5 481.5Q409 506 458 519Q423 523 386.5 527.0Q350 531 321 535Q363 567 407.0 594.5Q451 622 504.0 642.5Q557 663 624.5 674.0Q692 685 781 685H1064V0ZM92 20H1045V666H781Q673 666 599.5 650.5Q526 635 473.0 608.5Q420 582 373 549L522 531V512Q476 507 419.0 486.5Q362 466 306.0 438.5Q250 411 207 384L409 367L411 350Q350 333 296.0 308.0Q242 283 199.5 256.5Q157 230 130 208L325 192L327 175Q245 141 187.0 100.0Q129 59 92 20Z" fill="#e6bd71" stroke="#e6bd71" stroke-width="14" stroke-linejoin="round"/></g><g transform="translate(207.2 352.8) scale(0.1375 -0.1375) translate(-558.0 -491.5)"><path d="M67 -18 49 -4 68 22Q78 35 86.0 45.5Q94 56 124 56H258V292Q258 321 254.5 360.0Q251 399 244.0 441.5Q237 484 225 520L151 609Q118 648 98.0 688.5Q78 729 78 791Q78 839 86.5 892.5Q95 946 115 1001H355Q371 961 382.5 914.5Q394 868 396 821Q428 811 465.0 788.5Q502 766 524 746Q553 735 572.0 718.5Q591 702 604 683L1067 33L1017 -10L884 125L939 6L737 23L638 215L586 246L605 144L587 136L507 179V56H604Q634 56 642.0 45.5Q650 35 659 22L679 -4L659 -18L647 0H285L272 -18L254 -4L257 0H80Z" fill="#cda35a" opacity=".30"/><path d="M298 17H635L619 39H511L488 56V195L497 208L581 163L562 266L574 276L655 228L752 42L905 29L844 164L382 512Q365 525 340.5 544.5Q316 564 297.0 592.0Q278 620 278 660Q278 699 302.0 720.5Q326 742 361.5 751.0Q397 760 431 760Q456 760 478 757Q453 773 424.5 788.0Q396 803 376 810Q376 852 365.5 899.5Q355 947 341 981H129Q112 930 104.5 881.0Q97 832 97 785Q97 745 109.0 714.5Q121 684 137.0 661.5Q153 639 165 623L395 344Q426 307 437.5 270.5Q449 234 449 185V56L428 39H313Z" fill="#cda35a" opacity=".30"/><path d="M304 864Q289 864 279.0 874.0Q269 884 269 899Q269 913 279.0 923.5Q289 934 304 934Q318 934 328.0 923.5Q338 913 338 899Q338 884 328.0 874.0Q318 864 304 864Z" fill="#cda35a" opacity=".30"/><path d="M167 864Q152 864 142.0 874.0Q132 884 132 899Q132 913 142.0 923.5Q152 934 167 934Q181 934 191.5 923.5Q202 913 202 899Q202 884 191.5 874.0Q181 864 167 864Z" fill="#cda35a" opacity=".30"/><path d="M304 880Q311 880 316.5 886.0Q322 892 322 899Q322 907 316.5 912.0Q311 917 304 917Q285 917 285 899Q285 892 290.5 886.0Q296 880 304 880Z" fill="#cda35a" opacity=".30"/><path d="M167 880Q175 880 180.5 886.0Q186 892 186 899Q186 907 180.5 912.0Q175 917 167 917Q160 917 154.0 912.0Q148 907 148 899Q148 892 154.0 886.0Q160 880 167 880Z" fill="#cda35a" opacity=".30"/><path d="M228 774 195 863 213 870 236 808 255 870 272 865 244 774Z" fill="#cda35a" opacity=".30"/><path d="M1019 15 1043 37 589 671Q567 703 530.5 722.5Q494 742 436 742Q404 742 372.0 735.0Q340 728 318.5 709.5Q297 691 297 657Q297 616 326.5 586.5Q356 557 400 523L860 179Z" fill="#cda35a" opacity=".30"/><path d="M93 17H270L273 22Q281 33 288.0 43.0Q295 53 317 55V232L334 245L429 167V186Q429 237 417.0 270.5Q405 304 381 332L254 484Q267 442 272.5 395.5Q278 349 278 299V56L257 39H108Z" fill="#cda35a" opacity=".30"/><path d="M336 56H429V140L336 216Z" fill="#cda35a" opacity=".30"/><path d="M67 -18 49 -4 68 22Q78 35 86.0 45.5Q94 56 124 56H258V292Q258 321 254.5 360.0Q251 399 244.0 441.5Q237 484 225 520L151 609Q118 648 98.0 688.5Q78 729 78 791Q78 839 86.5 892.5Q95 946 115 1001H355Q371 961 382.5 914.5Q394 868 396 821Q428 811 465.0 788.5Q502 766 524 746Q553 735 572.0 718.5Q591 702 604 683L1067 33L1017 -10L884 125L939 6L737 23L638 215L586 246L605 144L587 136L507 179V56H604Q634 56 642.0 45.5Q650 35 659 22L679 -4L659 -18L647 0H285L272 -18L254 -4L257 0H80ZM298 17H635L619 39H511L488 56V195L497 208L581 163L562 266L574 276L655 228L752 42L905 29L844 164L382 512Q365 525 340.5 544.5Q316 564 297.0 592.0Q278 620 278 660Q278 699 302.0 720.5Q326 742 361.5 751.0Q397 760 431 760Q456 760 478 757Q453 773 424.5 788.0Q396 803 376 810Q376 852 365.5 899.5Q355 947 341 981H129Q112 930 104.5 881.0Q97 832 97 785Q97 745 109.0 714.5Q121 684 137.0 661.5Q153 639 165 623L395 344Q426 307 437.5 270.5Q449 234 449 185V56L428 39H313ZM304 864Q289 864 279.0 874.0Q269 884 269 899Q269 913 279.0 923.5Q289 934 304 934Q318 934 328.0 923.5Q338 913 338 899Q338 884 328.0 874.0Q318 864 304 864ZM167 864Q152 864 142.0 874.0Q132 884 132 899Q132 913 142.0 923.5Q152 934 167 934Q181 934 191.5 923.5Q202 913 202 899Q202 884 191.5 874.0Q181 864 167 864ZM304 880Q311 880 316.5 886.0Q322 892 322 899Q322 907 316.5 912.0Q311 917 304 917Q285 917 285 899Q285 892 290.5 886.0Q296 880 304 880ZM167 880Q175 880 180.5 886.0Q186 892 186 899Q186 907 180.5 912.0Q175 917 167 917Q160 917 154.0 912.0Q148 907 148 899Q148 892 154.0 886.0Q160 880 167 880ZM228 774 195 863 213 870 236 808 255 870 272 865 244 774ZM1019 15 1043 37 589 671Q567 703 530.5 722.5Q494 742 436 742Q404 742 372.0 735.0Q340 728 318.5 709.5Q297 691 297 657Q297 616 326.5 586.5Q356 557 400 523L860 179ZM93 17H270L273 22Q281 33 288.0 43.0Q295 53 317 55V232L334 245L429 167V186Q429 237 417.0 270.5Q405 304 381 332L254 484Q267 442 272.5 395.5Q278 349 278 299V56L257 39H108ZM336 56H429V140L336 216Z" fill="#e6bd71" stroke="#e6bd71" stroke-width="14" stroke-linejoin="round"/></g><g transform="translate(334.6 320.1) scale(0.1723 -0.1723) translate(-316.5 -334.0)"><path d="M49 202V225Q49 255 63.5 295.5Q78 336 110.0 375.0Q142 414 193.0 440.0Q244 466 316 466Q389 466 440.0 440.0Q491 414 523.0 375.0Q555 336 569.5 295.5Q584 255 584 225V202Z" fill="#cda35a" opacity=".30"/><path d="M68 222H564Q564 249 550.5 286.5Q537 324 508.0 361.0Q479 398 431.5 422.5Q384 447 316 447Q248 447 200.5 422.5Q153 398 124.0 361.0Q95 324 81.5 286.5Q68 249 68 222Z" fill="#cda35a" opacity=".30"/><path d="M49 202V225Q49 255 63.5 295.5Q78 336 110.0 375.0Q142 414 193.0 440.0Q244 466 316 466Q389 466 440.0 440.0Q491 414 523.0 375.0Q555 336 569.5 295.5Q584 255 584 225V202ZM68 222H564Q564 249 550.5 286.5Q537 324 508.0 361.0Q479 398 431.5 422.5Q384 447 316 447Q248 447 200.5 422.5Q153 398 124.0 361.0Q95 324 81.5 286.5Q68 249 68 222Z" fill="#e6bd71" stroke="#e6bd71" stroke-width="14" stroke-linejoin="round"/></g><g transform="translate(334.6 381.9) scale(0.1188 -0.1188) translate(-340.0 -267.0)"><path d="M340 -24Q280 -24 227.0 -1.5Q174 21 134.0 61.0Q94 101 71.5 154.0Q49 207 49 267Q49 327 71.5 380.0Q94 433 134.0 473.0Q174 513 227.0 535.5Q280 558 340 558Q400 558 452.5 535.5Q505 513 545.5 473.0Q586 433 608.5 380.0Q631 327 631 267Q631 207 608.5 154.0Q586 101 545.5 61.0Q505 21 452.5 -1.5Q400 -24 340 -24Z" fill="#cda35a" opacity=".30"/><path d="M340 356 480 499Q449 518 413.5 528.5Q378 539 340 539Q301 539 265.5 528.5Q230 518 199 499Z" fill="#cda35a" opacity=".30"/><path d="M183 46 340 205 497 46Q516 59 532.0 75.0Q548 91 561 110L402 267L561 424Q548 443 532.0 459.0Q516 475 497 488L340 329L183 488Q145 462 119 424L278 267L119 110Q145 72 183 46Z" fill="#cda35a" opacity=".30"/><path d="M108 126 250 267 108 408Q89 377 78.5 341.0Q68 305 68 267Q68 228 78.5 192.5Q89 157 108 126Z" fill="#cda35a" opacity=".30"/><path d="M572 126Q611 190 611 267Q611 344 572 408L429 267Z" fill="#cda35a" opacity=".30"/><path d="M340 -4Q416 -4 480 35L340 178L199 35Q263 -4 340 -4Z" fill="#cda35a" opacity=".30"/><path d="M340 -24Q280 -24 227.0 -1.5Q174 21 134.0 61.0Q94 101 71.5 154.0Q49 207 49 267Q49 327 71.5 380.0Q94 433 134.0 473.0Q174 513 227.0 535.5Q280 558 340 558Q400 558 452.5 535.5Q505 513 545.5 473.0Q586 433 608.5 380.0Q631 327 631 267Q631 207 608.5 154.0Q586 101 545.5 61.0Q505 21 452.5 -1.5Q400 -24 340 -24ZM340 356 480 499Q449 518 413.5 528.5Q378 539 340 539Q301 539 265.5 528.5Q230 518 199 499ZM183 46 340 205 497 46Q516 59 532.0 75.0Q548 91 561 110L402 267L561 424Q548 443 532.0 459.0Q516 475 497 488L340 329L183 488Q145 462 119 424L278 267L119 110Q145 72 183 46ZM108 126 250 267 108 408Q89 377 78.5 341.0Q68 305 68 267Q68 228 78.5 192.5Q89 157 108 126ZM572 126Q611 190 611 267Q611 344 572 408L429 267ZM340 -4Q416 -4 480 35L340 178L199 35Q263 -4 340 -4Z" fill="#e6bd71" stroke="#e6bd71" stroke-width="14" stroke-linejoin="round"/></g><text x="580" y="291.20000000000005" font-family="Georgia, 'Times New Roman', serif" font-size="190" letter-spacing="14" fill="#e6bd71">KEMET</text><rect x="584" y="327.6" width="930" height="3" fill="#cda35a" opacity=".7"/><text x="586" y="405.6" font-family="Helvetica, Arial, sans-serif" font-size="46" letter-spacing="14" fill="#cda35a">ANCIENT EGYPT</text></svg>'''
+
+
+def apply_site_logo(root):
+    """Replace the site's mark (header, favicon, search-engine logo) with the hieroglyph logo and add the full lockup. Returns the number of pages whose text changed."""
+    root = Path(root)
+    (root / "brand-mark.svg").write_text(LOGO_MARK_SVG, encoding="utf-8")
+    (root / "logo").mkdir(exist_ok=True)
+    (root / "logo" / "kemet-logo-lockup.svg").write_text(LOGO_LOCKUP_SVG, encoding="utf-8")
+    n = 0
+    for p in root.rglob("index.html"):
+        t = p.read_text(encoding="utf-8")
+        t2 = t.replace("Kemet sun-and-river mark", "Kemet hieroglyph mark")
+        if t2 != t:
+            p.write_text(t2, encoding="utf-8")
+            n += 1
+    return n
+
+
+def cmd_sitelogo(st):
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("First send me your current site as a .zip file, then try again.")
+    send("🏺 Putting the hieroglyph logo on the website...")
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        n = apply_site_logo(root)
+        r = pack_site(root, d, "🏺 Site updated: the Kemet hieroglyph logo is now the site mark (header, browser tab icon, search logo). Tap 🚀 Publish below to put it live.")
+    if not r.get("ok"):
+        return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
+    send("✅ Logo applied: every page uses it for the header badge and browser tab icon. Check it after publishing: the header badge, the browser tab icon and /logo/kemet-logo-lockup.svg.")
+    offer_publish(st)
+
+
+def store_site_zip(msg, st=None):
     """The owner sends his site zip once; its Telegram file id is kept so each new article can be added to the full site."""
     import zipfile
     doc = msg.get("document") or {}
@@ -8405,6 +8577,8 @@ def store_site_zip(msg):
                 names = zf.namelist()
         except Exception:
             return send("I could not open that zip file.")
+    if any(n.lower().endswith("queries.csv") for n in names) and not any(n.endswith("index.html") for n in names):
+        return handle_gsc_file(msg, st if st is not None else {"props": {}})          # a Search Console export, not the site
     tops = {n.split("/")[0] for n in names}
     root_ok = "index.html" in names or any(n.endswith("/index.html") and n.count("/") == 1 and "articles" not in n for n in names)
     if not root_ok or not any(n.endswith("styles.css") for n in names):
@@ -9650,6 +9824,8 @@ def main():
             {"command": "merge", "description": "Merge overlapping playlists"},
             {"command": "publish", "description": "Put the website live"},
             {"command": "siteweek", "description": "Website check and next articles"},
+            {"command": "searchdata", "description": "Article ideas from Google searches"},
+            {"command": "sitelogo", "description": "Put the hieroglyph logo on the website"},
             {"command": "cfsetup", "description": "Link Cloudflare for one-tap publish"},
             {"command": "visuals", "description": "Real photos, a mix, or AI images"},
             {"command": "audited", "description": "Kemet Audited: check a claim and make the video"},
