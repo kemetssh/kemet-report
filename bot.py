@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.87"
+BOT_VERSION = "v10.88"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -4413,6 +4413,12 @@ def housekeeping(st):
             cmd_audit(st)
         except Exception as e:
             print("audited monday:", clean(e))
+    if g.tm_wday == 2 and g.tm_hour >= 10 and m.get("last_site_week") != week and mem().get("site_zip"):
+        m["last_site_week"] = week
+        try:
+            site_week(st, auto=True)
+        except Exception as e:
+            print("site week:", clean(e)[:120])
     if g.tm_wday == 6 and g.tm_hour >= 17:
         try:
             nb_report(st)
@@ -7048,7 +7054,8 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/dupes - merge duplicate playlists\n"
         "/merge - merge playlists\n"
         "/publish - put the site live\n"
-        "/cfsetup - 1-tap site publishing\n"
+        "/siteweek - website check\n"
+        "/cfsetup - 1-tap publishing\n"
         "/articlecheck - deepen articles\n"
         "/visuals - real, mix or AI pics\n"
         "/schedule - pick a publish time (/autoschedule on|off, /besthour 17)\n"
@@ -7332,6 +7339,8 @@ def on_message(msg, st):
         cmd_checkvideo(st, YT_LINK.search(raw).group(1))
     elif text.startswith("/articlecheck"):
         cmd_articlecheck(st)
+    elif text.startswith("/siteweek"):
+        site_week(st)
     elif text.startswith("/cfconnect"):
         cmd_cfconnect(msg, st, raw)
     elif text == "/cfsetup":
@@ -8437,6 +8446,69 @@ def do_site_publish(prop, st):
     send("✅ Published to your website: " + SITE_BASE + "/\n" + (f"This deployment: {info}\n" if info else "") + "The main address can take a few minutes to show the update.")
 
 
+# ---------------- the weekly site routine ----------------
+def site_check(root):
+    """Look through the stored site for problems a reader or Google would notice. Returns a list of short findings."""
+    root = Path(root)
+    pages = {p.relative_to(root).as_posix(): p for p in root.rglob("*.html")}
+    sm = (root / "sitemap.xml").read_text(encoding="utf-8") if (root / "sitemap.xml").exists() else ""
+    broken, nometa, thin, fewsrc, nomap = [], [], [], [], []
+    for rel, p in pages.items():
+        t = p.read_text(encoding="utf-8", errors="ignore")
+        if rel != "404.html" and not (re.search(r"<title>[^<]{5,}</title>", t) and 'rel="canonical"' in t and re.search(r'name="description"', t)):
+            nometa.append(rel)
+        for u in set(re.findall(r'(?:href|src)="(/[^"#?]*)', t)):
+            if u.startswith("//"):
+                continue
+            tgt = root / u.lstrip("/")
+            if not (tgt.exists() or (tgt / "index.html").exists() or (root / (u.strip("/") + ".html")).exists()):
+                broken.append(f"{rel} → {u}")
+        if rel.startswith("articles/") and rel.count("/") == 2:
+            art = page_article(t)
+            if article_words(art[0]) < ART_MIN_WORDS:
+                thin.append(art[0]["title"])
+            if len(art[3]) < 3:
+                fewsrc.append(art[0]["title"])
+            if f"{SITE_BASE}/{rel.rsplit('/', 1)[0]}/" not in sm:
+                nomap.append(rel.rsplit("/", 1)[0])
+    out = []
+    if broken:
+        out.append(f"🔗 {len(set(broken))} broken link(s): " + "; ".join(sorted(set(broken))[:4]))
+    if nometa:
+        out.append(f"🏷 {len(nometa)} page(s) lack a title, description or canonical tag: " + ", ".join(nometa[:4]))
+    if thin:
+        out.append(f"📏 {len(thin)} article(s) under {ART_MIN_WORDS} words: " + "; ".join(t[:40] for t in thin[:4]))
+    if fewsrc:
+        out.append(f"📚 {len(fewsrc)} article(s) with fewer than 3 sources: " + "; ".join(t[:40] for t in fewsrc[:4]))
+    if nomap:
+        out.append(f"🗺 {len(nomap)} article(s) missing from the sitemap: " + ", ".join(nomap[:4]))
+    return out, len([r for r in pages if r.startswith("articles/") and r.count("/") == 2])
+
+
+def site_week(st, auto=False):
+    """Weekly: check the site, then offer the next articles and the short ones to deepen. Nothing is changed or published without a tap."""
+    sz = mem().get("site_zip")
+    if not sz:
+        return None if auto else send("I have no site yet. Send me your site .zip first, then try /siteweek again.")
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = site_zip_from(sz["file_id"], d)
+            found, n = site_check(root)
+    except Exception as e:
+        return None if auto else send("I could not read the site zip: " + clean(e)[:160])
+    send(f"🌐 Weekly website check: {n} articles.\n" + ("\n".join(found) if found else "✅ No broken links, every page has its tags, every article is long enough and has sources."))
+    try:
+        cmd_articles(st)
+    except Exception as e:
+        print("siteweek articles:", clean(e)[:120])
+    if any("under" in f for f in found):
+        try:
+            cmd_articlecheck(st)
+        except Exception as e:
+            print("siteweek check:", clean(e)[:120])
+    offer_publish(st)
+
+
 # ---------------- playlist hubs: every YouTube playlist is a section of the site ----------------
 HUB_PROMPT = """Write the introduction for a series page on the website of the history channel "Kemet | Ancient Egypt". The series mirrors the YouTube playlist "{title}".
 Playlist description: {desc}
@@ -9381,6 +9453,7 @@ def main():
             {"command": "dupes", "description": "Merge duplicate playlists"},
             {"command": "merge", "description": "Merge overlapping playlists"},
             {"command": "publish", "description": "Put the website live"},
+            {"command": "siteweek", "description": "Website check and next articles"},
             {"command": "cfsetup", "description": "Link Cloudflare for one-tap publish"},
             {"command": "visuals", "description": "Real photos, a mix, or AI images"},
             {"command": "audited", "description": "Kemet Audited: check a claim and make the video"},
