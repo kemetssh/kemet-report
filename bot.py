@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.106"
+BOT_VERSION = "v10.107"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -6506,6 +6506,7 @@ def cmd_health(st):
             return "can " + ", ".join(have) + src + ("; missing: " + ", ".join(miss) + " → send /ytauth" if miss else "")
         chk("YouTube permissions", perms)
     health_site(lines)
+    lines.append(proof_line())
     m = mem()
     lines.append(f"Videos tracked: {len(m['videos'])} | Lessons learned: {len(m['lessons'])}")
     lines.append("Autopilot: " + ("PAUSED (/resume to restart)" if st.get("paused") else "on"))
@@ -7537,6 +7538,8 @@ def on_message(msg, st):
     elif text == "/cfoff":
         mem().pop("cf", None)
         send("Cloudflare key removed. I will send zips again instead of a Publish button.")
+    elif text.startswith("/proof"):
+        cmd_proof(st)
     elif text.startswith("/xpost"):
         cmd_xpost(st, text)
     elif text.startswith("/publish"):
@@ -8549,6 +8552,7 @@ def hieroglyph_numbers(root):
     root = Path(root)
     try:
         add_share_tools(root)
+        add_reading_refs(root)
     except Exception as e:
         print("share tools:", clean(e)[:100])
     (root / "fonts").mkdir(exist_ok=True)
@@ -8972,6 +8976,98 @@ def cmd_publish(st):
     offer_publish(st)
 
 
+def reading_ref(slug):
+    return "KMT-" + hashlib.sha1(("kemet:" + slug).encode()).hexdigest()[:6].upper()
+
+
+def article_fingerprint(t):
+    """SHA-256 of an article's own text (title, deck and body, without buttons or decoration)."""
+    body = (re.search(r'<article class="article-body">(.*?)</article>', t, re.S) or [None, ""])[1]
+    body = re.sub(r'<div class="(?:key-sources|share-bar)".*?</div>|<p class="reading-ref">.*?</p>|<script.*?</script>', "", body, flags=re.S)
+    head = "".join(re.findall(r"<h1>(.*?)</h1>|<p class=\"article-deck\">(.*?)</p>", t, re.S)[0]) if re.search(r"<h1>", t) else ""
+    txt = html.unescape(re.sub(r"<[^>]+>", " ", head + " " + body))
+    return hashlib.sha256(" ".join(txt.split()).encode("utf-8")).hexdigest()
+
+
+def add_reading_refs(root):
+    """A unique, searchable reference line at the end of every article's text. Safe to run again."""
+    n = 0
+    for p in (Path(root) / "articles").glob("*/index.html"):
+        t = p.read_text(encoding="utf-8")
+        if 'class="reading-ref"' in t or '<a class="article-back"' not in t:
+            continue
+        line = f'<p class="reading-ref">First published on Kemet ({SITE_BASE.split("//")[-1]}) · reference {reading_ref(p.parent.name)}</p>\n'
+        anchor = '<div class="share-bar"' if '<div class="share-bar"' in t else '<a class="article-back"'
+        t2 = t.replace(anchor, line + anchor, 1)
+        p.write_text(t2, encoding="utf-8")
+        n += 1
+    css = Path(root) / "styles.css"
+    if css.exists() and "reading-ref" not in css.read_text(encoding="utf-8"):
+        css.write_text(css.read_text(encoding="utf-8").rstrip() + "\n.reading-ref { margin: 34px 0 0; font: 500 .66rem var(--mono); letter-spacing: .08em; color: var(--sand-muted); }\n", encoding="utf-8")
+    return n
+
+
+def wayback_save(url):
+    try:
+        r = S.get("https://web.archive.org/save/" + url, timeout=70, headers={"User-Agent": "Mozilla/5.0 (Kemet proof)"})
+        return r.status_code < 400
+    except Exception as e:
+        print("wayback save:", clean(e)[:80])
+        return False
+
+
+def wayback_has(url):
+    try:
+        r = S.get("https://archive.org/wayback/available", params={"url": url}, timeout=30)
+        return bool((r.json().get("archived_snapshots") or {}).get("closest"))
+    except Exception:
+        return False
+
+
+def proof_run(file_id, limit=6):
+    """After a publish: record the date and SHA-256 of every new or changed article, and ask the Wayback Machine to keep a copy of up to `limit` of them. Returns (recorded, archived, pending)."""
+    led = mem().setdefault("proof", {})
+    rec = arch = 0
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(file_id, d)
+        for p in sorted((root / "articles").glob("*/index.html")):
+            slug = p.parent.name
+            h = article_fingerprint(p.read_text(encoding="utf-8"))
+            e = led.get(slug)
+            if not e or e.get("sha") != h:
+                led[slug] = {"sha": h, "ts": time.time(), "ref": reading_ref(slug), "wb": False}
+                rec += 1
+    for slug, e in sorted(led.items(), key=lambda kv: kv[1].get("ts", 0)):
+        if arch >= limit:
+            break
+        if not e.get("wb"):
+            url = f"{SITE_BASE}/articles/{slug}/"
+            if wayback_save(url):
+                e["wb"] = True
+                e["wb_ts"] = time.time()
+                arch += 1
+    return rec, arch, sum(1 for e in led.values() if not e.get("wb"))
+
+
+def proof_line():
+    led = mem().get("proof") or {}
+    if not led:
+        return "Proof of authorship: not started (it begins at your next publish, or send /proof)"
+    done = sum(1 for e in led.values() if e.get("wb"))
+    return f"{'✓' if done == len(led) else '⚠️'} Proof of authorship: {len(led)} articles fingerprinted, {done} archived in the Wayback Machine" + ("" if done == len(led) else " (send /proof to continue)")
+
+
+def cmd_proof(st):
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("I have no site yet. Send me your site .zip first.")
+    send("Recording fingerprints and archiving your articles (a minute)...")
+    rec, arch, pend = proof_run((mem().get("site_pub") or sz)["file_id"], limit=10)
+    send(f"✅ {rec} new or changed article(s) fingerprinted, {arch} sent to the Wayback Machine now." +
+         (f"\n{pend} still waiting: send /proof again in a few minutes (the Archive limits how fast it takes pages)." if pend else "\nEvery article is archived.") +
+         "\n\nEach article ends with its own reference (for example KMT-1A2B3C). Searching Google for it later shows any copy that kept it.")
+
+
 def do_site_publish(prop, st):
     send("🚀 Publishing...")
     ok, info = cf_deploy(prop["file_id"])
@@ -8979,6 +9075,12 @@ def do_site_publish(prop, st):
     if not ok:
         return send("⚠️ " + info + "\nNothing changed on the website. You can still upload the zip by hand.")
     mem()["site_pub"] = {"file_id": prop["file_id"], "ts": time.time()}
+    try:
+        rec, arch, pend = proof_run(prop["file_id"], limit=4)
+        if rec or arch:
+            send(f"🔏 Proof of authorship: {rec} article fingerprint(s) recorded with today's date, {arch} saved to the Wayback Machine" + (f", {pend} more later (/proof)." if pend else "."))
+    except Exception as e:
+        print("proof:", clean(e)[:100])
     send("✅ Published to your website: " + SITE_BASE + "/\n" + (f"This deployment: {info}\n" if info else "") + "The main address can take a few minutes to show the update.")
 
 
@@ -10123,6 +10225,7 @@ def main():
             {"command": "image", "description": "AI picture + real photo of a subject"},
             {"command": "articles", "description": "Long website articles from my top videos"},
             {"command": "articlecheck", "description": "Check article length, deepen short ones"},
+            {"command": "proof", "description": "Fingerprint and archive articles"},
             {"command": "xpost", "description": "Posts for X, Facebook, Instagram, TikTok"},
             {"command": "articlelinks", "description": "Put article links in video descriptions"},
             {"command": "dupes", "description": "Merge duplicate playlists"},
