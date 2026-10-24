@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.101"
+BOT_VERSION = "v10.102"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -947,13 +947,13 @@ def ask_confirm(job):
          f"AI / altered-content label: {ai}\n"
          + (f"Links block: {'ON' if job.get('links_on', True) else 'OFF'} ({len(mem()['links'])} links)\n"
             if mem()["links"] else "")
-         + (f"Sources in the description: {len((job.get('evidence') or {}).get('sources') or [])} (always added)\n"
-            if (job.get("evidence") or {}).get("sources") else "⛔ No sources found yet: every video needs them.\n") +
+         + (f"Sources checked: {len((job.get('evidence') or {}).get('sources') or [])} (kept for the website, not shown in the description)\n"
+            if (job.get("evidence") or {}).get("sources") else "⛔ No sources found yet: every video is fact-checked against sources.\n") +
          ("\n⚠️ Worth a look: " + "; ".join(guard_check(job)) + "\n" if guard_check(job) else "") +
          ("\n" + plan_line(job) if plan_line(job) else "\nIt stays private until you publish it."),
          ([[btn("⬆️ Upload as private", jid, "u")]] if (job.get("evidence") or {}).get("sources") else
           [[btn("🔄 Fetch sources", jid, "sf")]] +
-          ([[btn("⬆️ Upload private anyway (add sources later with /sources)", jid, "ug")]] if job.get("src_tries", 0) >= 2 else []))
+          ([[btn("⬆️ Upload private anyway (sources can be added later)", jid, "ug")]] if job.get("src_tries", 0) >= 2 else []))
          + [[btn(f"AI label: {ai} (tap to switch)", jid, "l")]]
          + ([[btn("Links block on/off", jid, "lk")]] if mem()["links"] else [])
          + [[btn("Cancel", jid, "x")]])
@@ -1380,7 +1380,7 @@ def fetch_job_sources(job):
         job["evidence"] = {"claim": (job.get("evidence") or {}).get("claim") or (SRC_HEAD_FB[2:] if fb else "Facts in this video were checked against these sources"),
                            "verdict": (job.get("evidence") or {}).get("verdict", ""), "sources": allsrc}
         job["ev_on"] = True
-        send(f"📚 Found {len(allsrc)} sources for this video. They go into the description automatically:\n" +
+        send(f"📚 Found {len(allsrc)} sources for this video. They stay for fact-checking and the website, not in the description:\n" +
              "\n".join(f"• {t}: {u}" for t, u in allsrc[:8]) + (("\n\n" + text[:500]) if text else ""))
     else:
         job["src_tries"] = job.get("src_tries", 0) + 1
@@ -1910,11 +1910,7 @@ def rc_card(st, v, pool, placed):
                 lines.append(f"   Say instead: {prop['par_new'][:300]}")
     # sources
     if has_sources(desc):
-        lines.append("✅ Sources in the description")
-    else:
-        lines.append("⚠️ No sources in the description")
-        btns_.append([btn("📚 Find and add sources", pid, "rs")])
-        fixes.append("rs")
+        lines.append("ℹ️ A Sources list is in the description (send /sources to remove it; sources now live on the website)")
     # Watch next
     if has_watch_next(desc):
         lines.append("✅ Watch-next link")
@@ -1981,54 +1977,44 @@ def rc_do(st, prop, which):
     return ""
 
 
-def cmd_sources(st, auto=False, limit=4):
-    """Go through the older videos and propose adding sources to every description that lacks them."""
+SRC_BLOCK_RE = re.compile(r"\n*(?:[🔎📚][^\n]*\n)?(?:Verdict:[^\n]*\n)?Sources:\n(?:- [^\n]*(?:\n|$))+")
+
+
+def strip_sources(desc):
+    """The description without its Sources block; everything else (links, hashtags, article link) stays."""
+    return SRC_BLOCK_RE.sub("\n", desc or "").rstrip() if has_sources(desc) else (desc or "")
+
+
+def set_description_strip(video_id):
+    tok = yt_token()
+    sn = yt_get("videos", tok, part="snippet", id=video_id)["items"][0]["snippet"]
+    desc = sn.get("description", "")
+    new = strip_sources(desc)
+    if new == desc:
+        return False
+    body = {"title": sn["title"], "description": new, "categoryId": sn.get("categoryId", "27"), "tags": sn.get("tags", [])}
+    if sn.get("defaultLanguage"):
+        body["defaultLanguage"] = sn["defaultLanguage"]
+    r = S.put(f"{YT}/youtube/v3/videos?part=snippet", headers={"Authorization": f"Bearer {tok}"},
+              json={"id": video_id, "snippet": body}, timeout=60)
+    r.raise_for_status()
+    return True
+
+
+def cmd_sources(st, auto=False, limit=0):
+    """Sources belong on the website and in the fact-check, not in YouTube descriptions: list videos that still show a Sources block and offer one tap to remove it."""
     tok = yt_token()
     vids, _ = latest_vids(tok, 50)
-    pending = {p.get("video_id") for p in st["props"].values() if p.get("type") == "srcb"}
-    if not mem().get("src_failed_reset2"):            # earlier versions counted search-limit errors as failures
-        mem()["src_failed"] = {}
-        mem()["src_failed_reset2"] = True
-    failed = mem().setdefault("src_failed", {})
-    todo = [v for v in vids if not has_sources(v["snippet"].get("description")) and v["id"] not in pending
-            and failed.get(v["id"], 0) < 2]
+    todo = [v for v in vids if has_sources(v["snippet"].get("description"))]
     if not todo:
         if not auto:
-            send("Every video I can see already has sources in its description. ✅")
+            send("No video description shows a Sources list. ✅ Sources are used for fact-checking and live on the website.")
         return
-    send(f"📚 {len(todo)} of your videos have no sources in the description. Checking the first {min(limit, len(todo))} now "
-         "(nothing changes until you tap)...")
-    pids, busy_hit = [], False
-    for v in todo[:limit]:
-        sn = v["snippet"]
-        text, srcs, busy = fetch_sources(sn.get("title", "") + ". " + (sn.get("description") or "")[:600])
-        fb = text.startswith(FALLBACK_NOTE)
-        text = text.replace(FALLBACK_NOTE, "")
-        if busy:                                   # Google's free search limit: stop, do not blame the video
-            busy_hit = True
-            break
-        if not srcs:
-            failed[v["id"]] = failed.get(v["id"], 0) + 1
-            continue
-        pid = new_pid(st)
-        st["props"][pid] = {"type": "srcb", "video_id": v["id"], "title": sn.get("title", ""), "block": source_block(srcs, fb),
-                            "created": time.time()}
-        pids.append(pid)
-        send(f"📚 \"{sn.get('title', '')}\"\n{len(srcs)} sources found:\n" + "\n".join(f"• {t}: {u}" for t, u in srcs[:5]) +
-             (("\n\n" + text[:300]) if text else ""),
-             [[btn("✅ Add to description", pid, "sb"), btn("Skip", pid, "cs")]])
-    if busy_hit:
-        m_ = mem()
-        m_["last_srcscan"] = time.time() - 20 * 3600       # try again in about 4 hours, not a full day
-        send("Google's search hit its free daily limit." + (f" I found sources for {len(pids)} video(s) above; the rest wait." if pids else " I found nothing yet.") +
-             " Nothing is wrong with your videos: I try again automatically in a few hours, or send /sources later.")
-    if len(pids) > 1:
-        pa = new_pid(st)
-        st["props"][pa] = {"type": "srcall", "pids": pids, "created": time.time()}
-        send(f"Add sources to all {len(pids)} videos above in one go?" + (f" ({len(todo) - limit} more will follow later.)" if len(todo) > limit else ""),
-             [[btn(f"✅ Add to all {len(pids)}", pa, "sa")]])
-    elif not pids and not auto and not busy_hit:
-        send("I found no solid sources for those videos. I will try the next ones.")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "srcrm", "ids": [v["id"] for v in todo], "created": time.time()}
+    send(f"🧹 {len(todo)} video descriptions still show a Sources list:\n" + "\n".join("• " + v["snippet"].get("title", "")[:60] for v in todo[:12]) +
+         "\n\nI remove only the Sources list. Links, hashtags and the article link stay. The sources stay in my fact-check and on the website.",
+         [[btn(f"🧹 Remove from all {len(todo)}", pid, "sq")], [btn("Skip", pid, "cs")]])
 
 
 def find_recent_dup(tok, title):
@@ -2094,7 +2080,8 @@ def do_upload(job):
         label_note = ("AI label set. " if label_ok else
                       "I could not set the AI label by code: switch it on in YouTube Studio. ")
     mem()["videos"][vid] = {"uploaded": time.time(), "title": job["title"], "file_id": job["file_id"],
-                            "summary": job["review"].get("summary", ""), "checked": False, "next": job.get("next_id", "")}
+                            "summary": job["review"].get("summary", ""), "checked": False, "next": job.get("next_id", ""),
+                            "sources": [list(x) for x in ((job.get("evidence") or {}).get("sources") or [])[:12]]}
     try:
         ti, d_ = job.get("thumb", -1), job.get("dur") or 0
         nb()["thumbs"][vid] = {"frac": round(job["review"]["thumb_times"][ti] / d_, 2) if ti >= 0 and d_ else None}
@@ -2575,7 +2562,7 @@ def on_prop(jid, act, st):
         st["props"].pop(jid, None)
         return cmd_schedule(st, prop["video_id"])
     if kind == "rck" and act in ("rt", "rp", "rw", "rh", "rs", "rv"):
-        order = ["rt", "rp", "rw", "rh", "rs"] if act == "rv" else [act]
+        order = ["rt", "rp", "rw", "rh"] if act == "rv" else [act]
         done = [rc_do(st, prop, w) for w in order if (w != "rs" or act in ("rs", "rv"))]
         st["props"].pop(jid, None)
         return send(f"Done for \"{prop['title']}\":\n" + "\n".join("• " + d for d in done if d))
@@ -2827,7 +2814,7 @@ def on_prop(jid, act, st):
         mem()["pending_audit"] = {"claim": "KEMET AUDITED: " + prop["claim"], "verdict": prop["verdict"],
                                   "sources": prop["sources"]}
         mem()["pending_audit"]["claim"] = prop["claim"]
-        return send("📌 Saved. On your next upload I will offer a sources block for the description (you can switch it off).")
+        return send("📌 Saved. These sources will be used to fact-check your next upload and the website article, not the description.")
     if act == "ci" and kind == "nudge":
         return cmd_idea(st)
     if act == "pa" and kind == "pl":
@@ -2855,7 +2842,17 @@ def on_prop(jid, act, st):
             return cmd_idea(st)
         if act == "bq":
             return cmd_sequel(st)
-        return cmd_sources(st, limit=3)
+        return cmd_sources(st)
+    if act == "sq" and kind == "srcrm":
+        done = 0
+        for vid_ in prop["ids"]:
+            try:
+                if set_description_strip(vid_):
+                    done += 1
+            except Exception as e:
+                print("strip sources:", clean(e)[:100])
+        st["props"].pop(jid, None)
+        return send(f"✅ Sources removed from {done} video description(s). The article links stay.")
     if act == "sb" and kind == "srcb":
         try:
             ok = set_description_sources(prop["video_id"], prop["block"])
@@ -3390,7 +3387,7 @@ def write_script(idea):
             "Record it as written; if you change a fact while recording, tell me and I recheck." if "NOT fully verified" not in summary else "")
     if sources:
         mem()["script_sources"] = {"title": idea["title"], "sources": sources, "ts": time.time()}
-        msg += f"\n\nSources I checked ({len(sources)}, they will be added to your video description):\n" + "\n".join(f"• {t}: {u}" for t, u in sources)
+        msg += f"\n\nSources I checked ({len(sources)}, kept for fact-checking and the website, not in the description):\n" + "\n".join(f"• {t}: {u}" for t, u in sources)
     msg += "\n\nRecord it in your own voice, then send me the video. (AI can still be wrong: glance at the sources.)"
     send(msg[:4000])
     try:
@@ -3562,9 +3559,12 @@ def run_audit(claim, st, video=False, pov=False):
         make_audited_video(st["props"][pid], st, pov=pov)
 
 
+DESC_SOURCES = False        # sources are for fact-checking and the website, not for YouTube descriptions
+
+
 def evidence_block(job):
     ev = job.get("evidence")
-    if not ev or not ev.get("sources"):
+    if not DESC_SOURCES or not ev or not ev.get("sources"):
         return ""
     lines = [f"🔎 {ev['claim']}"]
     if ev.get("verdict"):
@@ -3620,7 +3620,7 @@ def factcheck_job(job, gate=False):
         job["evidence"] = {"claim": (job.get("evidence") or {}).get("claim") or "Facts in this video were checked against these sources",
                            "verdict": (job.get("evidence") or {}).get("verdict", ""), "sources": allsrc}
         job["ev_on"] = True
-        msg += "\n\nThese sources go into your description automatically."
+        msg += "\n\nThese sources are used for the fact-check and the website, not the description."
     msg += ("\n\n⚠️ Fix the flagged lines before publishing. You can still upload as private."
             if bad else "\n\nEvery claim held up. 🏺")
     remember_fact = [r["claim"] for r in bad][:2]
@@ -4334,10 +4334,10 @@ def cmd_brief(st, force=False):
         print("brief sequel:", clean(e)[:80])
     try:
         failed = m.get("src_failed", {})
-        miss = [v for v in vids if not has_sources(v["snippet"].get("description")) and failed.get(v["id"], 0) < 2]
+        miss = [v for v in vids if has_sources(v["snippet"].get("description"))]
         if miss:
-            lines.append(f"📚 {len(miss)} videos have no sources in the description yet.")
-            rows.append([btn("📚 Check 3 now", pid, "bs")])
+            lines.append(f"🧹 {len(miss)} videos still show a Sources list in the description (sources now live on the website).")
+            rows.append([btn("🧹 Review", pid, "bs")])
     except Exception as e:
         print("brief sources:", clean(e)[:80])
     try:
@@ -6852,8 +6852,6 @@ def guard_check(job):
     dup = {w for w in words if words.count(w) > 1}
     if dup:
         warn.append("the title repeats: " + ", ".join(sorted(dup)))
-    if desc and "http" not in desc and not job.get("evidence"):
-        warn.append("no source or link in the description (viewers trust sources)")
     if len(desc) > 4800:
         warn.append("the description is very long")
     return warn
@@ -7471,7 +7469,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -9957,7 +9955,7 @@ def main():
             {"command": "series", "description": "Check playlists, add latest video"},
             {"command": "made", "description": "Videos I will never offer again"},
             {"command": "sequel", "description": "Episodes for a video that is taking off"},
-            {"command": "sources", "description": "Add sources to old video descriptions"},
+            {"command": "sources", "description": "Remove sources from descriptions"},
             {"command": "patterns", "description": "What your own numbers show"},
             {"command": "brief", "description": "Your daily brief now"},
             {"command": "progress", "description": "Progress toward earning"},
