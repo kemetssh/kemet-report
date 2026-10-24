@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.96"
+BOT_VERSION = "v10.97"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -5132,7 +5132,7 @@ def to_secs(t):
 def cmd_shortcuts(st):
     send("Looking for the best moments in your latest long video...")
     tok = yt_token()
-    vids, _ = latest_vids(tok, 15)
+    vids, _ = latest_vids(tok, 50)          # many of the newest uploads are Shorts, so look far enough back to find the long ones
     ids = [v["id"] for v in vids]
     dur = {}
     if ids:
@@ -5140,7 +5140,7 @@ def cmd_shortcuts(st):
             dur[it.get("id")] = iso_seconds((it.get("contentDetails") or {}).get("duration"))
     long_ = [v for v in vids if dur.get(v["id"], 0) >= 180]
     if not long_:
-        return send("I found no long video (3 minutes or more) among your latest videos. Shorts cuts come from long videos.")
+        return send("I found no long video (3 minutes or more) among your latest 50 uploads. Shorts cuts come from long videos.")
     v = long_[0]
     srt, _have = english_srt(tok, v["id"])
     if not srt:
