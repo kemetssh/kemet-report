@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.105"
+BOT_VERSION = "v10.106"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -6435,6 +6435,26 @@ def health_site(lines):
         lines.append(f"✗ Site check: {clean(e)[:80]}")
 
 
+def tavily_diag():
+    """What exactly is wrong with Tavily: the real HTTP answer, in plain words."""
+    r = S.post(TAVILY + "/search", headers={"Authorization": "Bearer " + tavily_key()},
+               json={"query": "Karnak temple Luxor", "max_results": 3, "search_depth": "basic"}, timeout=40)
+    if r.status_code == 200:
+        n = len(r.json().get("results", []))
+        mem()["tavily"] = dict(mem().get("tavily") or {}, bad=False, last=time.time())
+        return f"working ({n} results)" if n else "answered but found nothing for the test query"
+    try:
+        det = str((r.json().get("detail") or {}).get("error") or r.json())[:100]
+    except Exception:
+        det = r.text[:100]
+    why = {401: "the key is wrong or was deleted: copy it again from app.tavily.com and send /searchkey tvly-...",
+           403: "the key is not allowed: make a new one at app.tavily.com and send /searchkey tvly-...",
+           429: "too many requests right now, try again in a minute",
+           432: "the free monthly credits are used up (they come back next month)",
+           433: "the free monthly credits are used up (they come back next month)"}.get(r.status_code, "Tavily had a problem")
+    raise RuntimeError(f"HTTP {r.status_code}: {why} [{det}]")
+
+
 def cmd_health(st):
     lines = ["🩺 Health check", f"Bot version {BOT_VERSION}"]
     tok = {}
@@ -6453,7 +6473,7 @@ def cmd_health(st):
         tok["t"] = yt_token()
         return "token works"
     if tavily_key():
-        chk("Tavily web search", lambda: "working" if web_search("Karnak temple Luxor") else "no answer or key refused (send /searchkey again)")
+        chk("Tavily web search", tavily_diag)
     else:
         lines.append("Tavily web search: not set (send /searchkey tvly-... to stop depending on Google's free limit)")
     try:
