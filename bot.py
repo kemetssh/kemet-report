@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.99"
+BOT_VERSION = "v10.101"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -5048,7 +5048,7 @@ Subtitles:
 
 SHORTS_PROMPT = """You help a YouTube history channel turn one long video into Shorts. Below are the video's English subtitles with timestamps{extra}.
 Pick the 3 best moments to cut into a Short of 20 to 59 seconds: a self-contained claim, reveal or story beat that makes sense on its own and starts with a strong first sentence.
-Use only moments that really are in the subtitles. Return JSON only:
+Use only moments that really are in the subtitles. Write times as minutes:seconds only, for example 01:37, never with milliseconds. Return JSON only:
 {{"cuts": [{{"start": "mm:ss", "end": "mm:ss", "title": "honest title under 60 characters", "hook": "the first spoken sentence", "why": "one short line"}}]}}
 Subtitles:
 {srt}"""
@@ -5125,6 +5125,9 @@ def to_secs(t):
     t = re.sub(r"[.,]\d+$", "", str(t).strip().strip("[]() "))        # 01:23,500 or 01:23.5 -> 01:23
     if re.fullmatch(r"\d+(\.\d+)?", t):
         return int(float(t))                                           # plain seconds
+    m3 = re.fullmatch(r"(\d{1,2}):(\d{2}):(\d{3})", t)               # the model sometimes writes mm:ss:milliseconds (01:37:360)
+    if m3:
+        return int(m3.group(1)) * 60 + int(m3.group(2))
     m_ = re.fullmatch(r"(?:(\d+):)?(\d{1,2}):(\d{2})", t)
     if not m_:
         return None
@@ -6300,6 +6303,49 @@ def cmd_links(st, raw):
 
 
 # ---------------- health, pause, free-text brain ----------------
+def health_site(lines):
+    """Website lines for /health: live site, sitemap, Cloudflare, unpublished changes, and what the stored copy needs."""
+    sz = mem().get("site_zip")
+    if not sz and not cf_cfg():
+        lines.append("Website: no site zip yet (send your site .zip to the bot)")
+        return
+    lines.append("— Website —")
+    try:
+        r = S.get(SITE_BASE + "/", timeout=25)
+        lines.append(f"{'✓' if r.status_code == 200 else '✗'} Live site: {r.status_code} ({SITE_BASE})")
+    except Exception as e:
+        lines.append(f"✗ Live site: {clean(e)[:80]}")
+    try:
+        r = S.get(SITE_BASE + "/sitemap.xml", timeout=25)
+        n = len(re.findall(r"<loc>", r.text)) if r.status_code == 200 else 0
+        lines.append(f"{'✓' if n else '✗'} Sitemap: " + (f"{n} pages" if n else f"not readable ({r.status_code})"))
+    except Exception as e:
+        lines.append(f"✗ Sitemap: {clean(e)[:80]}")
+    lines.append("✓ Cloudflare: connected (" + str(cf_cfg().get("project", "")) + ")" if cf_cfg() else "Cloudflare: not connected (/cfsetup for one-tap publishing)")
+    if not sz:
+        lines.append("✗ Stored site copy: none (send your site .zip)")
+        return
+    pub = mem().get("site_pub") or {}
+    age = int((time.time() - sz.get("ts", time.time())) / 86400)
+    lines.append(f"✓ Stored site copy: {sz.get('name', 'site.zip')}, {age} day(s) old")
+    if cf_cfg():
+        if pub.get("file_id") == sz.get("file_id"):
+            lines.append("✓ Live site is the latest version")
+        else:
+            lines.append("⚠️ Changes not published yet (send /publish)")
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            root = site_zip_from(sz["file_id"], d)
+            found, n_art = site_check(root)
+        lines.append(f"✓ {n_art} articles" + (" and no problems found" if not found else ""))
+        for f in found[:5]:
+            lines.append("⚠️ " + f)
+        if found:
+            lines.append("Send /siteweek to fix these with taps")
+    except Exception as e:
+        lines.append(f"✗ Site check: {clean(e)[:80]}")
+
+
 def cmd_health(st):
     lines = ["🩺 Health check", f"Bot version {BOT_VERSION}"]
     tok = {}
@@ -6350,6 +6396,7 @@ def cmd_health(st):
             src = " (new login)" if mem().get("yt_refresh") else ""
             return "can " + ", ".join(have) + src + ("; missing: " + ", ".join(miss) + " → send /ytauth" if miss else "")
         chk("YouTube permissions", perms)
+    health_site(lines)
     m = mem()
     lines.append(f"Videos tracked: {len(m['videos'])} | Lessons learned: {len(m['lessons'])}")
     lines.append("Autopilot: " + ("PAUSED (/resume to restart)" if st.get("paused") else "on"))
@@ -8776,6 +8823,7 @@ def do_site_publish(prop, st):
     st["props"].pop(next((k for k, v in st["props"].items() if v is prop), ""), None)
     if not ok:
         return send("⚠️ " + info + "\nNothing changed on the website. You can still upload the zip by hand.")
+    mem()["site_pub"] = {"file_id": prop["file_id"], "ts": time.time()}
     send("✅ Published to your website: " + SITE_BASE + "/\n" + (f"This deployment: {info}\n" if info else "") + "The main address can take a few minutes to show the update.")
 
 
