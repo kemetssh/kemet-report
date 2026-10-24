@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.104"
+BOT_VERSION = "v10.105"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -8482,10 +8482,55 @@ def egy_num(n):
     return out or "\U000133FA"
 
 
+SHARE_CSS = """
+/* kemet-share-1 */
+.share-bar { margin: 38px 0 6px; padding: 16px 18px; border: 1px solid var(--line-gold); border-radius: 12px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.share-bar button { font: 500 .78rem var(--sans); color: var(--ink); background: var(--gold); border: 0; border-radius: 999px; padding: 10px 18px; cursor: pointer; }
+.share-bar button:hover { background: var(--gold-bright); }
+.share-bar .share-note { flex: 1 1 100%; margin: 0; font-size: .78rem; line-height: 1.6; color: var(--sand-muted); }
+"""
+
+SHARE_JS = """<script data-kemet-share>(function(){var b=document.querySelector('.article-body');var bar=document.getElementById('kemet-share');if(!b||!bar)return;
+document.addEventListener('copy',function(e){var s=window.getSelection();if(!s||s.isCollapsed||!s.anchorNode||!b.contains(s.anchorNode))return;var t=s.toString();if(t.length<20||!e.clipboardData)return;
+e.clipboardData.setData('text/plain',t+'\\n\\nSource: '+document.title.replace(/ \\| Kemet$/,'')+' - Kemet, '+location.href);e.preventDefault();});
+var sh=bar.querySelector('[data-share]'),cp=bar.querySelector('[data-copy]');
+if(navigator.share){sh.hidden=false;sh.addEventListener('click',function(){navigator.share({title:document.title,url:location.href}).catch(function(){});});}
+cp.addEventListener('click',function(){var done=function(){cp.textContent='Link copied \\u2713';setTimeout(function(){cp.textContent='Copy link';},2200);};
+if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(location.href).then(done,done);}else{var i=document.createElement('input');i.value=location.href;document.body.appendChild(i);i.select();try{document.execCommand('copy');}catch(x){}i.remove();done();}});})();</script>
+"""
+
+SHARE_BAR = '<div class="share-bar" id="kemet-share"><button type="button" data-share hidden>Share this article</button><button type="button" data-copy>Copy link</button><p class="share-note">Please share the link. Short quotes are welcome with a link back to this page; please do not republish whole articles.</p></div>\n'
+
+
+def add_share_tools(root):
+    """Share and Copy-link buttons on every article, a source line added to anything copied from the text, and a reuse note in the footer. Safe to run again. Returns the number of pages changed."""
+    root = Path(root)
+    n = 0
+    for p in list((root / "articles").glob("*/index.html")) + [root / "about" / "index.html", root / "index.html"]:
+        if not p.exists():
+            continue
+        t = p.read_text(encoding="utf-8")
+        t2 = t.replace("Kemet. All rights reserved.", "Kemet. Short quotes welcome with a link back; please do not republish whole articles.")
+        if p.parent.parent.name == "articles" and 'id="kemet-share"' not in t2 and '<a class="article-back"' in t2:
+            t2 = t2.replace('<a class="article-back"', SHARE_BAR + '<a class="article-back"', 1)
+            t2 = t2.replace("</body>", SHARE_JS + "</body>", 1)
+        if t2 != t:
+            p.write_text(t2, encoding="utf-8")
+            n += 1
+    css = root / "styles.css"
+    if css.exists() and "kemet-share-1" not in css.read_text(encoding="utf-8"):
+        css.write_text(css.read_text(encoding="utf-8").rstrip() + "\n" + SHARE_CSS, encoding="utf-8")
+    return n
+
+
 def hieroglyph_numbers(root):
     """Replace the digits on the cards and section labels by hieroglyphic numerals (the plain number stays as the label for screen readers). Safe to run again."""
     import base64 as b64_
     root = Path(root)
+    try:
+        add_share_tools(root)
+    except Exception as e:
+        print("share tools:", clean(e)[:100])
     (root / "fonts").mkdir(exist_ok=True)
     (root / "fonts" / "kemet-hieroglyphs.woff").write_bytes(b64_.b64decode(EGY_FONT_B64))
     css = root / "styles.css"
