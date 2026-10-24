@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.103"
+BOT_VERSION = "v10.104"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2164,11 +2164,18 @@ def share_pack(title, blurb):
     return out
 
 
-def send_share(title, blurb, link):
+def send_share(title, blurb, link, st=None):
     """Ready posts for X, Facebook, Instagram and TikTok. Free: buttons open each app; the owner taps Post. Nothing is posted by the bot."""
     p = share_pack(title, blurb)
     send(f"📣 {title}\n\n🐦 X:\n{p['x']}\n{link}", [[{"text": "🐦 Open in X (text filled in)", "url": x_intent(p["x"], link)}]])
-    send(f"📘 Facebook Page:\n{p['facebook']}\n{link}", [[{"text": "📘 Share on Facebook", "url": fb_share(link)}]])
+    if fb_cfg() and st is not None:
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "fblink", "message": p["facebook"], "link": link, "created": time.time()}
+        send(f"📘 Facebook Page ({fb_cfg().get('page_name', '')}):\n{p['facebook']}\n{link}",
+             [[btn("📘 Post to my Page", pid, "fq")], [{"text": "Or share by hand", "url": fb_share(link)}]])
+    else:
+        send(f"📘 Facebook Page:\n{p['facebook']}\n{link}\n\n(Send /fbsetup to link your Page and post with one tap.)",
+             [[{"text": "📘 Share on Facebook", "url": fb_share(link)}]])
     send(f"📸 Instagram caption (press and hold to copy):\n{p['instagram']}",
          [[{"text": "📸 Open Instagram", "url": "https://www.instagram.com/"}]])
     send(f"🎵 TikTok caption (press and hold to copy):\n{p['tiktok']}",
@@ -2196,17 +2203,17 @@ def cmd_xpost(st, arg=""):
     for v in vids:
         sn = v["snippet"]
         link = f"{SITE_BASE}/articles/{slug[v['id']]}/" if v["id"] in slug else f"https://youtu.be/{v['id']}"
-        send_share(sn.get("title", ""), (sn.get("description") or "").split("\n\n")[0], link)
+        send_share(sn.get("title", ""), (sn.get("description") or "").split("\n\n")[0], link, st)
 
 
-def cmd_xpost_after_publish(job):
+def cmd_xpost_after_publish(job, st=None):
     try:
-        send_share(job["title"], job["review"].get("summary", ""), f"https://youtu.be/{job['video_id']}")
+        send_share(job["title"], job["review"].get("summary", ""), f"https://youtu.be/{job['video_id']}", st)
     except Exception as e:
         print("share after publish:", clean(e)[:100])
 
 
-def do_publish(job):
+def do_publish(job, st=None):
     tok = yt_token()
     vid = job["video_id"]
     try:
@@ -2218,7 +2225,7 @@ def do_publish(job):
     if status == "public":
         job["stage"] = "done"
         send(f"🚀 It is PUBLIC now: https://youtu.be/{vid}")
-        cmd_xpost_after_publish(job)
+        cmd_xpost_after_publish(job, st)
     else:
         send("YouTube kept it PRIVATE. New API projects are locked to private until Google "
              "audits them, so this is expected.\n\nTo publish: YouTube app → Profile → Your "
@@ -2809,6 +2816,14 @@ def on_prop(jid, act, st):
         page = prop["pages"][int(st.get("_val", "0"))]
         st["props"].pop(jid, None)
         return fb_save(page)
+    if act == "fq" and kind == "fblink":
+        try:
+            cfg = fb_cfg()
+            j = fb_call("POST", f"{cfg['page_id']}/feed", data={"message": prop["message"][:2000], "link": prop["link"], "access_token": cfg["token"]})
+        except Exception as e:
+            return send("Facebook did not post it: " + clean(e)[:220] + "\nIf it says the key expired or is invalid, send /fbsetup to reconnect.")
+        st["props"].pop(jid, None)
+        return send("✅ Posted to your Facebook Page " + fb_cfg().get("page_name", "") + ".\nhttps://www.facebook.com/" + str(j.get("id", "")))
     if act == "fp" and kind == "fbpost":
         rec = mem()["videos"].get(prop["video_id"]) or {}
         send("Posting your video to your Facebook Page (about a minute)...")
@@ -7546,7 +7561,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -7627,7 +7642,7 @@ def on_callback(cb, st):
         send("✅ Description changed to the fixed version.")
         return ask_confirm(job)
     if act == "p" and stage == "uploaded":
-        return do_publish(job)
+        return do_publish(job, st)
     if act == "k":
         job["stage"] = "done"
         return send("OK. It stays private until you publish it in the YouTube app. 🏺")
