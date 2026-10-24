@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.98"
+BOT_VERSION = "v10.99"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -5169,14 +5169,20 @@ def cmd_shortcuts(st):
         elif b_ - a_ < 20:                            # a little too short: extend to 22 seconds when the video allows it
             why_not["too short (extended)"] += 1
             b_ = a_ + 22
-        if b_ > dur[v["id"]] + 2:
-            why_not["past the end"] += 1
-            continue
+        D = dur[v["id"]]
+        if b_ > D + 2:
+            if a_ + 20 > D:                           # the idea starts after the video ends: unusable
+                why_not["past the end"] += 1
+                continue
+            b_ = D                                    # runs a little past the end: end it where the video ends
+            if b_ - a_ < 15:
+                a_ = max(0, b_ - 25)
         c = dict(c, start=mmss(a_), end=mmss(b_))
         cuts.append(c)
     if not cuts:
         return send("I could not find clean 20-59 second moments in the subtitles. Nothing to suggest.\n"
                     f"(The model returned {len(raw_cuts or [])} idea(s); problems: " + ", ".join(f"{k} {n}" for k, n in why_not.items() if n) + (")" if any(why_not.values()) else "none found, it returned no usable moments)")
+                    + "\nVideo length " + mmss(dur[v["id"]]) + "; the model proposed: " + "; ".join(f"{c.get('start')} to {c.get('end')}" for c in (raw_cuts or [])[:3])
                     + "\nTry /shortcuts again in a minute: the model sometimes answers badly the first time.")
     send(f"✂️ Best moments of \"{v['snippet']['title']}\" for Shorts:\n\n" + "\n\n".join(
         f"{i + 1}. {c['start']} to {c['end']}\nTitle: {str(c.get('title', ''))[:60]}\nFirst line: {str(c.get('hook', ''))[:140]}\nWhy: {str(c.get('why', ''))[:120]}"
