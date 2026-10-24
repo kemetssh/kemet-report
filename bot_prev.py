@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.102"
+BOT_VERSION = "v10.103"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2133,6 +2133,79 @@ def do_upload(job):
             send("I could not pick a publish time just now. Send /schedule when you are ready.")
 
 
+SHARE_PROMPT = """Write social posts for the history channel "Kemet | Ancient Egypt" promoting: {title}
+What it is about: {blurb}
+Rules for all: honest, no clickbait or claim the film does not make, a curious first line, no links (I add them).
+- x: at most 240 characters, at most 2 hashtags, at most 1 emoji.
+- facebook: 2 to 3 short sentences for a Page post, a question at the end to invite comments.
+- instagram: a caption of 3 to 5 short lines, then 8 to 10 relevant hashtags on the last line. End with: Link in bio.
+- tiktok: one punchy line under 150 characters plus 4 to 5 hashtags.
+Return JSON only: {{"x": "...", "facebook": "...", "instagram": "...", "tiktok": "..."}}"""
+
+
+def x_intent(text, link):
+    return "https://x.com/intent/post?" + urllib.parse.urlencode({"text": text, "url": link}, quote_via=urllib.parse.quote)
+
+
+def fb_share(link):
+    return "https://www.facebook.com/sharer/sharer.php?" + urllib.parse.urlencode({"u": link})
+
+
+def share_pack(title, blurb):
+    try:
+        d = gemini([{"text": SHARE_PROMPT.format(title=title, blurb=(blurb or "")[:600])}]) or {}
+    except Exception as e:
+        print("share pack:", clean(e)[:100])
+        d = {}
+    out = {}
+    for k, cap in (("x", 250), ("facebook", 600), ("instagram", 900), ("tiktok", 300)):
+        t = re.sub(r"https?://\S+", "", str(d.get(k, ""))).strip()
+        out[k] = t[:cap] or (title[:240] if k != "instagram" else title[:240] + "\n\nLink in bio.")
+    return out
+
+
+def send_share(title, blurb, link):
+    """Ready posts for X, Facebook, Instagram and TikTok. Free: buttons open each app; the owner taps Post. Nothing is posted by the bot."""
+    p = share_pack(title, blurb)
+    send(f"📣 {title}\n\n🐦 X:\n{p['x']}\n{link}", [[{"text": "🐦 Open in X (text filled in)", "url": x_intent(p["x"], link)}]])
+    send(f"📘 Facebook Page:\n{p['facebook']}\n{link}", [[{"text": "📘 Share on Facebook", "url": fb_share(link)}]])
+    send(f"📸 Instagram caption (press and hold to copy):\n{p['instagram']}",
+         [[{"text": "📸 Open Instagram", "url": "https://www.instagram.com/"}]])
+    send(f"🎵 TikTok caption (press and hold to copy):\n{p['tiktok']}",
+         [[{"text": "🎵 Open TikTok", "url": "https://www.tiktok.com/"}]])
+    send("Facebook cannot pre-fill the text, so paste the Facebook post above after it opens. Instagram and TikTok need your vertical video from your phone: pick the Short, paste the caption, post. Nothing goes out unless you tap Post in each app.")
+
+
+def cmd_xpost(st, arg=""):
+    m_ = re.search(r"\d+", arg or "")
+    n = max(1, min(3, int(m_.group()))) if m_ else 1
+    send("Writing posts for your latest video" + ("s" if n > 1 else "") + " (X, Facebook, Instagram, TikTok)...")
+    tok = yt_token()
+    vids, _ = latest_vids(tok, 10)
+    vids = [v for v in vids if (v.get("status") or {}).get("privacyStatus", "public") == "public"][:n] or vids[:n]
+    slug = {}
+    sz = mem().get("site_zip")
+    if sz:
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                slug = vid_slug_map(site_zip_from(sz["file_id"], d))
+        except Exception as e:
+            print("xpost site:", clean(e)[:100])
+    if not vids:
+        return send("I found no videos yet.")
+    for v in vids:
+        sn = v["snippet"]
+        link = f"{SITE_BASE}/articles/{slug[v['id']]}/" if v["id"] in slug else f"https://youtu.be/{v['id']}"
+        send_share(sn.get("title", ""), (sn.get("description") or "").split("\n\n")[0], link)
+
+
+def cmd_xpost_after_publish(job):
+    try:
+        send_share(job["title"], job["review"].get("summary", ""), f"https://youtu.be/{job['video_id']}")
+    except Exception as e:
+        print("share after publish:", clean(e)[:100])
+
+
 def do_publish(job):
     tok = yt_token()
     vid = job["video_id"]
@@ -2145,6 +2218,7 @@ def do_publish(job):
     if status == "public":
         job["stage"] = "done"
         send(f"🚀 It is PUBLIC now: https://youtu.be/{vid}")
+        cmd_xpost_after_publish(job)
     else:
         send("YouTube kept it PRIVATE. New API projects are locked to private until Google "
              "audits them, so this is expected.\n\nTo publish: YouTube app → Profile → Your "
@@ -7120,14 +7194,15 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/checklast - check my YouTube upload (or paste link)\n"
         "/image <subject> - AI picture + real photo\n"
         "/articles - website articles\n"
-        "/articlelinks - links in descriptions\n"
-        "/dupes - merge duplicate playlists\n"
+        "/articlelinks - article links\n"
+        "/dupes - duplicate playlists\n"
         "/merge - merge playlists\n"
         "/publish - put the site live\n"
         "/siteweek - website check\n"
-        "/searchdata - Google search ideas\n"
-        "/sitelogo - hieroglyph logo on site\n"
+        "/searchdata - search ideas\n"
+        "/sitelogo - logo on site\n"
         "/cfsetup - 1-tap publish\n"
+        "/xpost - X, Facebook, Insta, TikTok posts\n"
         "/articlecheck - deepen articles\n"
         "/visuals - real, mix or AI pics\n"
         "/schedule - pick a publish time (/autoschedule on|off, /besthour 17)\n"
@@ -7427,6 +7502,8 @@ def on_message(msg, st):
     elif text == "/cfoff":
         mem().pop("cf", None)
         send("Cloudflare key removed. I will send zips again instead of a Publish button.")
+    elif text.startswith("/xpost"):
+        cmd_xpost(st, text)
     elif text.startswith("/publish"):
         cmd_publish(st)
     elif text.startswith("/merge"):
@@ -9966,6 +10043,7 @@ def main():
             {"command": "image", "description": "AI picture + real photo of a subject"},
             {"command": "articles", "description": "Long website articles from my top videos"},
             {"command": "articlecheck", "description": "Check article length, deepen short ones"},
+            {"command": "xpost", "description": "Posts for X, Facebook, Instagram, TikTok"},
             {"command": "articlelinks", "description": "Put article links in video descriptions"},
             {"command": "dupes", "description": "Merge duplicate playlists"},
             {"command": "merge", "description": "Merge overlapping playlists"},
