@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.97"
+BOT_VERSION = "v10.98"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -5122,7 +5122,10 @@ def cmd_translate(st):
 
 
 def to_secs(t):
-    m_ = re.fullmatch(r"(?:(\d+):)?(\d{1,2}):(\d{2})", str(t).strip())
+    t = re.sub(r"[.,]\d+$", "", str(t).strip().strip("[]() "))        # 01:23,500 or 01:23.5 -> 01:23
+    if re.fullmatch(r"\d+(\.\d+)?", t):
+        return int(float(t))                                           # plain seconds
+    m_ = re.fullmatch(r"(?:(\d+):)?(\d{1,2}):(\d{2})", t)
     if not m_:
         return None
     h, mi, se = int(m_.group(1) or 0), int(m_.group(2)), int(m_.group(3))
@@ -5153,14 +5156,28 @@ def cmd_shortcuts(st):
     except Exception:
         pass
     out = gemini([{"text": SHORTS_PROMPT.format(extra=extra, srt=srt[:30000])}])
-    cuts = []
-    for c in out.get("cuts", []):
+    cuts, why_not = [], {"unreadable time": 0, "too long (trimmed)": 0, "too short (extended)": 0, "past the end": 0}
+    raw_cuts = out.get("cuts") if isinstance(out, dict) else None
+    for c in (raw_cuts or []):
         a_, b_ = to_secs(c.get("start")), to_secs(c.get("end"))
-        if a_ is None or b_ is None or not 15 <= b_ - a_ <= 60 or b_ > dur[v["id"]] + 2:
+        if a_ is None or b_ is None or b_ <= a_:
+            why_not["unreadable time"] += 1
             continue
+        if b_ - a_ > 59:                              # a little too long: keep the start, cut at 55 seconds
+            why_not["too long (trimmed)"] += 1
+            b_ = a_ + 55
+        elif b_ - a_ < 20:                            # a little too short: extend to 22 seconds when the video allows it
+            why_not["too short (extended)"] += 1
+            b_ = a_ + 22
+        if b_ > dur[v["id"]] + 2:
+            why_not["past the end"] += 1
+            continue
+        c = dict(c, start=mmss(a_), end=mmss(b_))
         cuts.append(c)
     if not cuts:
-        return send("I could not find clean 20-59 second moments in the subtitles. Nothing to suggest.")
+        return send("I could not find clean 20-59 second moments in the subtitles. Nothing to suggest.\n"
+                    f"(The model returned {len(raw_cuts or [])} idea(s); problems: " + ", ".join(f"{k} {n}" for k, n in why_not.items() if n) + (")" if any(why_not.values()) else "none found, it returned no usable moments)")
+                    + "\nTry /shortcuts again in a minute: the model sometimes answers badly the first time.")
     send(f"✂️ Best moments of \"{v['snippet']['title']}\" for Shorts:\n\n" + "\n\n".join(
         f"{i + 1}. {c['start']} to {c['end']}\nTitle: {str(c.get('title', ''))[:60]}\nFirst line: {str(c.get('hook', ''))[:140]}\nWhy: {str(c.get('why', ''))[:120]}"
         for i, c in enumerate(cuts[:3])) +
