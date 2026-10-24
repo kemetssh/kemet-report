@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.95"
+BOT_VERSION = "v10.96"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -8300,6 +8300,50 @@ def site_catalog(root):
     return cat
 
 
+EGY_FONT_B64 = "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"
+EGY_UNITS = ((10000, "\U0001312D"), (1000, "\U0001337C"), (100, "\U00013362"), (10, "\U00013386"), (1, "\U000133FA"))
+EGY_CSS = """
+/* kemet-hieroglyph-numbers-1 */
+@font-face { font-family: "Kemet Hieroglyphs"; src: url(/fonts/kemet-hieroglyphs.woff) format("woff"); unicode-range: U+13000-1342F; font-display: swap; }
+.egy-num { font-family: "Kemet Hieroglyphs", "Noto Sans Egyptian Hieroglyphs", "Segoe UI Historic", serif; font-size: 1.45em; line-height: 1; letter-spacing: .06em; font-weight: 400; vertical-align: middle; }
+.card-glyph { font-family: "Kemet Hieroglyphs", "Noto Sans Egyptian Hieroglyphs", "Segoe UI Historic", var(--serif); }
+.card-top .egy-num { font-size: 2rem; color: var(--gold-bright); letter-spacing: .1em; -webkit-text-stroke: .8px currentColor; }
+.section-label .egy-num, .follow-index .egy-num { font-size: 1.6rem; color: var(--gold-bright); -webkit-text-stroke: .6px currentColor; }
+@media (max-width: 640px) { .card-top .egy-num { font-size: 1.7rem; letter-spacing: .06em; } }
+"""
+
+
+def egy_num(n):
+    """A number in Egyptian numerals: a stroke is 1, a heel-bone 10, a coil of rope 100, a lotus 1,000, a finger 10,000."""
+    n, out = int(n), ""
+    for v, ch in EGY_UNITS:
+        out += ch * (n // v)
+        n %= v
+    return out or "\U000133FA"
+
+
+def hieroglyph_numbers(root):
+    """Replace the digits on the cards and section labels by hieroglyphic numerals (the plain number stays as the label for screen readers). Safe to run again."""
+    import base64 as b64_
+    root = Path(root)
+    (root / "fonts").mkdir(exist_ok=True)
+    (root / "fonts" / "kemet-hieroglyphs.woff").write_bytes(b64_.b64decode(EGY_FONT_B64))
+    css = root / "styles.css"
+    if css.exists() and "kemet-hieroglyph-numbers-1" not in css.read_text(encoding="utf-8"):
+        css.write_text(css.read_text(encoding="utf-8").rstrip() + "\n" + EGY_CSS, encoding="utf-8")
+    tag = lambda d: f'<span class="egy-num" role="img" aria-label="{int(d)}" title="{int(d)}">{egy_num(d)}</span>'
+    n = 0
+    for p in root.rglob("index.html"):
+        t = p.read_text(encoding="utf-8")
+        t2 = re.sub(r'(<span class="card-top">)<span>(\d{1,4})</span>', lambda m: m.group(1) + tag(m.group(2)), t)
+        t2 = re.sub(r'(<div class="section-label">)<span>(\d{1,4})</span>', lambda m: m.group(1) + tag(m.group(2)), t2)
+        t2 = re.sub(r"KMT / (\d{1,4})", lambda m: "KMT / " + tag(m.group(1)), t2)
+        if t2 != t:
+            p.write_text(t2, encoding="utf-8")
+            n += 1
+    return n
+
+
 SITE_CSS_FIXES = """
 /* kemet-fixes-1: the decorative glyph sits in the free space of the card, never over the text */
 .archive-card .card-glyph { position: static; transform: none; margin: auto; flex: 0 0 auto; padding: 14px 0; font-size: 7rem; }
@@ -8406,6 +8450,10 @@ def build_listing(root, cat):
     sm = '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' + "".join(
         f"  <url><loc>{SITE_BASE}{u}</loc>\n    <lastmod>{today}</lastmod></url>\n" for u in urls) + "</urlset>\n"
     (root / "sitemap.xml").write_text(sm, encoding="utf-8")
+    try:
+        hieroglyph_numbers(root)
+    except Exception as e:
+        print("hieroglyph numbers:", clean(e)[:120])
     return len(order)
 
 
@@ -8559,6 +8607,7 @@ def apply_site_logo(root):
     """Replace the site's mark (header, favicon, search-engine logo) with the hieroglyph logo and add the full lockup. Returns the number of pages whose text changed."""
     root = Path(root)
     ensure_site_css(root)
+    hieroglyph_numbers(root)
     (root / "brand-mark.svg").write_text(LOGO_MARK_SVG, encoding="utf-8")
     (root / "logo").mkdir(exist_ok=True)
     (root / "logo" / "kemet-logo-lockup.svg").write_text(LOGO_LOCKUP_SVG, encoding="utf-8")
@@ -9111,6 +9160,10 @@ def rebuild_site_hubs(root, tok):
     except Exception as e:
         print("relink:", clean(e)[:120])
     add_series_nav(root)
+    try:
+        hieroglyph_numbers(root)
+    except Exception as e:
+        print("hieroglyph numbers:", clean(e)[:120])
     sm = root / "sitemap.xml"
     if sm.exists():
         s = sm.read_text(encoding="utf-8")
@@ -9612,6 +9665,7 @@ def write_article(c, st):
             if pls:
                 bu = build_hubs(root, pls, vid_slug_map(root))
                 relink_series(root, pls)
+                hieroglyph_numbers(root)
                 add_series_nav(root)
                 sm_ = root / "sitemap.xml"
                 s_ = re.sub(r"  <url><loc>[^<]*/playlists/[^<]+</loc>\n    <lastmod>[^<]*</lastmod></url>\n", "", sm_.read_text(encoding="utf-8"))
