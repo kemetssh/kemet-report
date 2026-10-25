@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.116"
+BOT_VERSION = "v10.117"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1521,7 +1521,7 @@ def has_watch_next(desc):
 
 def watch_pool(tok):
     """The channel's latest videos, and which of them are public (a 'next' link to a private video would lead nowhere)."""
-    vids, _ = latest_vids(tok, 50)
+    vids = all_videos(tok)   # every upload, not only the newest 50
     ids = [v["id"] for v in vids]
     pub = set()
     for i in range(0, len(ids), 50):
@@ -1705,7 +1705,7 @@ def cmd_hashtags(st, limit=4):
         send("I could not read the trending tags right now, so I will not guess. Try again later.")
         return
     tok = yt_token()
-    vids, _ = latest_vids(tok, 50)
+    vids = all_videos(tok)   # every upload, not only the newest 50
     pending = {p.get("video_id") for p in st["props"].values() if p.get("type") == "htb"}
     props = []
     for v in vids:
@@ -1906,7 +1906,7 @@ def rc_facts(title, core):
 def cmd_recheck(st, restart=True):
     tok = yt_token()
     if restart or not mem().get("recheck"):
-        vids, _ = latest_vids(tok, 50)
+        vids = all_videos(tok)   # every upload, not only the newest 50
         mem()["recheck"] = {"ids": [v["id"] for v in vids], "i": 0, "auto": False, "ts": time.time(), "flagged": 0}
         send(f"🔍 Full checkup of your {len(vids)} videos: facts in the title and description, sources, hashtags, Watch-next link and playlist. "
              "I show 3 videos at a time. Nothing changes until you tap.")
@@ -2102,7 +2102,7 @@ def set_description_strip(video_id):
 def cmd_sources(st, auto=False, limit=0):
     """Sources belong on the website and in the fact-check, not in YouTube descriptions: list videos that still show a Sources block and offer one tap to remove it."""
     tok = yt_token()
-    vids, _ = latest_vids(tok, 50)
+    vids = all_videos(tok)                                 # every upload, not just the newest 50
     todo = [v for v in vids if has_sources(v["snippet"].get("description"))]
     if not todo:
         if not auto:
@@ -2392,7 +2392,7 @@ Comments: """
 def cmd_titles(st, focus=None):
     send("Looking at your videos..." if not focus else "Looking for old titles this pattern can improve...")
     tok = yt_token()
-    vids, _ = my_videos(tok, 50)            # the whole recent catalogue, not only the 15 newest (those are all fresh)
+    vids = all_videos(tok)   # every upload, not only the newest 50
     if not vids:
         return send("I could not find any videos on the channel yet.")
     if not focus and [e for e in mem()["exps"] if not e["done"]]:
@@ -4523,7 +4523,7 @@ def cmd_brief(st, force=False):
             rows.append([btn("💡 Give me ideas", pid, "bi")])
     except Exception as e:
         print("brief nudge:", clean(e)[:80])
-    vids, _ = latest_vids(tok, 50)
+    vids = all_videos(tok)   # every upload, not only the newest 50
     try:
         offered = m.setdefault("sequel_offered", [])
         wins = [w for w in find_winners(vids) if w[2]["id"] not in offered]
@@ -6096,7 +6096,7 @@ def playlist_scan(tok):
             page = d.get("nextPageToken")
             if not page:
                 break
-    vids, _ = my_videos(tok, 50)
+    vids = all_videos(tok)   # every upload, not only the newest 50
     vids = sorted(vids, key=lambda v: v["snippet"].get("publishedAt", ""), reverse=True)
     return names, placed, vids
 
@@ -6631,6 +6631,17 @@ def article_link_status(tok=None):
     return have, have + len(miss), miss
 
 
+def desc_sources_line(tok=None):
+    """How many video descriptions still show a Sources list (they now live on the website only)."""
+    try:
+        vids = all_videos(tok or yt_token())
+    except Exception as e:
+        return "✗ Sources in video descriptions: " + clean(e)[:80]
+    n = sum(1 for v in vids if has_sources(v["snippet"].get("description")))
+    return ("✓ Video descriptions: no Sources lists (sources are on the website)" if not n else
+            f"⚠️ {n} of {len(vids)} video descriptions still show a Sources list (send /sources to remove them)")
+
+
 def article_link_line():
     try:
         r = article_link_status()
@@ -6704,6 +6715,7 @@ def cmd_health(st):
     _al = article_link_line()
     if _al:
         lines.append(_al)
+    lines.append(desc_sources_line())
     lines.append(proof_line())
     m = mem()
     lines.append(f"Videos tracked: {len(m['videos'])} | Lessons learned: {len(m['lessons'])}")
@@ -10203,7 +10215,8 @@ def all_videos(tok):
             break
     out = []
     for i in range(0, len(ids), 50):
-        out += yt_get("videos", tok, part="snippet,contentDetails", id=",".join(ids[i:i + 50])).get("items", [])
+        out += yt_get("videos", tok, part="snippet,contentDetails,statistics", id=",".join(ids[i:i + 50])).get("items", [])
+    out.sort(key=lambda v: v.get("snippet", {}).get("publishedAt", ""), reverse=True)
     return out
 
 
@@ -10364,7 +10377,7 @@ def cmd_articles(st):
                     "I keep it, add each new article to it, and send you back the full updated site. Then send /articles again.")
     send("Looking at your most viewed videos...")
     tok = yt_token()
-    vids, _ = my_videos(tok, 50)
+    vids = all_videos(tok)   # every upload, not only the newest 50
     done = (mem().get("articles") or {})
     cands = []
     for v in vids:
