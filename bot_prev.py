@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.111"
+BOT_VERSION = "v10.113"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2936,6 +2936,10 @@ def on_prop(jid, act, st):
         return send("✅ Posted to your Facebook Page " + cfg.get("page_name", "") + ".\nhttps://www.facebook.com/" + str(pid_ or cfg.get("page_id", "")))
     if act == "cp" and kind == "sitepub":
         return do_site_publish(prop, st)
+    if act == "vp" and kind == "revideo":
+        pick = prop["item"]["picks"][int(st.get("_val", "0"))]
+        st["props"].pop(jid, None)
+        return revideo_article(prop["item"], pick, st)
     if act == "gh" and kind == "afterhubs":
         st["props"].pop(jid, None)
         return after_hubs(st)
@@ -7712,6 +7716,10 @@ def on_message(msg, st):
         cmd_merge(st)
     elif text.startswith("/dupes"):
         cmd_dupes(st)
+    elif text.startswith("/fixvideos"):
+        cmd_fixvideos(st)
+    elif text.startswith("/articlevideos"):
+        cmd_articlevideos(st)
     elif text.startswith("/articlelinks"):
         cmd_articlelinks(st)
     elif text.startswith("/seriespages"):
@@ -7748,7 +7756,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -10102,6 +10110,152 @@ def deepen_article(item, st):
     offer_publish(st)
 
 
+def article_video_groups(root):
+    """Which YouTube video each article is built around. Returns (by_video {vid: [(slug, title)]}, no_video [(slug, title)])."""
+    by, none = {}, []
+    for p in sorted((Path(root) / "articles").glob("*/index.html")):
+        t = p.read_text(encoding="utf-8")
+        art = page_article(t)[0]
+        ids = re.findall(r'data-yt="([\w-]{11})"', t)
+        if ids:
+            by.setdefault(ids[0], []).append((p.parent.name, art["title"]))
+        else:
+            none.append((p.parent.name, art["title"]))
+    return by, none
+
+
+def cmd_articlevideos(st):
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("I have no site yet. Send me your site .zip first.")
+    send("Checking which video each article is built on...")
+    with tempfile.TemporaryDirectory() as d:
+        by, none = article_video_groups(site_zip_from(sz["file_id"], d))
+    n = sum(len(v) for v in by.values()) + len(none)
+    same = {v: a for v, a in by.items() if len(a) > 1}
+    tok = yt_token()
+    titles = {}
+    try:
+        ids = list(same)[:50]
+        for it in (yt_get("videos", tok, part="snippet", id=",".join(ids)).get("items", []) if ids else []):
+            titles[it["id"]] = it["snippet"]["title"]
+    except Exception as e:
+        print("article videos:", clean(e)[:100])
+    lines = [f"📊 {n} articles use {len(by)} different videos."]
+    lines.append(f"✅ {sum(1 for a in by.values() if len(a) == 1)} videos have exactly one article." if by else "")
+    if same:
+        lines.append(f"\n⚠️ {len(same)} video(s) have more than one article ({sum(len(a) for a in same.values())} articles):")
+        for v, a in sorted(same.items(), key=lambda kv: -len(kv[1])):
+            lines.append(f"\n▶ {titles.get(v, v)} ({len(a)} articles)")
+            lines += [f"  • {t[:70]}" for _, t in a]
+    if none:
+        lines.append(f"\n{len(none)} article(s) show no video: " + "; ".join(t[:40] for _, t in none[:6]))
+    send("\n".join(x for x in lines if x is not None)[:3900])
+
+
+def all_videos(tok):
+    """Every upload of the channel (id, title, description, duration), paging through the uploads playlist."""
+    ch = yt_get("channels", tok, part="contentDetails", mine="true")["items"][0]
+    pl = ch["contentDetails"]["relatedPlaylists"]["uploads"]
+    ids, page = [], None
+    for _ in range(6):
+        kw = {"pageToken": page} if page else {}
+        r = yt_get("playlistItems", tok, part="contentDetails", playlistId=pl, maxResults=50, **kw)
+        ids += [i["contentDetails"]["videoId"] for i in r.get("items", [])]
+        page = r.get("nextPageToken")
+        if not page:
+            break
+    out = []
+    for i in range(0, len(ids), 50):
+        out += yt_get("videos", tok, part="snippet,contentDetails", id=",".join(ids[i:i + 50])).get("items", [])
+    return out
+
+
+REVIDEO_PROMPT = """A website article needs the best matching film from the channel's own YouTube videos.
+Article: {title}
+Summary: {deck}
+Channel videos (id | title):
+{vids}
+Pick up to 3 videos whose subject really matches this article (best first). Use only ids from the list, never the excluded id {exclude}. If none really matches, return an empty list. Return JSON only: {{"picks": ["id", "id"]}}"""
+
+
+def title_overlap(a, b):
+    wa = {w for w in re.findall(r"[a-z]{4,}", a.lower()) if w not in GENERIC_WORDS}
+    wb = {w for w in re.findall(r"[a-z]{4,}", b.lower()) if w not in GENERIC_WORDS}
+    return len(wa & wb) / (len(wa) or 1)
+
+
+def cmd_fixvideos(st):
+    """Where one film is shared by several articles, keep it on the article that matches best and offer better films for the others."""
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("I have no site yet. Send me your site .zip first.")
+    send("Looking for articles that share a film and for better matches (a minute)...")
+    tok = yt_token()
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        by, _none = article_video_groups(root)
+        same = {v: a for v, a in by.items() if len(a) > 1}
+        if not same:
+            return send("Every article has its own film. ✅")
+        vids = all_videos(tok)
+        vt = {v["id"]: v["snippet"]["title"] for v in vids}
+        todo = []
+        for vid, arts in same.items():
+            keep = max(arts, key=lambda a: title_overlap(a[1], vt.get(vid, "")))
+            for slug, title in arts:
+                if slug == keep[0]:
+                    continue
+                art = page_article((root / "articles" / slug / "index.html").read_text(encoding="utf-8"))[0]
+                lst = "\n".join(f"{i} | {t[:90]}" for i, t in vt.items() if i != vid)[:14000]
+                try:
+                    j = gemini([{"text": REVIDEO_PROMPT.format(title=title, deck=art.get("deck", "")[:400], vids=lst, exclude=vid)}])
+                    picks = [p for p in (j.get("picks") or []) if p in vt and p != vid][:3]
+                except Exception as e:
+                    print("revideo picks:", clean(e)[:100])
+                    picks = []
+                todo.append({"slug": slug, "title": title, "old": vid, "picks": picks})
+    if not todo:
+        return send("No change needed.")
+    for it in todo:
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "revideo", "item": it, "vt": {p: vt[p] for p in it["picks"]}, "created": time.time()}
+        rows = [[btn("🎬 " + vt[p][:44], pid, "vp", str(i))] for i, p in enumerate(it["picks"])] + [[btn("Keep as it is", pid, "cs")]]
+        send(f"📎 \"{it['title']}\" shows the film \"{vt.get(it['old'], it['old'])[:60]}\", which is better kept on the article about it. " +
+             ("Best matching film(s) on your channel:" if it["picks"] else "I found no clearly matching film on your channel, so I suggest leaving it."), rows)
+
+
+def revideo_article(item, new_vid, st):
+    sz = mem().get("site_zip")
+    tok = yt_token()
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        pg = root / "articles" / item["slug"] / "index.html"
+        art, _old, pub, srcs = page_article(pg.read_text(encoding="utf-8"))
+        it = (yt_get("videos", tok, part="snippet,contentDetails", id=new_vid).get("items") or [None])[0]
+        if not it:
+            return send("I could not read that video on YouTube.")
+        v = {"id": new_vid, "title": it["snippet"]["title"], "desc": it["snippet"].get("description", ""), "published": it["snippet"].get("publishedAt", pub),
+             "iso": it["contentDetails"].get("duration", ""), "secs": iso_seconds(it["contentDetails"].get("duration", ""))}
+        cat = site_catalog(root)
+        others = sorted([x for x in cat if x["slug"] != item["slug"]], key=lambda x: x["pub"], reverse=True)
+        series = None
+        try:
+            for pl in site_playlists(tok):
+                if new_vid in [i["id"] for i in pl["items"]]:
+                    series = {"title": pl["title"], "slug": pl_slug(pl)}
+                    break
+        except Exception as e:
+            print("series:", clean(e)[:100])
+        pg.write_text(art_page(art, v, item["slug"], srcs, others, series), encoding="utf-8")
+        build_listing(root, site_catalog(root))
+        r = pack_site(root, d, f"🎬 Site updated: {art['title']} now shows the film \"{v['title']}\".")
+    if not r.get("ok"):
+        return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
+    send(f"✅ {art['title']} now shows \"{v['title']}\".")
+    offer_publish(st)
+
+
 def cmd_articlelinks(st):
     """For every article that is live on the site, propose a 'Read the full article' line in its video's description (nothing changes until you tap)."""
     arts = dict(mem().get("articles") or {})
@@ -10526,6 +10680,8 @@ def main():
             {"command": "articlecheck", "description": "Check article length, deepen short ones"},
             {"command": "proof", "description": "Fingerprint and archive articles"},
             {"command": "xpost", "description": "Posts for X, Facebook, Instagram, TikTok"},
+            {"command": "fixvideos", "description": "Give shared-film articles their own film"},
+            {"command": "articlevideos", "description": "Which video each article uses"},
             {"command": "articlelinks", "description": "Put article links in video descriptions"},
             {"command": "dupes", "description": "Merge duplicate playlists"},
             {"command": "merge", "description": "Merge overlapping playlists"},
