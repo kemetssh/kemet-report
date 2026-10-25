@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.107"
+BOT_VERSION = "v10.108"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -5809,7 +5809,7 @@ def cmd_fbconnect(msg, st, raw):
     try:
         lt = fb_call("GET", "oauth/access_token", params={"grant_type": "fb_exchange_token", "client_id": app_id,
                                                           "client_secret": secret, "fb_exchange_token": token})["access_token"]
-        pages = fb_call("GET", "me/accounts", params={"access_token": lt, "fields": "id,name,access_token", "limit": 25}).get("data", [])
+        pages = fb_find_pages(lt)
     except Exception as e:
         return send("Facebook did not accept that. " + clean(e)[:200] + "\nThe token lasts only about an hour: generate a fresh one in the "
                     "Graph API Explorer and send /fbconnect again.")
@@ -5823,6 +5823,44 @@ def cmd_fbconnect(msg, st, raw):
     st["props"][pid] = {"type": "fbpages", "pages": [{"id": p["id"], "name": p.get("name", ""), "access_token": p["access_token"]} for p in pages[:8]],
                         "created": time.time()}
     send("Which Page should I post to?", [[btn(p.get("name", p["id"])[:40], pid, "fs", n)] for n, p in enumerate(pages[:8])])
+
+
+def fb_find_pages(token):
+    """Pages the token can post to: a user token's own Pages, Pages a business owns, or the Page itself when the token already is a Page token."""
+    out, seen, errs = [], set(), []
+
+    def add(p, tok=None):
+        tk = tok or p.get("access_token")
+        if p.get("id") and tk and p["id"] not in seen:
+            seen.add(p["id"])
+            out.append({"id": p["id"], "name": p.get("name", ""), "access_token": tk})
+    try:                                                    # 1. Pages the user manages directly
+        for p in fb_call("GET", "me/accounts", params={"access_token": token, "fields": "id,name,access_token", "limit": 25}).get("data", []):
+            add(p)
+    except Exception as e:
+        errs.append(str(e))
+        if "accounts" in str(e) and "nonexisting" in str(e):   # 2. the token is already a Page token: `me` is the Page
+            me = fb_call("GET", "me", params={"access_token": token, "fields": "id,name"})
+            add(me, token)
+    if not out:                                             # 3. Pages owned by a business portfolio the user belongs to
+        try:
+            for b in fb_call("GET", "me/businesses", params={"access_token": token, "fields": "id,name", "limit": 10}).get("data", []):
+                for edge in ("owned_pages", "client_pages"):
+                    try:
+                        for p in fb_call("GET", f"{b['id']}/{edge}", params={"access_token": token, "fields": "id,name,access_token", "limit": 25}).get("data", []):
+                            if not p.get("access_token"):
+                                try:
+                                    p["access_token"] = fb_call("GET", p["id"], params={"access_token": token, "fields": "access_token"}).get("access_token")
+                                except Exception as e:
+                                    errs.append(str(e))
+                            add(p)
+                    except Exception as e:
+                        errs.append(str(e))
+        except Exception as e:
+            errs.append(str(e))
+    if not out and errs and all("OAuth" in x or "expired" in x.lower() or "session" in x.lower() for x in errs):
+        raise RuntimeError(errs[0])
+    return out
 
 
 def fb_save(page):
