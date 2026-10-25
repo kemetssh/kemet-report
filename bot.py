@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.114"
+BOT_VERSION = "v10.115"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -10249,10 +10249,13 @@ def cmd_fixvideos(st):
                     picks = [p for p in (j.get("picks") or []) if p in vt and p != vid][:3]
                 except Exception as e:
                     print("revideo picks:", clean(e)[:100])
-                    picks = []
+                    picks = None                           # the AI failed: this is not the same as "no match"
                 todo.append({"slug": slug, "title": title, "old": vid, "picks": picks})
     if not todo:
         return send("No change needed.")
+    if any(it["picks"] is None for it in todo):
+        send("⏳ Google's AI did not answer just now (it is busy or at its free limit), so I could not judge the matches. Nothing was changed. Send /fixvideos again in a few minutes.")
+        todo = [it for it in todo if it["picks"] is not None]
     for it in todo:
         pid = new_pid(st)
         st["props"][pid] = {"type": "revideo", "item": it, "vt": {p: vt[p] for p in it["picks"]}, "created": time.time()}
