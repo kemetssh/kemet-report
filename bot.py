@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.113"
+BOT_VERSION = "v10.114"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -6610,6 +6610,39 @@ def tavily_diag():
     raise RuntimeError(f"HTTP {r.status_code}: {why} [{det}]")
 
 
+def article_link_status(tok=None):
+    """(with_link, total_with_article, missing_titles): which videos that have a website article show its link in their YouTube description."""
+    sz = mem().get("site_zip")
+    if not sz:
+        return None
+    tok = tok or yt_token()
+    with tempfile.TemporaryDirectory() as d:
+        slugmap = vid_slug_map(site_zip_from(sz["file_id"], d))
+    vids = all_videos(tok)
+    have, miss = 0, []
+    for v in vids:
+        slug = slugmap.get(v["id"])
+        if not slug:
+            continue
+        if f"/articles/{slug}/" in (v["snippet"].get("description") or ""):
+            have += 1
+        else:
+            miss.append(v["snippet"]["title"])
+    return have, have + len(miss), miss
+
+
+def article_link_line():
+    try:
+        r = article_link_status()
+    except Exception as e:
+        return "✗ Article links in descriptions: " + clean(e)[:80]
+    if not r:
+        return ""
+    have, tot, miss = r
+    return (f"✓ Article links in video descriptions: {tot} of {tot}" if not miss else
+            f"⚠️ Article links in video descriptions: {have} of {tot} (send /articlelinks to add the other {len(miss)})")
+
+
 def cmd_health(st):
     lines = ["🩺 Health check", f"Bot version {BOT_VERSION}"]
     tok = {}
@@ -6668,6 +6701,9 @@ def cmd_health(st):
             return "can " + ", ".join(have) + src + ("; missing: " + ", ".join(miss) + " → send /ytauth" if miss else "")
         chk("YouTube permissions", perms)
     health_site(lines)
+    _al = article_link_line()
+    if _al:
+        lines.append(_al)
     lines.append(proof_line())
     m = mem()
     lines.append(f"Videos tracked: {len(m['videos'])} | Lessons learned: {len(m['lessons'])}")
