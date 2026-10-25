@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.115"
+BOT_VERSION = "v10.116"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -10313,8 +10313,11 @@ def cmd_articlelinks(st):
     if not arts:
         return send("No articles written yet. Send /articles first.")
     tok = yt_token()
-    ids = list(arts)[:50]
-    items = {i["id"]: i["snippet"] for i in yt_get("videos", tok, part="snippet", id=",".join(ids)).get("items", [])}
+    ids = list(arts)
+    items = {}
+    for k in range(0, len(ids), 50):                      # YouTube answers at most 50 videos per request
+        for i in yt_get("videos", tok, part="snippet", id=",".join(ids[k:k + 50])).get("items", []):
+            items[i["id"]] = i["snippet"]
     pending = {p.get("video_id") for p in st["props"].values() if p.get("type") == "alb"}
     notlive, have, pids = [], 0, []
     for vid, a in arts.items():
@@ -10327,7 +10330,9 @@ def cmd_articlelinks(st):
             notlive.append(a["title"])
             continue
         sn = items.get(vid)
-        if not sn or url in sn.get("description", ""):
+        if not sn:                                            # video no longer on the channel (or private): nothing to update
+            continue
+        if url in sn.get("description", ""):
             have += 1
             continue
         if vid in pending:
