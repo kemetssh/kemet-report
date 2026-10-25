@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.109"
+BOT_VERSION = "v10.110"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2935,6 +2935,9 @@ def on_prop(jid, act, st):
         return send("✅ Posted to your Facebook Page " + cfg.get("page_name", "") + ".\nhttps://www.facebook.com/" + str(pid_ or cfg.get("page_id", "")))
     if act == "cp" and kind == "sitepub":
         return do_site_publish(prop, st)
+    if act == "fa" and kind == "fixall":
+        st["props"].pop(jid, None)
+        return fixq_start(st)
     if act == "sr" and kind == "srcfix":
         return resource_article(prop["items"][int(st.get("_val", "0"))], st)
     if act == "ax" and kind == "artfix":
@@ -7607,6 +7610,10 @@ def on_message(msg, st):
         cmd_fboff(st)
     elif text.startswith("/searchkey"):
         cmd_searchkey(msg, st, raw)
+    elif text.startswith("/fixall"):
+        fixq_start(st)
+    elif text.startswith("/fixstop"):
+        cmd_fixstop(st)
     elif text.startswith("/exakey"):
         cmd_exakey(msg, st, raw)
     elif text == "/searchoff":
@@ -7734,7 +7741,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -9106,10 +9113,13 @@ def cf_deploy(file_id):
         return True, m.group(0) if m else ""
 
 
+_QUIET_PUB = False        # while the fix-all queue runs, one Publish offer comes at the end
+
+
 def offer_publish(st):
     """After the site changed: a Publish button (only if Cloudflare is connected). Nothing goes live without the tap."""
     sz = mem().get("site_zip")
-    if not cf_cfg() or not sz:
+    if _QUIET_PUB or not cf_cfg() or not sz:
         return
     pid = new_pid(st)
     st["props"][pid] = {"type": "sitepub", "file_id": sz["file_id"], "created": time.time()}
@@ -9350,6 +9360,85 @@ def resource_article(item, st):
     offer_publish(st)
 
 
+def site_fix_items(root):
+    """Everything the weekly check complains about, as a to-do list: short articles are deepened, weak or thin source lists are re-sourced."""
+    out = []
+    for p in sorted((Path(root) / "articles").glob("*/index.html")):
+        art, _v, _p, srcs = page_article(p.read_text(encoding="utf-8"))
+        good = any(any(g in u.lower() for g in GOOD_SRC) for _, u in srcs)
+        short = article_words(art) < ART_MIN_WORDS
+        few = len(srcs) < 3 or not good
+        it = {"slug": p.parent.name, "title": art["title"]}
+        if short:
+            out.append(dict(it, task="deep"))
+        if few or short:
+            out.append(dict(it, task="src"))
+    return out
+
+
+def search_ready():
+    tv = mem().get("tavily") or {}
+    tav = bool(tavily_key()) and not tv.get("bad") and tv.get("out_month") != _month()
+    return tav or bool(exa_key() and not (mem().get("exa") or {}).get("bad"))
+
+
+def fixq_start(st):
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("I have no site yet. Send me your site .zip first.")
+    with tempfile.TemporaryDirectory() as d:
+        items = site_fix_items(site_zip_from(sz["file_id"], d))
+    if not items:
+        return send("Nothing to fix: every article is long enough and has museum, university or journal sources. ✅")
+    mem()["fixq"] = {"items": items, "log": [], "ts": time.time()}
+    n = len({i["slug"] for i in items})
+    send(f"🛠 Fixing {n} article(s) one after another ({len(items)} steps, about 4 minutes each). You do not need to do anything: I send one summary and one Publish button at the end. Send /fixstop to stop." +
+         ("" if search_ready() else "\n⚠️ Web search has no free credits right now, so the source steps will probably find nothing. Connect Exa (/exakey) first, or wait until Tavily's credits return."))
+
+
+def cmd_fixstop(st):
+    q = mem().pop("fixq", None)
+    send("Stopped. " + (f"{len(q['log'])} step(s) were already done." if q else "Nothing was running.") + " The work already done stays in the site.")
+
+
+def fixq_step(st):
+    """Run the next step of the fix-all queue; at the end send one summary and one Publish offer."""
+    global _QUIET_PUB
+    q = mem().get("fixq")
+    if not q or not q.get("items"):
+        mem().pop("fixq", None)
+        return
+    it = q["items"].pop(0)
+    sz0 = (mem().get("site_zip") or {}).get("file_id")
+    if it["task"] == "src":                               # skip when an earlier step already fixed it
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                root = site_zip_from(mem()["site_zip"]["file_id"], d)
+                art, _v, _p, srcs = page_article((root / "articles" / it["slug"] / "index.html").read_text(encoding="utf-8"))
+            if len(srcs) >= 3 and any(any(g in u.lower() for g in GOOD_SRC) for _, u in srcs):
+                q["log"].append(f"✅ {it['title'][:50]}: sources already good")
+                return fixq_finish(st) if not q["items"] else None
+        except Exception as e:
+            print("fixq check:", clean(e)[:100])
+    _QUIET_PUB = True
+    try:
+        (deepen_article if it["task"] == "deep" else resource_article)(it, st)
+    except Exception as e:
+        print("fixq step:", clean(e)[:160])
+    finally:
+        _QUIET_PUB = False
+    changed = (mem().get("site_zip") or {}).get("file_id") != sz0
+    q["log"].append(("✅ " if changed else "⚠️ left as it was: ") + ("deepened " if it["task"] == "deep" else "better sources: ") + it["title"][:50])
+    if not q["items"]:
+        fixq_finish(st)
+
+
+def fixq_finish(st):
+    q = mem().pop("fixq", None) or {}
+    send("🛠 Fix-all finished:\n" + "\n".join(q.get("log", [])) + "\n\nNothing is live until you tap Publish.")
+    offer_publish(st)
+
+
 def site_week(st, auto=False):
     """Weekly: check the site, then offer the next articles and the short ones to deepen. Nothing is changed or published without a tap."""
     sz = mem().get("site_zip")
@@ -9372,6 +9461,17 @@ def site_week(st, auto=False):
             cmd_articlecheck(st)
         except Exception as e:
             print("siteweek check:", clean(e)[:120])
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            todo = site_fix_items(site_zip_from(sz["file_id"], d))
+    except Exception as e:
+        todo = []
+        print("siteweek todo:", clean(e)[:100])
+    if todo and not auto:
+        pa = new_pid(st)
+        st["props"][pa] = {"type": "fixall", "created": time.time()}
+        send(f"🛠 {len({i['slug'] for i in todo})} article(s) need work ({len(todo)} steps). One tap fixes them all, one after another:",
+             [[btn("🛠 Fix all in one tap", pa, "fa")]])
     if weak:
         pid = new_pid(st)
         st["props"][pid] = {"type": "srcfix", "items": weak[:6], "created": time.time()}
@@ -10405,6 +10505,7 @@ def main():
             {"command": "fbsetup", "description": "Link your Facebook Page"},
             {"command": "searchkey", "description": "Connect free web search (Tavily)"},
             {"command": "exakey", "description": "Backup web search (Exa)"},
+            {"command": "fixall", "description": "Fix weak or short website articles"},
             {"command": "news", "description": "Egypt news to make videos about"},
             {"command": "longform", "description": "Plan long videos"},
             {"command": "batch", "description": "5 scripts to film today"},
@@ -10445,6 +10546,7 @@ def main():
         save_state(st)
     except Exception as e:
         print("housekeeping error:", clean(e))
+    t0 = time.time()
     end = time.time() + RUN_SECONDS
     first = True
     while first or time.time() < end:
@@ -10482,6 +10584,13 @@ def main():
             save_state(st)
         if WORKER and updates:
             worker_ack(st["offset"] - 1)
+        if (mem().get("fixq") or {}).get("items") and RUN_SECONDS > 0 and time.time() - t0 < 700:
+            try:
+                fixq_step(st)
+            except Exception as e:
+                print("fixq error:", clean(e)[:160])
+            save_state(st)
+            end = max(end, time.time() + 20)             # keep the run alive for the next step
         if RUN_SECONDS <= 0:
             break
     save_state(st)
