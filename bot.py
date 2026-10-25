@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.108"
+BOT_VERSION = "v10.109"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1259,36 +1259,134 @@ def short_title(t, n=95):
     return t[:n].rsplit(" ", 1)[0].rstrip(" ,;:-(") + "…"
 
 
+def exa_key():
+    return os.getenv("EXA_KEY") or (mem().get("exa") or {}).get("key", "")
+
+
+def _month():
+    return time.strftime("%Y-%m", time.gmtime())
+
+
+def search_count(engine, add=0):
+    """Searches used this month per engine (cache hits are free and not counted)."""
+    u = mem().setdefault("search_use", {})
+    if u.get("month") != _month():
+        u.clear()
+        u["month"] = _month()
+    if add:
+        u[engine] = u.get(engine, 0) + add
+    return u.get(engine, 0)
+
+
+def _clean_results(items, n):
+    res = []
+    for x in items:
+        u = x.get("url") or ""
+        if not u.startswith("http") or any(b in u.lower().split("/")[2] for b in BAD_DOMAINS):
+            continue
+        res.append({"title": " ".join(str(x.get("title") or u).split())[:150], "url": u, "content": str(x.get("content") or "")[:700]})
+    good = [x for x in res if any(t in x["url"].lower() for t in TRUST_DOMAINS)]
+    res = good if len(good) >= 2 else good + [x for x in res if x not in good][:2]     # unknown sites only when too few trusted ones
+    return res[:n]
+
+
+def _wcache_get(ck):
+    hit = (mem().get("wscache") or {}).get(ck)
+    if hit and time.time() - hit.get("ts", 0) < 14 * 86400:
+        return hit["r"]
+    return None
+
+
+def _wcache_put(ck, res):
+    c = mem().setdefault("wscache", {})
+    c[ck] = {"ts": time.time(), "r": [{"title": x["title"], "url": x["url"], "content": x["content"][:300]} for x in res]}
+    for k in sorted(c, key=lambda k: c[k].get("ts", 0))[:-120]:        # keep the 120 newest searches only
+        c.pop(k, None)
+
+
+def _tavily_search(query, key):
+    """Returns (results or None, exhausted flag)."""
+    r = S.post(TAVILY + "/search", headers={"Authorization": "Bearer " + key},
+               json={"query": query[:380], "max_results": 10, "search_depth": "basic", "include_answer": False}, timeout=40)
+    if r.status_code in (401, 403):
+        mem()["tavily"] = dict(mem().get("tavily") or {}, bad=True)
+        return None, False
+    if r.status_code in (429, 432, 433):
+        mem()["tavily"] = dict(mem().get("tavily") or {}, out_month=_month() if r.status_code != 429 else "")
+        return None, True
+    r.raise_for_status()
+    search_count("tavily", 1)
+    mem()["tavily"] = dict(mem().get("tavily") or {}, bad=False, last=time.time())
+    return [{"title": x.get("title"), "url": x.get("url"), "content": x.get("content")} for x in r.json().get("results", [])], False
+
+
+def _exa_search(query, key):
+    r = S.post("https://api.exa.ai/search", headers={"x-api-key": key, "Content-Type": "application/json"},
+               json={"query": query[:380], "numResults": 10, "type": "auto", "contents": {"text": {"maxCharacters": 700}}}, timeout=40)
+    if r.status_code in (401, 403):
+        mem()["exa"] = dict(mem().get("exa") or {}, bad=True)
+        return None
+    r.raise_for_status()
+    search_count("exa", 1)
+    mem()["exa"] = dict(mem().get("exa") or {}, bad=False, last=time.time())
+    return [{"title": x.get("title"), "url": x.get("url"), "content": x.get("text")} for x in r.json().get("results", [])]
+
+
 def web_search(query, n=8):
-    """Tavily (free key, no card): real web results. Returns [{title,url,content}] or [] when unavailable.
-    Social, shop and forum pages are dropped; museums, universities and journals come first."""
-    key = tavily_key()
-    if not key or not query:
+    """Real web results from the free keys: saved earlier searches first (free), then Tavily, then Exa when Tavily is out of credits.
+    Social, shop and forum pages are dropped; museums, universities and journals come first. Returns [{title,url,content}] or []."""
+    if not query or not (tavily_key() or exa_key()):
         return []
     ck = query.lower().strip()
     if ck in _WS:
         return _WS[ck]
-    try:
-        r = S.post(TAVILY + "/search", headers={"Authorization": "Bearer " + key},
-                   json={"query": query[:380], "max_results": 10, "search_depth": "basic", "include_answer": False}, timeout=40)
-        if r.status_code in (401, 403):
-            mem()["tavily"] = dict(mem().get("tavily") or {}, bad=True)
-            return []
-        r.raise_for_status()
-        res = []
-        for x in r.json().get("results", []):
-            u = x.get("url") or ""
-            if not u.startswith("http") or any(b in u.lower().split("/")[2] for b in BAD_DOMAINS):
-                continue
-            res.append({"title": " ".join(str(x.get("title") or u).split())[:150], "url": u, "content": str(x.get("content") or "")[:700]})
-        good = [x for x in res if any(t in x["url"].lower() for t in TRUST_DOMAINS)]
-        res = good if len(good) >= 2 else good + [x for x in res if x not in good][:2]     # unknown sites only when too few trusted ones
-        mem()["tavily"] = dict(mem().get("tavily") or {}, bad=False, last=time.time())
-        _WS[ck] = res[:n]
+    cached = _wcache_get(ck)
+    if cached is not None:
+        _WS[ck] = cached[:n]
         return _WS[ck]
+    tv = mem().get("tavily") or {}
+    tavily_ok = bool(tavily_key()) and not tv.get("bad") and tv.get("out_month") != _month()
+    raw = None
+    try:
+        if tavily_ok:
+            raw, _ = _tavily_search(query, tavily_key())
     except Exception as e:
         print("tavily:", clean(e)[:100])
+    if raw is None and exa_key() and not (mem().get("exa") or {}).get("bad"):
+        try:
+            raw = _exa_search(query, exa_key())
+        except Exception as e:
+            print("exa:", clean(e)[:100])
+    if raw is None:
         return []
+    res = _clean_results(raw, n)
+    if res:
+        _wcache_put(ck, res)
+    _WS[ck] = res
+    return res
+
+
+def cmd_exakey(msg, st, raw):
+    parts = raw.split()
+    forget_message(msg)
+    key = parts[1] if len(parts) > 1 else ""
+    if key.lower() == "off":
+        mem().pop("exa", None)
+        return send("Exa key deleted from my notes.")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{20,}", key):
+        return send("That does not look like an Exa key. I deleted your message. Send: /exakey YOURKEY (from dashboard.exa.ai, API Keys).")
+    mem()["exa"] = {"key": key, "ts": time.time()}
+    _WS.clear()
+    try:
+        res = _exa_search("Rosetta Stone British Museum", key)
+    except Exception as e:
+        res = None
+        print("exa test:", clean(e)[:100])
+    if not res:
+        mem().pop("exa", None)
+        return send("Exa did not accept that key (or had no answer). I deleted your message and did not keep the key. Copy it again from dashboard.exa.ai and retry.")
+    send(f"✅ Exa connected as backup search: it answered with {len(res)} results (first: {str(res[0].get('title'))[:70]}). Your message is deleted and the key is kept encrypted. "
+         "I use it automatically when Tavily's free credits run out. /health shows both.")
 
 
 def search_topic(about):
@@ -3142,7 +3240,7 @@ def gemini_text(prompt, search=False, cache=False, topic=None):
 
 def _gemini_text(prompt, search=False, topic=None):
     body = {"contents": [{"parts": [{"text": prompt}]}]}
-    if search and topic and tavily_key():             # real web results from Tavily; Google's free search quota is not touched
+    if search and topic and (tavily_key() or exa_key()):             # real web results from Tavily; Google's free search quota is not touched
         res = web_search(topic) + web_search(topic + " archaeology museum excavation")[:4]
         seen, uniq = set(), []
         for x in res:
@@ -5464,7 +5562,7 @@ def cmd_affiliate(st):
             progs = []
         progs = [p for p in progs if p.get("name")][:6]
     if not progs or not sources:
-        why = "" if tavily_key() else " The web search key is not set, so I could only use Gemini's own search, which is limited. Send /searchkey to add the free one."
+        why = "" if (tavily_key() or exa_key()) else " The web search key is not set, so I could only use Gemini's own search, which is limited. Send /searchkey to add the free one."
         return send("I could not find programs I can back with real sources right now, and I will not guess." + why + " Try again later.")
     body = "💼 Earning ideas that fit Kemet (found on the web, check each one's terms yourself):\n\n" + "\n\n".join(
         f"{i + 1}. {str(p['name'])[:80]}\n{str(p.get('what', ''))[:140]}\nFit: {str(p.get('fit', ''))[:140]}\nHow: {str(p.get('how', ''))[:140]}\nCareful: {str(p.get('caution', 'check the terms'))[:140]}"
@@ -6474,12 +6572,15 @@ def health_site(lines):
 
 
 def tavily_diag():
-    """What exactly is wrong with Tavily: the real HTTP answer, in plain words."""
+    """What exactly is wrong with Tavily: the real HTTP answer, in plain words. Costs one credit, so it is skipped once this month's credits are known to be used up."""
+    if (mem().get("tavily") or {}).get("out_month") == _month():
+        raise RuntimeError("the free monthly credits are used up (they come back next month); I use Exa if it is connected, else Google")
     r = S.post(TAVILY + "/search", headers={"Authorization": "Bearer " + tavily_key()},
                json={"query": "Karnak temple Luxor", "max_results": 3, "search_depth": "basic"}, timeout=40)
     if r.status_code == 200:
         n = len(r.json().get("results", []))
-        mem()["tavily"] = dict(mem().get("tavily") or {}, bad=False, last=time.time())
+        search_count("tavily", 1)
+        mem()["tavily"] = dict(mem().get("tavily") or {}, bad=False, last=time.time(), out_month="")
         return f"working ({n} results)" if n else "answered but found nothing for the test query"
     try:
         det = str((r.json().get("detail") or {}).get("error") or r.json())[:100]
@@ -6490,6 +6591,8 @@ def tavily_diag():
            429: "too many requests right now, try again in a minute",
            432: "the free monthly credits are used up (they come back next month)",
            433: "the free monthly credits are used up (they come back next month)"}.get(r.status_code, "Tavily had a problem")
+    if r.status_code in (432, 433):
+        mem()["tavily"] = dict(mem().get("tavily") or {}, out_month=_month())
     raise RuntimeError(f"HTTP {r.status_code}: {why} [{det}]")
 
 
@@ -6512,8 +6615,15 @@ def cmd_health(st):
         return "token works"
     if tavily_key():
         chk("Tavily web search", tavily_diag)
+        lines.append(f"   Tavily used this month: {search_count('tavily')} of about 1000 free credits")
     else:
         lines.append("Tavily web search: not set (send /searchkey tvly-... to stop depending on Google's free limit)")
+    if exa_key():
+        ex = mem().get("exa") or {}
+        lines.append(("✗ Exa backup search: key refused (send /exakey again)" if ex.get("bad") else "✓ Exa backup search: connected") + f", used this month: {search_count('exa')}")
+    else:
+        lines.append("Exa backup search: not set (free, send /exakey YOURKEY so searches continue when Tavily runs out)")
+    lines.append(f"Saved searches (free to reuse): {len(mem().get('wscache') or {})}")
     try:
         _n = nb()
         lines.append(f"✓ Learning notebook: {len(_n['obs'])} videos studied, {len(_n['facts'])} patterns, {len(_n['asks'])} viewer requests" + (" (paused)" if _n["off"] else ""))
@@ -7497,6 +7607,8 @@ def on_message(msg, st):
         cmd_fboff(st)
     elif text.startswith("/searchkey"):
         cmd_searchkey(msg, st, raw)
+    elif text.startswith("/exakey"):
+        cmd_exakey(msg, st, raw)
     elif text == "/searchoff":
         cmd_searchoff(st)
     elif text == "/review":
@@ -10292,6 +10404,7 @@ def main():
             {"command": "post", "description": "Community posts to paste"},
             {"command": "fbsetup", "description": "Link your Facebook Page"},
             {"command": "searchkey", "description": "Connect free web search (Tavily)"},
+            {"command": "exakey", "description": "Backup web search (Exa)"},
             {"command": "news", "description": "Egypt news to make videos about"},
             {"command": "longform", "description": "Plan long videos"},
             {"command": "batch", "description": "5 scripts to film today"},
