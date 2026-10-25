@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.110"
+BOT_VERSION = "v10.111"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2324,6 +2324,7 @@ def do_publish(job, st=None):
         job["stage"] = "done"
         send(f"🚀 It is PUBLIC now: https://youtu.be/{vid}")
         cmd_xpost_after_publish(job, st)
+        offer_site_after_public(job, st)
     else:
         send("YouTube kept it PRIVATE. New API projects are locked to private until Google "
              "audits them, so this is expected.\n\nTo publish: YouTube app → Profile → Your "
@@ -2935,6 +2936,12 @@ def on_prop(jid, act, st):
         return send("✅ Posted to your Facebook Page " + cfg.get("page_name", "") + ".\nhttps://www.facebook.com/" + str(pid_ or cfg.get("page_id", "")))
     if act == "cp" and kind == "sitepub":
         return do_site_publish(prop, st)
+    if act == "gh" and kind == "afterhubs":
+        st["props"].pop(jid, None)
+        return after_hubs(st)
+    if act == "gw" and kind == "afterart":
+        st["props"].pop(jid, None)
+        return write_article(prop["c"], st)
     if act == "fa" and kind == "fixall":
         st["props"].pop(jid, None)
         return fixq_start(st)
@@ -7741,7 +7748,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -9228,6 +9235,44 @@ def cmd_proof(st):
          "\n\nEach article ends with its own reference (for example KMT-1A2B3C). Searching Google for it later shows any copy that kept it.")
 
 
+def offer_site_after_public(job, st):
+    """A video just went public: offer to add it to the website's series pages, then (after that is live) to write its article."""
+    if st is None or not mem().get("site_zip") or job.get("video_id") in (mem().get("articles") or {}):
+        return
+    try:
+        mem()["after_pub"] = {"vid": job["video_id"], "title": job["title"], "hubs": False, "ts": time.time()}
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "afterhubs", "created": time.time()}
+        send(f"🌐 Next for the website: put \"{job['title'][:60]}\" on its series page, then publish the site. After that I can write its article.",
+             [[btn("🗂 Update series pages", pid, "gh")], [btn("Not now", pid, "cs")]])
+    except Exception as e:
+        print("after public:", clean(e)[:100])
+
+
+def after_hubs(st):
+    ap = mem().get("after_pub") or {}
+    try:
+        tok = yt_token()
+        if ap.get("vid") and not any(ap["vid"] in [i["id"] for i in pl["items"]] for pl in site_playlists(tok)):
+            send("ℹ️ This film is not in any playlist yet, so it will not appear on a series page. Send /series to add it to one, then /seriespages again.")
+    except Exception as e:
+        print("after hubs check:", clean(e)[:100])
+    ap["hubs"] = True
+    cmd_hubs(st)
+
+
+def offer_article_after_site(st):
+    """The site was published: if a new film is waiting for its article, offer to write it."""
+    ap = mem().get("after_pub") or {}
+    if not ap.get("hubs") or ap.get("vid") in (mem().get("articles") or {}):
+        return
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "afterart", "c": {"id": ap["vid"], "title": ap["title"]}, "created": time.time()}
+    send(f"The website is live with \"{ap['title'][:60]}\". Want the article for it now? I research it, write about 2,000 words, check every claim, and offer a second Publish.",
+         [[btn("✍️ Write the article", pid, "gw")], [btn("Not now", pid, "cs")]])
+    mem().pop("after_pub", None)
+
+
 def do_site_publish(prop, st):
     send("🚀 Publishing...")
     ok, info = cf_deploy(prop["file_id"])
@@ -9242,6 +9287,10 @@ def do_site_publish(prop, st):
     except Exception as e:
         print("proof:", clean(e)[:100])
     send("✅ Published to your website: " + SITE_BASE + "/\n" + (f"This deployment: {info}\n" if info else "") + "The main address can take a few minutes to show the update.")
+    try:
+        offer_article_after_site(st)
+    except Exception as e:
+        print("offer article:", clean(e)[:100])
 
 
 # ---------------- the weekly site routine ----------------
