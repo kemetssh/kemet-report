@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.117"
+BOT_VERSION = "v10.120"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -213,7 +213,7 @@ def made_titles():
     cache = m.get("made") or {}
     if time.time() - cache.get("ts", 0) > 12 * 3600:
         try:
-            vids, _ = my_videos(yt_token(), 50)
+            vids = all_videos(yt_token())     # every upload, so no old topic is repeated
             cache = {"ts": time.time(), "titles": [v["snippet"]["title"] for v in vids]}
             m["made"] = cache
         except Exception as e:
@@ -325,12 +325,8 @@ def refresh_patterns(force=False):
     if not force and time.time() - p.get("ts", 0) < 3 * 86400:
         return p.get("lines", [])
     tok = yt_token()
-    vids, _ = latest_vids(tok, 50)
-    secs = {}
-    ids = [v["id"] for v in vids]
-    if ids:
-        for it in yt_get("videos", tok, part="contentDetails", id=",".join(ids)).get("items", []):
-            secs[it.get("id")] = iso_seconds((it.get("contentDetails") or {}).get("duration"))
+    vids = all_videos(tok)       # every upload: more videos make the patterns more reliable
+    secs = {v["id"]: iso_seconds((v.get("contentDetails") or {}).get("duration")) for v in vids}
     rows = []
     for v in vids:
         pub = iso_ts(v["snippet"].get("publishedAt", ""))
@@ -1581,9 +1577,10 @@ def cmd_watchnext(st, limit=4):
     todo = [v for v in vids if not has_watch_next(v["snippet"].get("description")) and v["id"] not in pending]
     if not todo:
         return send("Every video already ends its opening lines with a Watch-next link. ✅")
-    send(f"▶ {len(todo)} videos have no 'Watch next' link. Here are the first {min(limit, len(todo))} (nothing changes until you tap).")
+    send(f"▶ {len(todo)} videos have no 'Watch next' link (I checked all {len(vids)} videos, not only the newest 50). "
+         f"Here are the first {min(limit, len(todo))} (nothing changes until you tap)." + ("\nOr add all of them with the one button at the end." if len(todo) > limit else ""))
     pids = []
-    for v in todo[:limit]:
+    for k, v in enumerate(todo):
         sn = v["snippet"]
         n = pick_next(sn.get("title", "") + " " + (sn.get("description") or "")[:300], pool, exclude=v["id"])
         if not n:
@@ -1591,12 +1588,13 @@ def cmd_watchnext(st, limit=4):
         pid = new_pid(st)
         st["props"][pid] = {"type": "wnb", "video_id": v["id"], "title": sn.get("title", ""), "line": watch_line(n), "created": time.time()}
         pids.append(pid)
-        send(f"📺 \"{sn.get('title', '')}\"\nwill point viewers to:\n{n['title']}",
-             [[btn("✅ Add the link", pid, "wn"), btn("Skip", pid, "cs")]])
+        if k < limit:
+            send(f"📺 \"{sn.get('title', '')}\"\nwill point viewers to:\n{n['title']}",
+                 [[btn("✅ Add the link", pid, "wn"), btn("Skip", pid, "cs")]])
     if len(pids) > 1:
         pa = new_pid(st)
         st["props"][pa] = {"type": "wna", "pids": pids, "created": time.time()}
-        send(f"Add all {len(pids)} links in one go?" + (f" ({len(todo) - limit} more videos will follow next time you send /watchnext.)" if len(todo) > limit else ""),
+        send(f"Add all {len(pids)} links in one go? (Every video above and the {max(len(pids) - limit, 0)} more not shown.)",
              [[btn(f"✅ Add all {len(pids)}", pa, "wa")]])
 
 
@@ -2414,16 +2412,28 @@ def cmd_titles(st, focus=None):
         def misses(t):
             f = title_features(t)
             return [r for r in rules if bool(f.get(r["name"])) != (r["dir"] > 0)]
-        data = [d for d in data if misses(d["title"])][:30]
+        data = [d for d in data if misses(d["title"])]
         if not data:
             return send("Every title I may change already follows these patterns, so there is nothing to fix there. 👍")
-        limit = 8
+        limit = len(data)                 # every video that misses a pattern, not only the first few
         extra = ("\nPATTERNS TO APPLY: in this channel's own numbers, these title habits work better:\n" +
                  "\n".join(f"- {'USE' if r['dir'] > 0 else 'AVOID'}: {r['name']}" for r in rules) +
-                 f"\nFor up to {limit} videos, propose a new title that follows ALL of these at once, but ONLY where it stays 100% true to the video and natural. Skip a video if it would need a stretch.\n")
-    out = gemini([{"text": "What you know about the owner's taste:\n" + learned() + "\n" + extra + "\n" + TITLES_PROMPT + json.dumps(data)}])
+                 "\nFor each video below, propose a new title that follows ALL of these at once, but ONLY where it stays 100% true to the video and natural. Skip a video if it would need a stretch.\n")
+    out = {"proposals": []}
+    chunks = [data[i:i + 25] for i in range(0, len(data), 25)] if focus else [data]
+    for k, chunk in enumerate(chunks):                  # 25 videos per AI request, so the whole channel is covered
+        try:
+            part = gemini([{"text": "What you know about the owner's taste:\n" + learned() + "\n" + extra + "\n" + TITLES_PROMPT + json.dumps(chunk)}])
+        except Exception as e:
+            if k == 0:
+                raise
+            print("titles chunk:", clean(e)[:100])
+            send(f"⏳ Google's AI stopped after {k * 25} videos (busy or at its free limit). Send the same command again later for the rest.")
+            break
+        out["proposals"] += part.get("proposals", [])
     byid = {v["id"]: v for v in vids}
     shown = 0
+    tpids = []
     for p in out.get("proposals", [])[:limit]:
         v = byid.get(p.get("video_id"))
         new = (p.get("new_title") or "").strip()[:100]
@@ -2433,15 +2443,22 @@ def cmd_titles(st, focus=None):
             continue
         age_d = (time.time() - (iso_ts(v["snippet"].get("publishedAt", "")) or time.time())) / 86400
         pid = new_pid(st)
+        tpids.append(pid)
         st["props"][pid] = {"type": "title", "video_id": v["id"], "old": v["snippet"]["title"],
                             "new": new, "created": time.time(), "min_age": min_age,
                             "views": int(v.get("statistics", {}).get("viewCount", 0)),
                             "published": v["snippet"].get("publishedAt", "")}
-        send(f"Title idea\nNow: {v['snippet']['title']}\nNew: {new}\nWhy: {p.get('why', '')}\n"
-             + (f"⚠️ This video is only {age_d:.0f} days old, so its views are still settling. I will watch it and put the old title back if views per day drop.\n" if age_d < EXP_MIN_AGE_DAYS else "") +
-             f"https://youtu.be/{v['id']}",
-             [[btn("✅ Apply", pid, "ta"), btn("Skip", pid, "ts")]])
+        if not focus or shown < 5:                          # a few cards to read; the Apply-all button below covers every proposal
+            send(f"Title idea\nNow: {v['snippet']['title']}\nNew: {new}\nWhy: {p.get('why', '')}\n"
+                 + (f"⚠️ This video is only {age_d:.0f} days old, so its views are still settling. I will watch it and put the old title back if views per day drop.\n" if age_d < EXP_MIN_AGE_DAYS else "") +
+                 f"https://youtu.be/{v['id']}",
+                 [[btn("✅ Apply", pid, "ta"), btn("Skip", pid, "ts")]])
         shown += 1
+    if len(tpids) > 1:
+        pa = new_pid(st)
+        st["props"][pa] = {"type": "tia", "pids": tpids, "created": time.time()}
+        send(f"Apply all {len(tpids)} title ideas in one go?" + (f" (The first 5 are shown above, {len(tpids) - 5} more are not.)" if focus and len(tpids) > 5 else "") + " (Videos too fresh are skipped, and each change is still checked after 3 days.)",
+             [[btn(f"✅ Apply all {len(tpids)}", pa, "tl")]])
     if not shown:
         send("Your titles look fine. Nothing to change right now." if not focus else "I found no old title where this pattern fits naturally and stays true to the video, so I changed nothing.")
 
@@ -2881,6 +2898,28 @@ def on_prop(jid, act, st):
                               "before_rate": prop.get("views", 0) / age, "done": False})
         return send(f"✅ Title changed to:\n{prop['new']}\n\nI will compare its views in 3 days and tell you "
                     "if I would keep it.", [[btn("↩️ Undo", jid, "tu")]])
+    if act == "tl" and kind == "tia":
+        done = skipped = 0
+        for p in prop["pids"]:
+            pr = st["props"].get(p)
+            if not pr or pr.get("type") != "title":
+                continue
+            if exp_blocker(pr["video_id"], pr.get("published", ""), pr.get("min_age")):
+                skipped += 1
+                continue
+            try:
+                set_title(pr["video_id"], pr["new"])
+                remember("picks", pr["new"])
+                pub = iso_ts(pr.get("published", ""))
+                age = max((time.time() - pub) / 86400, 1) if pub else 30
+                mem()["exps"].append({"video_id": pr["video_id"], "old": pr["old"], "new": pr["new"], "start_views": pr.get("views", 0),
+                                      "start_ts": time.time(), "before_rate": pr.get("views", 0) / age, "done": False})
+                st["props"].pop(p, None)
+                done += 1
+            except Exception as e:
+                print("titles all:", clean(e)[:100])
+        st["props"].pop(jid, None)
+        return send(f"✅ Changed {done} titles." + (f" {skipped} skipped (too fresh)." if skipped else "") + " I will compare their views in 3 days and tell you which to keep.")
     if act == "tu" and kind == "title":
         set_title(prop["video_id"], prop["old"])
         mem()["exps"] = [e for e in mem()["exps"] if not (e["video_id"] == prop["video_id"] and not e["done"])]
@@ -2940,6 +2979,25 @@ def on_prop(jid, act, st):
         pick = prop["item"]["picks"][int(st.get("_val", "0"))]
         st["props"].pop(jid, None)
         return revideo_article(prop["item"], pick, st)
+    if act == "vl" and kind == "reva":
+        global _QUIET_PUB
+        done = 0
+        _QUIET_PUB = True
+        try:
+            for p in prop["pids"]:
+                pr = st["props"].get(p)
+                if pr and pr.get("type") == "revideo" and pr["item"].get("picks"):
+                    try:
+                        revideo_article(pr["item"], pr["item"]["picks"][0], st)
+                        st["props"].pop(p, None)
+                        done += 1
+                    except Exception as e:
+                        print("revideo all:", clean(e)[:100])
+        finally:
+            _QUIET_PUB = False
+        st["props"].pop(jid, None)
+        send(f"✅ {done} articles now show their best matching film. Nothing is live until you tap Publish.")
+        return offer_publish(st)
     if act == "gh" and kind == "afterhubs":
         st["props"].pop(jid, None)
         return after_hubs(st)
@@ -2995,6 +3053,8 @@ def on_prop(jid, act, st):
         return send(f"✅ Added the article link to {done} description(s).")
     if act == "ah" and kind == "articles":
         return cmd_hubs(st)
+    if act == "aq" and kind == "articles":
+        return articles_queue(prop["cands"], st)
     if act == "ar" and kind == "articles":
         return write_article(prop["cands"][int(st.get("_val", "0"))], st)
     if act == "ls" and kind == "longs":
@@ -3078,6 +3138,19 @@ def on_prop(jid, act, st):
         set_description_append(prop["video_id"], prop["lines"])
         st["props"].pop(jid, None)
         return send("✅ New opening lines added to the description.")
+    if act == "dl" and kind == "dra":
+        done = 0
+        for p in prop["pids"]:
+            pr = st["props"].get(p)
+            if pr and pr.get("type") == "dref":
+                try:
+                    set_description_append(pr["video_id"], pr["lines"])
+                    st["props"].pop(p, None)
+                    done += 1
+                except Exception as e:
+                    print("refresh all:", clean(e)[:100])
+        st["props"].pop(jid, None)
+        return send(f"✅ New opening lines added to {done} descriptions.")
     if act == "bl" and kind == "bestlink":
         line = f"New here? Start with: {prop['title']} https://youtu.be/{prop['best']}"
         done = 0
@@ -7001,9 +7074,12 @@ Videos: {rows}
 Return JSON only: {{"items": [{{"video_id": "", "lines": "", "why": "one short line"}}]}}"""
 
 
+REFRESH_BATCH = 6
+
+
 def cmd_refresh(st):
     tok = yt_token()
-    vids, _ = latest_vids(tok, 50)
+    vids = all_videos(tok)   # every upload, not only the newest 50
     old = []
     for v in vids:
         pub = iso_ts(v["snippet"].get("publishedAt", ""))
@@ -7011,23 +7087,29 @@ def cmd_refresh(st):
             views = int(v.get("statistics", {}).get("viewCount", 0))
             old.append((views / ((time.time() - pub) / 86400), v))
     pending = {p.get("video_id") for p in st["props"].values() if p.get("type") == "dref"}
-    old = [v for _, v in sorted(old, key=lambda x: x[0]) if v["id"] not in pending][:3]
+    old = [v for _, v in sorted(old, key=lambda x: x[0]) if v["id"] not in pending][:REFRESH_BATCH]
     if not old:
         return send("No video older than 30 days needs a refresh yet. Check again later.")
     rows = [{"video_id": v["id"], "title": v["snippet"]["title"], "description": (v["snippet"].get("description") or "")[:500]} for v in old]
     out = gemini([{"text": REFRESH_PROMPT.format(rows=json.dumps(rows))}])
     by = {v["id"]: v for v in old}
     shown = 0
+    dpids = []
     for i in out.get("items", []):
         v = by.get(i.get("video_id"))
         lines = str(i.get("lines", "")).strip()[:300]
         if not v or not lines:
             continue
         pid = new_pid(st)
+        dpids.append(pid)
         st["props"][pid] = {"type": "dref", "video_id": v["id"], "lines": lines, "created": time.time()}
         send(f"🔄 \"{v['snippet']['title']}\" ({v.get('statistics', {}).get('viewCount', 0)} views)\nNew opening lines for the description:\n\n{lines}\n\nWhy: {i.get('why', '')}",
              [[btn("✅ Add them", pid, "rd"), btn("Skip", pid, "cs")]])
         shown += 1
+    if len(dpids) > 1:
+        pa = new_pid(st)
+        st["props"][pa] = {"type": "dra", "pids": dpids, "created": time.time()}
+        send(f"Add all {len(dpids)} refreshes in one go?", [[btn(f"✅ Add all {len(dpids)}", pa, "dl")]])
     if not shown:
         send("I could not write refreshes right now. Try again later.")
 
@@ -7804,7 +7886,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -9487,6 +9569,19 @@ def search_ready():
     return tav or bool(exa_key() and not (mem().get("exa") or {}).get("bad"))
 
 
+def articles_queue(cands, st):
+    """Write every listed article one after another (same queue as fix-all): one summary and one Publish button at the end."""
+    if not mem().get("site_zip"):
+        return send("I have no site yet. Send me your site .zip first.")
+    if mem().get("fixq"):
+        return send("A queue is already running. Send /fixstop to stop it, or wait for its summary.")
+    items = [{"task": "write", "c": c, "slug": c["id"], "title": c["title"]} for c in cands]
+    mem()["fixq"] = {"items": items, "log": [], "ts": time.time()}
+    send(f"✍️ Writing {len(items)} articles one after another (about 5 minutes each, so about {len(items) * 5} minutes in all). You do not need to do anything: "
+         "I send one summary and one Publish button at the end. Send /fixstop to stop." +
+         ("" if search_ready() else "\n⚠️ Web search has no free credits right now, so the fact-check may be partial. Connect Exa (/exakey) first, or wait until Tavily's credits return."))
+
+
 def fixq_start(st):
     sz = mem().get("site_zip")
     if not sz:
@@ -9527,13 +9622,16 @@ def fixq_step(st):
             print("fixq check:", clean(e)[:100])
     _QUIET_PUB = True
     try:
-        (deepen_article if it["task"] == "deep" else resource_article)(it, st)
+        if it["task"] == "write":
+            write_article(it["c"], st)
+        else:
+            (deepen_article if it["task"] == "deep" else resource_article)(it, st)
     except Exception as e:
         print("fixq step:", clean(e)[:160])
     finally:
         _QUIET_PUB = False
     changed = (mem().get("site_zip") or {}).get("file_id") != sz0
-    q["log"].append(("✅ " if changed else "⚠️ left as it was: ") + ("deepened " if it["task"] == "deep" else "better sources: ") + it["title"][:50])
+    q["log"].append(("✅ " if changed else "⚠️ left as it was: ") + ({"deep": "deepened ", "write": "wrote "}.get(it["task"], "better sources: ")) + it["title"][:50])
     if not q["items"]:
         fixq_finish(st)
 
@@ -10269,12 +10367,19 @@ def cmd_fixvideos(st):
     if any(it["picks"] is None for it in todo):
         send("⏳ Google's AI did not answer just now (it is busy or at its free limit), so I could not judge the matches. Nothing was changed. Send /fixvideos again in a few minutes.")
         todo = [it for it in todo if it["picks"] is not None]
+    rpids = []
     for it in todo:
         pid = new_pid(st)
+        if it["picks"]:
+            rpids.append(pid)
         st["props"][pid] = {"type": "revideo", "item": it, "vt": {p: vt[p] for p in it["picks"]}, "created": time.time()}
         rows = [[btn("🎬 " + vt[p][:44], pid, "vp", str(i))] for i, p in enumerate(it["picks"])] + [[btn("Keep as it is", pid, "cs")]]
         send(f"📎 \"{it['title']}\" shows the film \"{vt.get(it['old'], it['old'])[:60]}\", which is better kept on the article about it. " +
              ("Best matching film(s) on your channel:" if it["picks"] else "I found no clearly matching film on your channel, so I suggest leaving it."), rows)
+    if len(rpids) > 1:
+        pa = new_pid(st)
+        st["props"][pa] = {"type": "reva", "pids": rpids, "created": time.time()}
+        send(f"Use the best (first) matching film for all {len(rpids)} articles in one go?", [[btn(f"✅ Fix all {len(rpids)}", pa, "vl")]])
 
 
 def revideo_article(item, new_vid, st):
@@ -10354,11 +10459,12 @@ def cmd_articlelinks(st):
         pid = new_pid(st)
         st["props"][pid] = {"type": "alb", "video_id": vid, "title": sn.get("title", ""), "line": line, "url": url, "created": time.time()}
         pids.append(pid)
-        send(f"📖 \"{sn.get('title', '')}\"\nAdd this as the first line of its description:\n{line}", [[btn("✅ Add to description", pid, "al"), btn("Skip", pid, "cs")]])
+        if len(pids) <= 4:                                    # a few cards to look at; the one button below covers every video
+            send(f"📖 \"{sn.get('title', '')}\"\nAdd this as the first line of its description:\n{line}", [[btn("✅ Add to description", pid, "al"), btn("Skip", pid, "cs")]])
     if len(pids) > 1:
         pa = new_pid(st)
         st["props"][pa] = {"type": "ala", "pids": pids, "created": time.time()}
-        send(f"Add the article link to all {len(pids)} videos above?", [[btn(f"✅ Add to all {len(pids)}", pa, "aa")]])
+        send(f"Add the article link to all {len(pids)} videos" + (f" (the first 4 are shown above, {len(pids) - 4} more are not)" if len(pids) > 4 else " above") + "?", [[btn(f"✅ Add to all {len(pids)}", pa, "aa")]])
     msg = []
     if notlive:
         msg.append("Not live on the site yet (upload the zip first): " + "; ".join(notlive[:5]))
@@ -10403,6 +10509,7 @@ def cmd_articles(st):
     st["props"][pid] = {"type": "articles", "cands": cands, "ts": time.time()}
     rows = [[btn(f"✍️ {i + 1}. {c['title'][:44]}", pid, "ar", str(i))] for i, c in enumerate(cands)]
     rows = [[btn((f"▶️ Next in {c['series'][:18]}: " if c.get("series") else f"✍️ {i + 1}. ") + c["title"][:34], pid, "ar", str(i))] for i, c in enumerate(cands)]
+    rows.append([btn(f"✍️ Write all {len(cands)} articles", pid, "aq")])
     rows.append([btn("🗂 Build a series page for each playlist", pid, "ah")])
     send("Your most viewed videos that have no article yet, then the next film in each playlist:\n\n" + "\n".join(f"{i + 1}. {c['title']} (" + (f"next in the series {c['series']}" if c.get("series") else f"{c['views']} views") + ")" for i, c in enumerate(cands)) +
          "\n\nTap one. I research it, write about 2,000 words, check every claim against sources, and send you the full updated site. Nothing goes public until you upload it.\n"
