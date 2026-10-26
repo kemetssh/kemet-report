@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.126"
+BOT_VERSION = "v10.129"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -497,14 +497,26 @@ def tg_download(file_id, dest):
 
 # ---------------- video helpers ----------------
 def probe(path):
-    out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-         "format=duration:stream=width,height", "-of", "json", str(path)],
-        capture_output=True, text=True)
-    j = json.loads(out.stdout or "{}")
-    dur = float(j.get("format", {}).get("duration", 0) or 0)
-    st = (j.get("streams") or [{}])[0]
-    return dur, int(st.get("width", 0) or 0), int(st.get("height", 0) or 0)
+    """Length and size of a video. Uses ffprobe; when the server has ffmpeg but no ffprobe, reads the same facts from ffmpeg itself."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "format=duration:stream=width,height", "-of", "json", str(path)],
+            capture_output=True, text=True)
+        j = json.loads(out.stdout or "{}")
+        dur = float(j.get("format", {}).get("duration", 0) or 0)
+        st = (j.get("streams") or [{}])[0]
+        return dur, int(st.get("width", 0) or 0), int(st.get("height", 0) or 0)
+    except FileNotFoundError:
+        pass
+    try:
+        err = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(path)], capture_output=True, text=True).stderr
+    except FileNotFoundError:
+        raise RuntimeError("the video tools (ffmpeg) are missing on my server right now, so I cannot read your video. Send it again in a few minutes")
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", err)
+    dur = (int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))) if m else 0.0
+    v = re.search(r"Video:.*?,\s*(\d{2,5})x(\d{2,5})", err)
+    return dur, (int(v.group(1)) if v else 0), (int(v.group(2)) if v else 0)
 
 
 def frame(path, t, out):
@@ -3004,6 +3016,10 @@ def on_prop(jid, act, st):
         return send("✅ Posted to your Facebook Page " + cfg.get("page_name", "") + ".\nhttps://www.facebook.com/" + str(pid_ or cfg.get("page_id", "")))
     if act == "cp" and kind == "sitepub":
         return do_site_publish(prop, st)
+    if act == "va" and kind == "attach":
+        st["props"].pop(jid, None)
+        mem()["needvid"] = [e for e in (mem().get("needvid") or []) if e.get("slug") != prop["slug"]]
+        return revideo_article({"slug": prop["slug"], "title": prop["title"]}, prop["vid"], st)
     if act == "vp" and kind == "revideo":
         pick = prop["item"]["picks"][int(st.get("_val", "0"))]
         st["props"].pop(jid, None)
@@ -6767,6 +6783,41 @@ def article_link_line():
             f"⚠️ Article links in video descriptions: {have} of {tot} (send /articlelinks to add the other {len(miss)})")
 
 
+def channel_counts(tok):
+    """The real number of uploads on the channel, straight from YouTube: total, by visibility, Shorts (3 minutes or less) and long videos."""
+    vids = all_videos(tok)
+    status = {}
+    ids = [v["id"] for v in vids]
+    for i in range(0, len(ids), 50):
+        for it in yt_get("videos", tok, part="status", id=",".join(ids[i:i + 50])).get("items", []):
+            status[it["id"]] = it.get("status") or {}
+    vis = {"public": 0, "unlisted": 0, "private": 0, "scheduled": 0}
+    for v in vids:
+        s_ = status.get(v["id"], {})
+        if s_.get("publishAt") and s_.get("privacyStatus") == "private":
+            vis["scheduled"] += 1
+        else:
+            vis[s_.get("privacyStatus", "private")] = vis.get(s_.get("privacyStatus", "private"), 0) + 1
+    secs = [iso_seconds((v.get("contentDetails") or {}).get("duration")) for v in vids]
+    return {"total": len(vids), "vis": vis, "shorts": sum(1 for x in secs if 0 < x <= 180), "long": sum(1 for x in secs if x > 180)}
+
+
+def count_text(c):
+    v = c["vis"]
+    return (f"{c['total']} videos uploaded on YouTube: {v['public']} public, {v['scheduled']} scheduled, {v['unlisted']} unlisted, {v['private']} private.\n"
+            f"{c['shorts']} are Shorts (3 minutes or less) and {c['long']} are long videos.")
+
+
+def cmd_count(st):
+    c = channel_counts(yt_token())
+    m = mem()
+    arts = len(m.get("articles") or {})
+    send("📊 " + count_text(c) +
+         f"\n\nWhy other numbers differ: the bot's own notes track {len(m['videos'])} videos (only those it uploaded or checked), "
+         "the website counts only videos used by an article, and /learned counts the videos it has studied with views. "
+         "This number comes straight from YouTube, so it is the correct one.")
+
+
 def cmd_health(st):
     lines = ["🩺 Health check", f"Bot version {BOT_VERSION}"]
     tok = {}
@@ -6831,7 +6882,11 @@ def cmd_health(st):
     lines.append(desc_sources_line())
     lines.append(proof_line())
     m = mem()
-    lines.append(f"Videos tracked: {len(m['videos'])} | Lessons learned: {len(m['lessons'])}")
+    try:
+        lines.append("📊 YouTube: " + count_text(channel_counts(yt_token())).replace("\n", " "))
+    except Exception as e:
+        lines.append("✗ YouTube video count: " + clean(e)[:80])
+    lines.append(f"Videos tracked by the bot: {len(m['videos'])} | Lessons learned: {len(m['lessons'])}")
     lines.append("Autopilot: " + ("PAUSED (/resume to restart)" if st.get("paused") else "on"))
     if fb_cfg():
         lines.append("Facebook Page: connected (" + fb_cfg().get("page_name", "") + ")")
@@ -7592,7 +7647,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/sublines - rotate the subscribe line, learn what works\n"
         "/hook - 3 opening lines for your next Short\n"
         "/goal 100 - set a subscriber goal and track it\n"
-        "/demand - what people really search for (or /demand your topic)\n"
+        "/demand - what people search for\n/count - exact number of videos\n"
         "/refresh - fresh description lines for old videos\n"
         "/calendar - ideas timed to real Egypt events\n"
         "/subs - where subscribers come from\n"
@@ -7896,6 +7951,8 @@ def on_message(msg, st):
         cmd_articlevideos(st)
     elif text.startswith("/articlelinks"):
         cmd_articlelinks(st)
+    elif text == "/count":
+        cmd_count(st)
     elif text.startswith("/synctitles"):
         cmd_synctitles(st)
     elif text.startswith("/seriespages"):
@@ -7932,7 +7989,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -9424,6 +9481,15 @@ def offer_site_after_public(job, st):
     if st is None or not mem().get("site_zip") or job.get("video_id") in (mem().get("articles") or {}):
         return
     try:
+        nm = needvid_match(job.get("title", ""), (job.get("review") or {}).get("summary", ""))
+        if nm:
+            pa = new_pid(st)
+            st["props"][pa] = {"type": "attach", "slug": nm["slug"], "title": nm["title"], "vid": job["video_id"], "created": time.time()}
+            send(f"📎 This film looks like the one the article \"{nm['title'][:70]}\" was missing. Show it on that article?",
+                 [[btn("✅ Attach it to the article", pa, "va")], [btn("No, not that one", pa, "cs")]])
+    except Exception as e:
+        print("attach offer:", clean(e)[:100])
+    try:
         mem()["after_pub"] = {"vid": job["video_id"], "title": job["title"], "hubs": False, "ts": time.time()}
         pid = new_pid(st)
         st["props"][pid] = {"type": "afterhubs", "created": time.time()}
@@ -10531,6 +10597,16 @@ def articles_without_video(root, vt):
     return res
 
 
+def needvid_match(title, summary=""):
+    """The article (from /needvideos) that a new video was made for, or None."""
+    best, bs = None, 0.0
+    for e in (mem().get("needvid") or []):
+        sc = max(title_overlap(e.get("idea", ""), title) if e.get("idea") else 0, title_overlap(e.get("title", ""), title), 0.8 * title_overlap(e.get("title", ""), summary or ""))
+        if sc > bs:
+            best, bs = e, sc
+    return best if bs >= 0.5 else None
+
+
 def cmd_needvideos(st):
     """Which articles have no video of their own, so the owner can make those videos."""
     sz = mem().get("site_zip")
@@ -10542,7 +10618,7 @@ def cmd_needvideos(st):
         need = articles_without_video(site_zip_from(sz["file_id"], d), vt)
     if not need:
         return send("Every article has its own video. ✅")
-    mem()["needvid"] = [n[0] for n in need]
+    mem()["needvid"] = [{"slug": n[0], "title": n[1], "idea": ""} for n in need]
     lines = [f"📹 {len(need)} article(s) have no video of their own:"]
     for slug, title, deck, film in need:
         lines.append(f"• {title[:80]}" + (f"\n   (shows \"{film[:60]}\", which fits another article better)" if film else "\n   (shows no film)"))
@@ -10555,6 +10631,8 @@ def cmd_needvideos(st):
         print("needvideos ideas:", clean(e)[:100])
         ideas = []
     if ideas:
+        for k, i in enumerate(ideas[:len(need)]):          # remember which article each idea was for, so the finished video can be attached to it
+            mem()["needvid"][k]["idea"] = str(i.get("title", ""))[:100]
         idea_taps(st, ideas, "🎬 Video ideas that give those articles their own film:", allow_made=True)
     send("When a video is public, send /fixvideos to attach it to its article.")
 
@@ -11094,6 +11172,7 @@ def main():
             {"command": "dupes", "description": "Merge duplicate playlists"},
             {"command": "merge", "description": "Merge overlapping playlists"},
             {"command": "publish", "description": "Put the website live"},
+            {"command": "count", "description": "The exact number of videos on YouTube"},
             {"command": "synctitles", "description": "Match website film titles to YouTube"},
             {"command": "needvideos", "description": "Articles that need their own video"},
             {"command": "siteweek", "description": "Website check and next articles"},
