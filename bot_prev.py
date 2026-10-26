@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.125"
+BOT_VERSION = "v10.126"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -7568,6 +7568,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/publish - put the site live\n"
         "/siteweek - website check\n"
         "/synctitles - site film titles = YouTube\n"
+        "/needvideos - articles without a video\n"
         "/searchdata - search ideas\n"
         "/sitelogo - logo on site\n"
         "/cfsetup - 1-tap publish\n"
@@ -7598,7 +7599,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/praise - save your best comments\n"
         "/voice - pacing coach from your own numbers\n"
         "/poll - feedback poll: what to film next\n"
-        "/cadence 3 - set how often you want to post\n"
+        "/cadence 3 - how often to post\n"
         "/links /addlink /removelink - links added to your descriptions\n"
         "/health - check that everything works\n/pause /resume - stop or restart my own messages\n"
         "Or just write or speak to me normally: I work out what you want.\n"
@@ -7889,6 +7890,8 @@ def on_message(msg, st):
         cmd_dupes(st)
     elif text.startswith("/fixvideos"):
         cmd_fixvideos(st)
+    elif text.startswith("/needvideos"):
+        cmd_needvideos(st)
     elif text.startswith("/articlevideos"):
         cmd_articlevideos(st)
     elif text.startswith("/articlelinks"):
@@ -10502,6 +10505,60 @@ def site_title_line(root_fn=None):
     return "✓ Film titles on the site match YouTube" if not ch else f"⚠️ {len(ch)} film title(s) on the site differ from YouTube (send /synctitles)"
 
 
+NEEDVID_PROMPT = """The owner of the YouTube channel "Kemet | Ancient Egypt" (calm, cinematic, evidence-first videos he records in his own voice) has website articles that have no video of their own.
+For each article below, propose ONE video that would give it its own film: an honest title under 70 characters (a question or a clear promise, never clickbait that the facts cannot back), a spoken opening line, and WHY it fits the article.
+Articles (title | summary):
+{rows}
+Return JSON only: {{"ideas": [{{"title": "", "hook": "", "why": ""}}]}} in the same order as the articles."""
+
+
+def articles_without_video(root, vt):
+    """Articles with no film of their own: [(slug, title, deck, film_title_or_None)]. A film shared by several articles stays with the best match only."""
+    by, none = article_video_groups(root)
+    out = []
+    for vid, arts in by.items():
+        if len(arts) > 1:
+            keep = max(arts, key=lambda a: title_overlap(a[1], vt.get(vid, "")))
+            out += [(slug, title, vt.get(vid, vid)) for slug, title in arts if slug != keep[0]]
+    out += [(slug, title, None) for slug, title in none]
+    res = []
+    for slug, title, film in out:
+        try:
+            deck = page_article((root / "articles" / slug / "index.html").read_text(encoding="utf-8"))[0].get("deck", "")
+        except Exception:
+            deck = ""
+        res.append((slug, title, deck, film))
+    return res
+
+
+def cmd_needvideos(st):
+    """Which articles have no video of their own, so the owner can make those videos."""
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("I have no site yet. Send me your site .zip first.")
+    send("Checking which articles have no video of their own...")
+    vt = {v["id"]: v["snippet"]["title"] for v in all_videos(yt_token())}
+    with tempfile.TemporaryDirectory() as d:
+        need = articles_without_video(site_zip_from(sz["file_id"], d), vt)
+    if not need:
+        return send("Every article has its own video. ✅")
+    mem()["needvid"] = [n[0] for n in need]
+    lines = [f"📹 {len(need)} article(s) have no video of their own:"]
+    for slug, title, deck, film in need:
+        lines.append(f"• {title[:80]}" + (f"\n   (shows \"{film[:60]}\", which fits another article better)" if film else "\n   (shows no film)"))
+    send("\n".join(lines)[:3900])
+    try:
+        rows = "\n".join(f"{i + 1}. {t} | {dk[:200]}" for i, (_, t, dk, _) in enumerate(need[:12]))
+        out = gemini([{"text": NEEDVID_PROMPT.format(rows=rows)}])
+        ideas = [i for i in (out.get("ideas") or []) if isinstance(i, dict) and i.get("title")]
+    except Exception as e:
+        print("needvideos ideas:", clean(e)[:100])
+        ideas = []
+    if ideas:
+        idea_taps(st, ideas, "🎬 Video ideas that give those articles their own film:", allow_made=True)
+    send("When a video is public, send /fixvideos to attach it to its article.")
+
+
 def cmd_fixvideos(st):
     """Where one film is shared by several articles, keep it on the article that matches best and offer better films for the others."""
     sz = mem().get("site_zip")
@@ -11038,6 +11095,7 @@ def main():
             {"command": "merge", "description": "Merge overlapping playlists"},
             {"command": "publish", "description": "Put the website live"},
             {"command": "synctitles", "description": "Match website film titles to YouTube"},
+            {"command": "needvideos", "description": "Articles that need their own video"},
             {"command": "siteweek", "description": "Website check and next articles"},
             {"command": "searchdata", "description": "Article ideas from Google searches"},
             {"command": "sitelogo", "description": "Put the hieroglyph logo on the website"},
