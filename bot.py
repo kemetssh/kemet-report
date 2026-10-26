@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.120"
+BOT_VERSION = "v10.122"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2897,7 +2897,7 @@ def on_prop(jid, act, st):
                               "start_views": prop.get("views", 0), "start_ts": time.time(),
                               "before_rate": prop.get("views", 0) / age, "done": False})
         return send(f"✅ Title changed to:\n{prop['new']}\n\nI will compare its views in 3 days and tell you "
-                    "if I would keep it.", [[btn("↩️ Undo", jid, "tu")]])
+                    "if I would keep it.\n🌐 If this video has a website article, send /synctitles to update its film title there.", [[btn("↩️ Undo", jid, "tu")]])
     if act == "tl" and kind == "tia":
         done = skipped = 0
         for p in prop["pids"]:
@@ -2919,7 +2919,7 @@ def on_prop(jid, act, st):
             except Exception as e:
                 print("titles all:", clean(e)[:100])
         st["props"].pop(jid, None)
-        return send(f"✅ Changed {done} titles." + (f" {skipped} skipped (too fresh)." if skipped else "") + " I will compare their views in 3 days and tell you which to keep.")
+        return send(f"✅ Changed {done} titles." + (f" {skipped} skipped (too fresh)." if skipped else "") + " I will compare their views in 3 days and tell you which to keep.\n🌐 The website still shows the old film titles: send /synctitles to update them.")
     if act == "tu" and kind == "title":
         set_title(prop["video_id"], prop["old"])
         mem()["exps"] = [e for e in mem()["exps"] if not (e["video_id"] == prop["video_id"] and not e["done"])]
@@ -3413,14 +3413,6 @@ Study them. Return JSON only:
  "ideas": [{{"title": "honest, curious title under 70 characters, never a copy of a title above",
  "hook": "first spoken sentence", "why": "one sentence: which pattern or gap it uses"}}]}}
 Give exactly 5 ideas. Never copy a title. Never promise anything the evidence cannot support. Say "seems" when the data is thin: this is a small sample."""
-
-
-def iso_seconds(d):
-    m = re.fullmatch(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", d or "")
-    if not m:
-        return 0
-    h, mi, se = (int(x or 0) for x in m.groups())
-    return h * 3600 + mi * 60 + se
 
 
 def scout_market(tok, queries=None):
@@ -6656,6 +6648,9 @@ def health_site(lines):
             lines.append("Send /siteweek to fix these with taps")
     except Exception as e:
         lines.append(f"✗ Site check: {clean(e)[:80]}")
+    tl_ = site_title_line()
+    if tl_:
+        lines.append(tl_)
 
 
 def tavily_diag():
@@ -7527,6 +7522,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/merge - merge playlists\n"
         "/publish - put the site live\n"
         "/siteweek - website check\n"
+        "/synctitles - site film titles = YouTube\n"
         "/searchdata - search ideas\n"
         "/sitelogo - logo on site\n"
         "/cfsetup - 1-tap publish\n"
@@ -7546,15 +7542,15 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/batch - 5 scripts to film in one sitting\n"
         "/collab - draft messages to similar channels\n"
         "/community - posts to share your newest video\n"
-        "/starter - a question under your video that gets comments\n"
+        "/starter - a comment-getting question\n"
         "/sublines - rotate the subscribe line, learn what works\n"
         "/hook - 3 opening lines for your next Short\n"
         "/goal 100 - set a subscriber goal and track it\n"
         "/demand - what people really search for (or /demand your topic)\n"
         "/refresh - fresh description lines for old videos\n"
         "/calendar - ideas timed to real Egypt events\n"
-        "/subs - where subscribers come from, link your best video\n"
-        "/praise - save your best comments as social proof\n"
+        "/subs - where subscribers come from\n"
+        "/praise - save your best comments\n"
         "/voice - pacing coach from your own numbers\n"
         "/poll - feedback poll: what to film next\n"
         "/cadence 3 - set how often you want to post\n"
@@ -7852,6 +7848,8 @@ def on_message(msg, st):
         cmd_articlevideos(st)
     elif text.startswith("/articlelinks"):
         cmd_articlelinks(st)
+    elif text.startswith("/synctitles"):
+        cmd_synctitles(st)
     elif text.startswith("/seriespages"):
         cmd_hubs(st)
     elif text.startswith("/articles"):
@@ -10332,6 +10330,83 @@ def title_overlap(a, b):
     return len(wa & wb) / (len(wa) or 1)
 
 
+def site_title_changes(root, vt):
+    """Film titles on the site pages that no longer match YouTube: [(video_id, old_title, new_title)]. vt = {video_id: current YouTube title}."""
+    out, seen = [], set()
+    for p in sorted((root / "articles").glob("*/index.html")):
+        s_ = p.read_text(encoding="utf-8")
+        for vid in re.findall(r'data-yt="([\w-]{11})"', s_):
+            m = re.search(r'aria-label="Play the Kemet video: ([^"]*)"', s_)
+            if vid in seen or not m or vid not in vt:
+                continue
+            seen.add(vid)
+            old = html.unescape(m.group(1))
+            if old.strip() != vt[vid].strip():
+                out.append((vid, old, vt[vid]))
+    return out
+
+
+def site_title_apply(root, changes):
+    """Replace each old film title by the new one on every page (page text, picture description, source line and the search-engine data). Returns pages changed."""
+    own = {c["title"] for c in site_catalog(root)}
+    pages = list(root.rglob("*.html"))
+    changed = set()
+    for vid, old, new in changes:
+        if old in own:                                         # never rewrite an article's own headline
+            pages_ = [p for p in (root / "articles").glob("*/index.html") if f'data-yt="{vid}"' in p.read_text(encoding="utf-8")]
+        else:
+            pages_ = pages
+        html_pairs = [(esc(old), esc(new)), (esc(old)[:80], esc(new)[:80])]
+        json_pairs = [(json.dumps(old, ensure_ascii=False)[1:-1], json.dumps(new, ensure_ascii=False)[1:-1]), (json.dumps(old)[1:-1], json.dumps(new)[1:-1])]
+        for p in pages_:
+            t = p.read_text(encoding="utf-8")
+            parts = re.split(r'(<script type="application/ld\+json">.*?</script>)', t, flags=re.S)
+            for k, seg in enumerate(parts):
+                for a, b in (json_pairs if seg.startswith('<script type="application/ld+json">') else html_pairs):
+                    if a and a in seg:
+                        seg = seg.replace(a, b)
+                parts[k] = seg
+            t2 = "".join(parts)
+            if t2 != t:
+                p.write_text(t2, encoding="utf-8")
+                changed.add(p)
+    return len(changed)
+
+
+def cmd_synctitles(st):
+    """Make the film titles on the website match the titles on YouTube (after titles were changed)."""
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("I have no site yet. Send me your site .zip first.")
+    send("Comparing the film titles on the website with YouTube...")
+    vt = {v["id"]: v["snippet"]["title"] for v in all_videos(yt_token())}
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        ch = site_title_changes(root, vt)
+        if not ch:
+            return send("Every film title on the website matches YouTube. ✅")
+        n = site_title_apply(root, ch)
+        r = pack_site(root, d, f"🔄 Site updated: {len(ch)} film title(s) now match YouTube ({n} pages).")
+    if not r.get("ok"):
+        return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
+    send(f"✅ {len(ch)} film title(s) updated on {n} pages:\n" + "\n".join(f"• {o[:50]} → {w[:50]}" for _, o, w in ch[:8]) + "\nNothing is live until you tap Publish.")
+    offer_publish(st)
+
+
+def site_title_line(root_fn=None):
+    """/health line: how many film titles on the site differ from YouTube."""
+    sz = mem().get("site_zip")
+    if not sz:
+        return None
+    try:
+        vt = {v["id"]: v["snippet"]["title"] for v in all_videos(yt_token())}
+        with tempfile.TemporaryDirectory() as d:
+            ch = site_title_changes(site_zip_from(sz["file_id"], d), vt)
+    except Exception as e:
+        return "✗ Film titles on the site: " + clean(e)[:80]
+    return "✓ Film titles on the site match YouTube" if not ch else f"⚠️ {len(ch)} film title(s) on the site differ from YouTube (send /synctitles)"
+
+
 def cmd_fixvideos(st):
     """Where one film is shared by several articles, keep it on the article that matches best and offer better films for the others."""
     sz = mem().get("site_zip")
@@ -10850,6 +10925,7 @@ def main():
             {"command": "dupes", "description": "Merge duplicate playlists"},
             {"command": "merge", "description": "Merge overlapping playlists"},
             {"command": "publish", "description": "Put the website live"},
+            {"command": "synctitles", "description": "Match website film titles to YouTube"},
             {"command": "siteweek", "description": "Website check and next articles"},
             {"command": "searchdata", "description": "Article ideas from Google searches"},
             {"command": "sitelogo", "description": "Put the hieroglyph logo on the website"},
