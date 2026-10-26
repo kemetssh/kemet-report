@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.123"
+BOT_VERSION = "v10.125"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -906,6 +906,26 @@ def ask_thumb(job, path):
                                [btn("Skip", jid, "h", -1), btn("Cancel", jid, "x")]])
 
 
+def match_short_source(job):
+    """The long video this Short was cut from (saved by /shortcuts), or None. Needs a Short-length file whose length and wording fit one saved cut."""
+    d = job.get("dur") or 0
+    if not d or d > 75:
+        return None
+    best, bs = None, 0.0
+    cands = [x for x in (mem().get("short_src") or []) if not x.get("used") and time.time() - x.get("ts", 0) < 21 * 86400]
+    for x in cands:
+        if abs(d - (x.get("secs") or 0)) > 10:
+            continue
+        txt = job.get("title", "") + " " + (job.get("review") or {}).get("summary", "")
+        sc = 1.0 + 2 * title_overlap(x.get("title", ""), job.get("title", "")) + title_overlap(x.get("hook", ""), txt)
+        sc -= abs(d - (x.get("secs") or 0)) / 40
+        if sc > bs:
+            best, bs = x, sc
+    if best and (len(cands) == 1 or bs >= 1.6 or title_overlap(best.get("title", ""), job.get("title", "")) >= 0.5):
+        return best
+    return None
+
+
 def links_block(job):
     links = mem()["links"]
     if not links or not job.get("links_on", True):
@@ -943,6 +963,7 @@ def ask_confirm(job):
          f"AI / altered-content label: {ai}\n"
          + (f"Links block: {'ON' if job.get('links_on', True) else 'OFF'} ({len(mem()['links'])} links)\n"
             if mem()["links"] else "")
+         + (f"🔗 Cut from your long video \"{(match_short_source(job) or {}).get('long_title', '')[:60]}\": I add the link to the full story.\n" if match_short_source(job) else "")
          + (f"Sources checked: {len((job.get('evidence') or {}).get('sources') or [])} (kept for the website, not shown in the description)\n"
             if (job.get("evidence") or {}).get("sources") else "⛔ No sources found yet: every video is fact-checked against sources.\n") +
          ("\n⚠️ Worth a look: " + "; ".join(guard_check(job)) + "\n" if guard_check(job) else "") +
@@ -2154,6 +2175,10 @@ def do_upload(job):
                 job["next_id"] = nxt["id"]
         except Exception as e:
             print("watch next:", clean(e)[:100])
+        src_ = match_short_source(job)
+        if src_:
+            desc = f"▶ Full story: https://youtu.be/{src_['long_id']}\n\n" + desc
+            job["full_id"] = src_["long_id"]
         desc = desc[:max(0, 4900 - len(ev_txt))] + ev_txt     # YouTube allows 5000 characters: the sources always fit
         vid, label_ok = yt_upload(p, job["title"], desc, job["review"].get("tags", []), tok,
                                   ai=job.get("ai", False))
@@ -2169,6 +2194,10 @@ def do_upload(job):
         status = yt_privacy(vid, tok)
     job["video_id"] = vid
     job["stage"] = "uploaded"
+    for x in (mem().get("short_src") or []):
+        if job.get("full_id") and x.get("long_id") == job["full_id"] and not x.get("used") and abs((job.get("dur") or 0) - (x.get("secs") or 0)) <= 10:
+            x["used"] = True
+            break
     if job.get("evidence") and job.get("ev_on", True):
         mem().pop("pending_audit", None)
     label_note = ""
@@ -2213,7 +2242,7 @@ def do_upload(job):
                      f"🎞️ One 30-second step only you can do (YouTube does not allow it by code): Studio → Content → this video → Editor → "
                      f"End screen → Video → pick \"{job['next_title']}\".")
     auto_msg = auto_schedule_on() and status == "private"
-    send(f"✅ Uploaded. {thumb_note}{label_note}Status: {status.upper()}\nhttps://youtu.be/{vid}{kit_note}" + ("" if auto_msg else f"\n\n{NOTICE}"),
+    send(f"✅ Uploaded. {thumb_note}{label_note}" + (f"Linked to its long video (https://youtu.be/{job['full_id']}). " if job.get("full_id") else "") + f"Status: {status.upper()}\nhttps://youtu.be/{vid}{kit_note}" + ("" if auto_msg else f"\n\n{NOTICE}"),
          ([[btn("📌 Post my comment (then pin it)", pid_c, "pc")]] if pid_c else []) +
          [[btn("Try to make it public", job["id"], "p")],
           [btn("🕒 Schedule at the best time", pid_s, "sh")],
@@ -5463,10 +5492,16 @@ def cmd_shortcuts(st):
                     f"(The model returned {len(raw_cuts or [])} idea(s); problems: " + ", ".join(f"{k} {n}" for k, n in why_not.items() if n) + (")" if any(why_not.values()) else "none found, it returned no usable moments)")
                     + "\nVideo length " + mmss(dur[v["id"]]) + "; the model proposed: " + "; ".join(f"{c.get('start')} to {c.get('end')}" for c in (raw_cuts or [])[:3])
                     + "\nTry /shortcuts again in a minute: the model sometimes answers badly the first time.")
+    keep = [x for x in (mem().get("short_src") or []) if time.time() - x.get("ts", 0) < 21 * 86400 and x.get("long_id") != v["id"]]
+    for c in cuts[:3]:                                 # remembered, so a Short cut from this video is recognised when you send it
+        keep.append({"long_id": v["id"], "long_title": v["snippet"]["title"], "title": str(c.get("title", ""))[:80], "hook": str(c.get("hook", ""))[:160],
+                     "secs": max(0, (to_secs(c.get("end")) or 0) - (to_secs(c.get("start")) or 0)), "ts": time.time(), "used": False})
+    mem()["short_src"] = keep[-12:]
     send(f"✂️ Best moments of \"{v['snippet']['title']}\" for Shorts:\n\n" + "\n\n".join(
         f"{i + 1}. {c['start']} to {c['end']}\nTitle: {str(c.get('title', ''))[:60]}\nFirst line: {str(c.get('hook', ''))[:140]}\nWhy: {str(c.get('why', ''))[:120]}"
         for i, c in enumerate(cuts[:3])) +
-        "\n\nI cannot cut your video myself. Cut these in your phone editor, record nothing new, and send me each Short as usual: I check it before anything goes on YouTube.")
+        "\n\nI cannot cut your video myself. Cut these in your phone editor (or in the YouTube app: Create, Edit into a Short), record nothing new, and send me each Short as usual: I check it before anything goes on YouTube. "
+        "I remember which long video these come from, so each Short gets the link to the full story.")
 
 
 def cmd_playlists(st):
@@ -10619,10 +10654,26 @@ def cmd_articles(st):
     send("Looking at your most viewed videos...")
     tok = yt_token()
     vids = all_videos(tok)   # every upload, not only the newest 50
-    done = (mem().get("articles") or {})
+    done = dict(mem().get("articles") or {})
+    site_titles, similar = [], []
+    try:                                                    # articles already in the site count too, even if they were made before the bot or on another film
+        with tempfile.TemporaryDirectory() as d_:
+            root_ = site_zip_from(sz["file_id"], d_)
+            for vid_, slug_ in vid_slug_map(root_).items():
+                done.setdefault(vid_, {"slug": slug_})
+            site_titles = [c["title"] for c in site_catalog(root_)]
+    except Exception as e:
+        print("articles site scan:", clean(e)[:100])
+
+    def has_similar(title):
+        best = max(site_titles, key=lambda t: title_overlap(title, t), default="")
+        if site_titles and title_overlap(title, best) >= 0.5:
+            similar.append((title, best))
+            return True
+        return False
     cands = []
     for v in vids:
-        if v["id"] in done:
+        if v["id"] in done or has_similar(v["snippet"]["title"]):
             continue
         cands.append({"id": v["id"], "title": v["snippet"]["title"], "views": int(v.get("statistics", {}).get("viewCount", 0))})
     cands.sort(key=lambda c: -c["views"])
@@ -10632,7 +10683,7 @@ def cmd_articles(st):
         for pl in site_playlists(tok)[:6]:
             for it_ in pl["items"]:
                 if it_["id"] not in done:
-                    if not any(c["id"] == it_["id"] for c in cands + nxt):
+                    if not any(c["id"] == it_["id"] for c in cands + nxt) and not has_similar(it_["title"]):
                         nxt.append({"id": it_["id"], "title": it_["title"], "views": 0, "series": pl["title"]})
                     break
     except Exception as e:
@@ -10648,7 +10699,8 @@ def cmd_articles(st):
     rows.append([btn("🗂 Build a series page for each playlist", pid, "ah")])
     send("Your most viewed videos that have no article yet, then the next film in each playlist:\n\n" + "\n".join(f"{i + 1}. {c['title']} (" + (f"next in the series {c['series']}" if c.get("series") else f"{c['views']} views") + ")" for i, c in enumerate(cands)) +
          "\n\nTap one. I research it, write about 2,000 words, check every claim against sources, and send you the full updated site. Nothing goes public until you upload it.\n"
-         "Done so far: " + str(len(done)), rows)
+         "Done so far: " + str(len(done)) +
+         (f"\n\nLeft out because the site already has a similar article ({len(similar)}):\n" + "\n".join(f"• {a[:45]} ≈ {b[:45]}" for a, b in similar[:5]) if similar else ""), rows)
 
 
 def write_article(c, st):
