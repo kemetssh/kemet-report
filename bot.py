@@ -41,7 +41,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.122"
+BOT_VERSION = "v10.123"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -3138,6 +3138,16 @@ def on_prop(jid, act, st):
         set_description_append(prop["video_id"], prop["lines"])
         st["props"].pop(jid, None)
         return send("✅ New opening lines added to the description.")
+    if act == "wz" and kind == "wsy":
+        done = 0
+        for it in prop["items"]:
+            try:
+                if set_description_replace(it["id"], it["old"], it["new"]):
+                    done += 1
+            except Exception as e:
+                print("watch sync:", clean(e)[:100])
+        st["props"].pop(jid, None)
+        return send(f"✅ Updated the 'Watch next' line in {done} descriptions.")
     if act == "dl" and kind == "dra":
         done = 0
         for p in prop["pids"]:
@@ -7884,7 +7894,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -10373,24 +10383,74 @@ def site_title_apply(root, changes):
     return len(changed)
 
 
+WN_LINE_RE = re.compile(r"^▶ Watch next: (.*?) → https://youtu\.be/([\w-]{11})[ \t]*$", re.M)
+
+
+def watch_line_changes(vids):
+    """Watch-next lines in descriptions that name a video by an OLD title: [(video_id, old_line, new_line)]."""
+    vt = {v["id"]: v["snippet"]["title"] for v in vids}
+    out = []
+    for v in vids:
+        m = WN_LINE_RE.search((v["snippet"].get("description") or "")[:800])
+        if not m or m.group(2) not in vt:
+            continue
+        new = watch_line({"id": m.group(2), "title": vt[m.group(2)]})
+        if new != m.group(0).rstrip():
+            out.append((v["id"], m.group(0), new))
+    return out
+
+
+def set_description_replace(video_id, old, new):
+    tok = yt_token()
+    sn = yt_get("videos", tok, part="snippet", id=video_id)["items"][0]["snippet"]
+    desc = sn.get("description", "")
+    if old not in desc:
+        return False
+    body = {"title": sn["title"], "description": desc.replace(old, new, 1)[:4990],
+            "categoryId": sn.get("categoryId", "27"), "tags": sn.get("tags", [])}
+    if sn.get("defaultLanguage"):
+        body["defaultLanguage"] = sn["defaultLanguage"]
+    r = S.put(f"{YT}/youtube/v3/videos?part=snippet", headers={"Authorization": f"Bearer {tok}"},
+              json={"id": video_id, "snippet": body}, timeout=60)
+    r.raise_for_status()
+    return True
+
+
+def offer_watch_sync(st, vids):
+    ch = watch_line_changes(vids)
+    if not ch:
+        return False
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "wsy", "items": [{"id": i, "old": o, "new": n} for i, o, n in ch], "created": time.time()}
+    send(f"▶ {len(ch)} video description(s) have a 'Watch next' line that still shows an old video title:\n" +
+         "\n".join(f"• {n[:100]}" for _, _, n in ch[:6]) + "\nUpdate them so they show the current titles?",
+         [[btn(f"✅ Update {len(ch)} lines", pid, "wz"), btn("Skip", pid, "cs")]])
+    return True
+
+
 def cmd_synctitles(st):
     """Make the film titles on the website match the titles on YouTube (after titles were changed)."""
     sz = mem().get("site_zip")
     if not sz:
         return send("I have no site yet. Send me your site .zip first.")
     send("Comparing the film titles on the website with YouTube...")
-    vt = {v["id"]: v["snippet"]["title"] for v in all_videos(yt_token())}
+    vids_ = all_videos(yt_token())
+    vt = {v["id"]: v["snippet"]["title"] for v in vids_}
     with tempfile.TemporaryDirectory() as d:
         root = site_zip_from(sz["file_id"], d)
         ch = site_title_changes(root, vt)
         if not ch:
-            return send("Every film title on the website matches YouTube. ✅")
+            send("Every film title on the website matches YouTube. ✅")
+            if not offer_watch_sync(st, vids_):
+                send("Every 'Watch next' line in your descriptions shows the current title too. ✅")
+            return
         n = site_title_apply(root, ch)
         r = pack_site(root, d, f"🔄 Site updated: {len(ch)} film title(s) now match YouTube ({n} pages).")
     if not r.get("ok"):
         return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
     send(f"✅ {len(ch)} film title(s) updated on {n} pages:\n" + "\n".join(f"• {o[:50]} → {w[:50]}" for _, o, w in ch[:8]) + "\nNothing is live until you tap Publish.")
     offer_publish(st)
+    offer_watch_sync(st, vids_)
 
 
 def site_title_line(root_fn=None):
