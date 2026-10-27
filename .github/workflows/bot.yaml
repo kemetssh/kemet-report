@@ -25,11 +25,6 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install requests
-      - name: Make sure ffmpeg exists
-        # a stuck download once froze the whole bot for 24 minutes: give up after 4 minutes and carry on (only video rendering needs ffmpeg)
-        timeout-minutes: 4
-        continue-on-error: true
-        run: command -v ffmpeg >/dev/null || (sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update -qq && sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 install -y -qq ffmpeg)
       - name: Get the newest bot notes
         run: |
           # a queued run is checked out at the moment it was queued, so fetch the latest notes saved by the run before it
