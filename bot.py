@@ -7,6 +7,7 @@ Nothing is uploaded or published without a tap from you.
 """
 import base64
 import calendar
+import copy
 import datetime
 import hashlib
 import html
@@ -86,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.131"
+BOT_VERSION = "v10.132"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -97,6 +98,20 @@ TRANSLATE_LANGS = [("es", "Spanish"), ("pt", "Portuguese"), ("hi", "Hindi")]
 ST = {}  # the live state, set in main()
 
 S = requests.Session()
+_orig_put = S.put
+
+
+def _put_and_forget(url, *a, **k):
+    r = _orig_put(url, *a, **k)
+    try:
+        if "/videos" in str(url):
+            _AV_CACHE["vids"] = None                       # a video was changed: the next read must be fresh
+    except NameError:
+        pass
+    return r
+
+
+S.put = _put_and_forget
 _retry = Retry(total=4, connect=4, read=3, backoff_factor=1.5,
                allowed_methods=None, status_forcelist=[])
 S.mount("https://", HTTPAdapter(max_retries=_retry))
@@ -9140,7 +9155,17 @@ def site_zip_from(file_id, dest_dir):
     """Download the stored site zip and unpack it; the folder that holds index.html is returned."""
     import zipfile
     z = Path(dest_dir) / "site.zip"
-    tg_download(file_id, z)
+    cache = Path(tempfile.gettempdir()) / "kemet_zipcache"          # one download per run, however many checks read the site
+    cache.mkdir(exist_ok=True)
+    cz = cache / (hashlib.sha1(str(file_id).encode()).hexdigest()[:16] + ".zip")
+    if cz.exists() and cz.stat().st_size > 0 and time.time() - cz.stat().st_mtime < 600:
+        shutil.copyfile(cz, z)
+    else:
+        tg_download(file_id, z)
+        try:
+            shutil.copyfile(z, cz)
+        except Exception:
+            pass
     with zipfile.ZipFile(z) as zf:
         zf.extractall(Path(dest_dir) / "site")
     base = Path(dest_dir) / "site"
@@ -10456,8 +10481,20 @@ def cmd_articlevideos(st):
     send("\n".join(x for x in lines if x is not None)[:3900])
 
 
+_AV_CACHE = {"ts": 0.0, "tok": None, "vids": None}
+
+
 def all_videos(tok):
-    """Every upload of the channel (id, title, description, duration), paging through the uploads playlist."""
+    """Every upload of the channel (id, title, description, duration), paging through the uploads playlist. Kept for 90 seconds so one command does not read the whole channel again and again."""
+    c = _AV_CACHE
+    if c["vids"] is not None and c["tok"] == tok and time.time() - c["ts"] < 90:
+        return copy.deepcopy(c["vids"])
+    vids = _all_videos_fresh(tok)
+    c.update(ts=time.time(), tok=tok, vids=vids)
+    return copy.deepcopy(vids)
+
+
+def _all_videos_fresh(tok):
     ch = yt_get("channels", tok, part="contentDetails", mine="true")["items"][0]
     pl = ch["contentDetails"]["relatedPlaylists"]["uploads"]
     ids, page = [], None
