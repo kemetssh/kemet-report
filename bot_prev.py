@@ -27,6 +27,51 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+
+_FF_TRIED = False
+
+
+def ensure_ffmpeg():
+    """The video tools (ffmpeg) are sometimes missing on the free server. If so, fetch a ready-made copy once (a few seconds) and put it on the path."""
+    global _FF_TRIED
+    if shutil.which("ffmpeg") or _FF_TRIED:
+        return bool(shutil.which("ffmpeg"))
+    _FF_TRIED = True
+    try:
+        try:
+            import imageio_ffmpeg  # noqa
+        except ImportError:
+            for extra in ([], ["--break-system-packages"]):
+                r = _real_run([sys.executable, "-m", "pip", "install", "-q", "imageio-ffmpeg"] + extra, capture_output=True, text=True, timeout=150)
+                if r.returncode == 0:
+                    break
+            import importlib
+            importlib.invalidate_caches()
+            import imageio_ffmpeg  # noqa
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        d = Path(tempfile.gettempdir()) / "kemet_ffbin"
+        d.mkdir(exist_ok=True)
+        link = d / "ffmpeg"
+        if not link.exists():
+            link.symlink_to(exe)
+        os.environ["PATH"] = str(d) + os.pathsep + os.environ.get("PATH", "")
+        print("ffmpeg fetched:", exe)
+    except Exception as e:
+        print("ffmpeg fetch failed:", str(e)[:150])
+    return bool(shutil.which("ffmpeg"))
+
+
+_real_run = subprocess.run
+
+
+def _run_checked(cmd, *a, **k):
+    if isinstance(cmd, (list, tuple)) and cmd and cmd[0] in ("ffmpeg", "ffprobe"):
+        ensure_ffmpeg()
+    return _real_run(cmd, *a, **k)
+
+
+subprocess.run = _run_checked
+
 ROOT = Path(__file__).resolve().parent
 STATE_FILE = Path(os.getenv("STATE_PATH", ROOT / "state_bot.json"))
 
@@ -41,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.129"
+BOT_VERSION = "v10.131"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -10714,6 +10759,10 @@ def revideo_article(item, new_vid, st):
         r = pack_site(root, d, f"🎬 Site updated: {art['title']} now shows the film \"{v['title']}\".")
     if not r.get("ok"):
         return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
+    notes = mem().setdefault("articles", {})
+    for k_ in [k for k, a_ in notes.items() if a_.get("slug") == item["slug"]]:       # my notes follow the site: the article now belongs to the new film
+        notes.pop(k_, None)
+    notes[new_vid] = {"slug": item["slug"], "title": art["title"], "ts": time.time()}
     send(f"✅ {art['title']} now shows \"{v['title']}\".")
     offer_publish(st)
 
@@ -10721,16 +10770,16 @@ def revideo_article(item, new_vid, st):
 def cmd_articlelinks(st):
     """For every article that is live on the site, propose a 'Read the full article' line in its video's description (nothing changes until you tap)."""
     arts = dict(mem().get("articles") or {})
-    try:                                                    # articles made before the bot (and any not in my notes) are found in the site itself
+    try:                                                    # the site itself says which film each article shows; that is the truth (a film may have been swapped since the article was written)
         sz = mem().get("site_zip")
         if sz:
             with tempfile.TemporaryDirectory() as d:
                 root = site_zip_from(sz["file_id"], d)
-                taken = {a["slug"] for a in arts.values()}
-                for vid, slug in vid_slug_map(root).items():
-                    if vid not in arts and slug not in taken:
-                        arts[vid] = {"slug": slug, "title": page_article((root / "articles" / slug / "index.html").read_text(encoding="utf-8"))[0]["title"]}
-                        taken.add(slug)
+                site_map = vid_slug_map(root)
+                site_slugs = set(site_map.values())
+                arts = {v: a for v, a in arts.items() if a.get("slug") not in site_slugs}      # keep only notes for articles the site does not have (reported as not live)
+                for vid, slug in site_map.items():
+                    arts[vid] = {"slug": slug, "title": page_article((root / "articles" / slug / "index.html").read_text(encoding="utf-8"))[0]["title"]}
     except Exception as e:
         print("articlelinks site scan:", clean(e)[:120])
     if not arts:
