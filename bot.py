@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.136"
+BOT_VERSION = "v10.137"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -666,6 +666,7 @@ The owner made this video himself (his own voice and edit). Watch and listen to 
 Rules: be honest and specific, never flatter. Facts about Ancient Egypt must be accurate.
 Do not invent claims. If you are not sure something is true, say so.
 Video length: {dur:.0f} seconds, size {w}x{h}.
+{kindnote}
 
 What you already know about this channel and its owner:
 {memory}
@@ -684,7 +685,8 @@ Return JSON only with exactly these keys:
  "ai_visuals": true or false,  // true if the pictures or video look realistic AI-generated or heavily altered (YouTube requires a label for that)
  "policy_notes": ["short flags for YouTube policy: copyrighted music, film clips, logos, misleading claims, reused content. empty if clean"],
  "claims": ["up to 8 factual claims about history that the narrator states (names, dates, places, causes), each as one plain sentence; empty if none"],
- "follows_script": true or false  // true only if a pre-checked script was given above AND the video clearly follows it
+ "follows_script": true or false,  // true only if a pre-checked script was given above AND the video clearly follows it
+ "chapters": ["only for a LONG video over 4 minutes: 4-10 lines like 0:00 Opening, 1:25 The discovery; the first is 0:00; real moments you watched; empty for a Short"]
 }}"""
 
 
@@ -702,7 +704,41 @@ def cleared_text():
             "\nIn \"issues\" and \"claims\" list ONLY facts the video states that are NOT in this script or that contradict it.\n")
 
 
-def review_video(path, dur, w, h):
+def video_kind(dur, w, h):
+    """("short" | "long", plain-words note). YouTube treats a file as a Short only when it is 3 minutes or less AND vertical or square."""
+    dur, w, h = float(dur or 0), int(w or 0), int(h or 0)
+    shape = "vertical" if h > w else "square" if h == w and w else "horizontal"
+    mins = f"{int(dur // 60)}:{int(dur % 60):02d}"
+    if dur and dur <= 180 and shape != "horizontal":
+        return "short", f"{shape}, {mins}: YouTube will treat this as a Short"
+    if dur and dur <= 180:
+        return "long", f"horizontal, {mins}: YouTube lists this as a normal video, NOT a Short. For a Short, send a vertical (9:16) version"
+    return "long", f"{shape}, {mins}: a long video"
+
+
+KIND_NOTE = {"short": "This is a YouTube SHORT (vertical, 3 minutes or less). Titles max 60 characters with the hook in the first words. Descriptions: 1-2 short lines. The first 2 seconds decide everything: say what the hook is in the summary.",
+             "long": "This is a LONG video. Titles max 70 characters. Descriptions: 3-4 lines. Also fill \"chapters\" (see below)."}
+
+
+def clean_chapters(ch, dur):
+    """Chapter lines "m:ss Title": first at 0:00, at least 3, ascending, 10+ seconds apart, inside the video. Else []."""
+    out, last = [], -99
+    for x in ch or []:
+        m_ = re.match(r"\s*(?:(\d+):)?(\d{1,2}):(\d{2})\s+(.{3,60})$", str(x))
+        if not m_:
+            continue
+        t = int(m_.group(1) or 0) * 3600 + int(m_.group(2)) * 60 + int(m_.group(3))
+        if t >= dur - 5 or t - last < 10:
+            continue
+        out.append((t, m_.group(4).strip()))
+        last = t
+    if len(out) < 3 or out[0][0] != 0:
+        return []
+    return [f"{t // 60}:{t % 60:02d} {n}" for t, n in out][:12]
+
+
+def review_video(path, dur, w, h, kind=None):
+    kind = kind or video_kind(dur, w, h)[0]
     try:
         trend_pack()
     except Exception:
@@ -710,7 +746,7 @@ def review_video(path, dur, w, h):
     info = gemini_upload(path, "video/mp4")
     try:
         data = gemini([{"file_data": {"mime_type": "video/mp4", "file_uri": info["uri"]}},
-                       {"text": REVIEW_PROMPT.format(dur=dur, w=w, h=h, memory="(not used: this video was made by the bot)" if (mem().get("cleared") or {}).get("bot_made") and cleared_text() else learned(), cleared=cleared_text())}])
+                       {"text": REVIEW_PROMPT.format(dur=dur, w=w, h=h, kindnote=KIND_NOTE[kind], memory="(not used: this video was made by the bot)" if (mem().get("cleared") or {}).get("bot_made") and cleared_text() else learned(), cleared=cleared_text())}])
     finally:
         try:
             S.delete(f"{GBASE}/v1beta/{info['name']}", headers={"x-goog-api-key": GKEY}, timeout=30)
@@ -732,11 +768,13 @@ def review_video(path, dur, w, h):
         times.append(dur * (len(times) + 1) / 4)
     data["thumb_times"] = times
     data["ai_visuals"] = bool(data.get("ai_visuals"))
+    data["kind"] = kind
+    data["chapters"] = clean_chapters(data.get("chapters"), dur) if kind == "long" else []
     data["policy_notes"] = [str(x)[:200] for x in data.get("policy_notes", [])][:4]
     try:
         about_h = (data.get("summary") or "") + " " + " ".join(data.get("titles", []))
-        data["descriptions"] = [rewrite_hashtags(d, pick_hashtags(about_h, short=dur <= 60, keep=current_hashtags(d))) for d in data.get("descriptions", [])]
-        tags_h = pick_hashtags(about_h, short=dur <= 60)
+        data["descriptions"] = [rewrite_hashtags(d, pick_hashtags(about_h, short=kind == "short", keep=current_hashtags(d))) for d in data.get("descriptions", [])]
+        tags_h = pick_hashtags(about_h, short=kind == "short")
         data["hashtags"] = tags_h
         extra = [t.lstrip("#").lower() for t in tags_h if t.lower() not in ("#shorts",)]
         data["tags"] = list(dict.fromkeys([str(t) for t in data.get("tags", [])] + extra))[:15]
@@ -746,7 +784,7 @@ def review_video(path, dur, w, h):
         precheck_options(data)
         if data.get("hashtags"):                      # a corrected description keeps its hashtags
             about_h = (data.get("summary") or "") + " " + " ".join(data.get("titles", []))
-            data["descriptions"] = [d if current_hashtags(d) else rewrite_hashtags(d, pick_hashtags(about_h, short=dur <= 60))
+            data["descriptions"] = [d if current_hashtags(d) else rewrite_hashtags(d, pick_hashtags(about_h, short=kind == "short"))
                                     for d in data.get("descriptions", [])]
     except Exception as e:
         print("precheck:", clean(e)[:120])
@@ -928,7 +966,9 @@ def btn(text, jid, act, val=""):
 
 def review_text(job):
     r = job["review"]
-    lines = [f"🎬 {job['name']}  ({job['dur']:.0f}s, {job['w']}x{job['h']})",
+    kind = job.get("kind") or video_kind(job.get("dur"), job.get("w"), job.get("h"))[0]
+    lines = [f"{'📱 SHORT' if kind == 'short' else '🎬 LONG VIDEO'}: {job['name']}  ({job['dur']:.0f}s, {job['w']}x{job['h']})",
+             "I will handle it as a " + ("Short: " if kind == "short" else "long video: ") + (job.get("kind_note") or ""),
              f"Verdict: {r.get('verdict', '?').upper()}   Score: {r.get('score', '?')}/10",
              "", r.get("summary", "")]
     if r.get("issues"):
@@ -939,6 +979,8 @@ def review_text(job):
         lines += ["", "Good:"] + [f"+ {s}" for s in r["strengths"][:3]]
     lines += ["", "YouTube policy check:"]
     lines += [f"⚠️ {n}" for n in r.get("policy_notes", [])] or ["✓ Nothing risky spotted (I cannot hear every copyright match)"]
+    if r.get("chapters"):
+        lines += ["", "Chapters I will add to the description:"] + r["chapters"][:10]
     if r.get("ai_visuals"):
         lines.append("🤖 Looks AI-made or altered. I will switch the AI label ON (you can change it).")
     return "\n".join(lines)
@@ -1287,8 +1329,9 @@ def start_job(msg, st, shrunk=False):
         if dur <= 0:
             send("I could not read that file as a video. Please send it again.")
             return
-        review = review_video(p, dur, w, h)
-    job = {"id": jid, "file_id": v["file_id"], "name": name, "dur": dur, "w": w, "h": h,
+        kind, kind_note = video_kind(dur, w, h)
+        review = review_video(p, dur, w, h, kind)
+    job = {"id": jid, "kind": kind, "kind_note": kind_note, "file_id": v["file_id"], "name": name, "dur": dur, "w": w, "h": h,
            "review": review, "created": time.time(), "stage": "title",
            "ai": bool(review.get("ai_visuals"))}
     pa = mem().get("pending_audit")
@@ -1717,8 +1760,16 @@ def pick_hashtags(about, short=False, trend=None, keep=(), n=5):
     def has(h):
         return h.lower() in [x.lower() for x in out]
 
+    try:
+        bias = social_bias()
+    except Exception:
+        bias = {}
+
     def add(ht):
         if ht and not has(ht) and len(out) < n:
+            b = bias.get(ht.lower())
+            if b and b[1] >= 3 and b[0] <= 0.4 and len(out) >= 2:      # a tag that did nothing on 3+ of his posts is skipped
+                return
             out.append(ht)
     topic = title_words(about)
 
@@ -1726,9 +1777,8 @@ def pick_hashtags(about, short=False, trend=None, keep=(), n=5):
         low = re.sub(r"[^a-z0-9]", "", str(t).lower())
         return bool((title_words(t) & topic) - HASHTAG_GENERIC_WORDS) or low in SAFE_GENERIC or low in ("egypt", "egyptology") or any(w in low for w in ("pharaoh", "pyramid", "nile", "kemet", "mummy", "mummies", "tomb", "sphinx")) \
             or any(len(w) >= 5 and w in low for w in (topic - HASHTAG_GENERIC_WORDS))
-    for t in (tr.get("tags") or []):
-        if fits(t):
-            add(tag_to_hash(t))
+    for t in sorted((x for x in (tr.get("tags") or []) if fits(x)), key=lambda x: -(bias.get(str(tag_to_hash(x) or "").lower(), (0, 0))[0] if bias.get(str(tag_to_hash(x) or "").lower(), (0, 0))[1] >= 2 else 0)):
+        add(tag_to_hash(t))
     g = mem().get("gtrend") or {}
     if time.time() - g.get("ts", 0) < 7 * 86400:
         for t in (g.get("tags") or []):
@@ -2216,6 +2266,45 @@ def find_recent_dup(tok, title):
     return None
 
 
+def _sym_overlap(a, b):
+    return max(title_overlap(a, b), title_overlap(b, a))
+
+
+def recent_pair(text, want_kind, exclude="", hours=48):
+    """A video uploaded through the bot in the last 2 days, of the other kind (short/long), about the same story. [(id, rec)] best first."""
+    out = []
+    for v, r in mem()["videos"].items():
+        if v == exclude or r.get("kind") != want_kind or r.get("full") or time.time() - r.get("uploaded", 0) > hours * 3600:
+            continue
+        sc = _sym_overlap(r.get("title", "") + " " + r.get("summary", ""), text)
+        if sc >= 0.3:
+            out.append((sc, v, r))
+    return [(v, r) for _, v, r in sorted(out, key=lambda x: -x[0])]
+
+
+def add_chapters(desc, chapters):
+    if not chapters:
+        return desc
+    block = "Chapters:\n" + "\n".join(chapters)
+    head, sep, rest = desc.partition("\n\n")
+    return head + "\n\n" + block + (("\n\n" + rest) if sep else "")
+
+
+def prepend_description(video_id, line):
+    tok = yt_token()
+    sn = yt_get("videos", tok, part="snippet", id=video_id)["items"][0]["snippet"]
+    desc = sn.get("description", "")
+    if line in desc:
+        return True
+    nd = (line + "\n\n" + desc)[:4990]
+    body = {"title": sn["title"], "description": nd, "categoryId": sn.get("categoryId", "27"), "tags": sn.get("tags", [])}
+    if sn.get("defaultLanguage"):
+        body["defaultLanguage"] = sn["defaultLanguage"]
+    r = S.put(f"{YT}/youtube/v3/videos?part=snippet", headers={"Authorization": f"Bearer {tok}"}, json={"id": video_id, "snippet": body}, timeout=60)
+    r.raise_for_status()
+    return True
+
+
 def do_upload(job):
     if not job.get("dup_ok"):
         try:
@@ -2237,7 +2326,7 @@ def do_upload(job):
         tg_download(job["file_id"], p)
         tok = yt_token()
         ev_txt = evidence_block(job)
-        desc = job["review"]["descriptions"][job["desc"]] + links_block(job)
+        desc = add_chapters(job["review"]["descriptions"][job["desc"]], job["review"].get("chapters")) + links_block(job)
         try:
             pool, _v = watch_pool(tok)
             nxt = pick_next(job["title"] + " " + job["review"].get("summary", ""), pool)
@@ -2251,6 +2340,14 @@ def do_upload(job):
         if src_:
             desc = f"▶ Full story: https://youtu.be/{src_['long_id']}\n\n" + desc
             job["full_id"] = src_["long_id"]
+        elif job.get("kind") == "short":                   # a Short and its long video sent together: link them
+            try:
+                pl = recent_pair(job["title"] + " " + job["review"].get("summary", ""), "long")
+                if pl:
+                    desc = f"▶ Full story: https://youtu.be/{pl[0][0]}\n\n" + desc
+                    job["full_id"] = pl[0][0]
+            except Exception as e:
+                print("pair long:", clean(e)[:80])
         desc = desc[:max(0, 4900 - len(ev_txt))] + ev_txt     # YouTube allows 5000 characters: the sources always fit
         vid, label_ok = yt_upload(p, job["title"], desc, job["review"].get("tags", []), tok,
                                   ai=job.get("ai", False))
@@ -2278,6 +2375,7 @@ def do_upload(job):
                       "I could not set the AI label by code: switch it on in YouTube Studio. ")
     mem()["videos"][vid] = {"uploaded": time.time(), "title": job["title"], "file_id": job["file_id"],
                             "summary": job["review"].get("summary", ""), "checked": False, "next": job.get("next_id", ""),
+                            "kind": job.get("kind", ""), "secs": job.get("dur") or 0, "full": job.get("full_id", ""),
                             "sources": [list(x) for x in ((job.get("evidence") or {}).get("sources") or [])[:12]]}
     try:
         ti, d_ = job.get("thumb", -1), job.get("dur") or 0
@@ -2290,6 +2388,17 @@ def do_upload(job):
             nb()["preds"][vid] = pr
     except Exception as e:
         print("prediction:", clean(e)[:80])
+    if job.get("kind") == "long":                       # offer to link Shorts of the same story to this long video
+        try:
+            cand = recent_pair(job["title"] + " " + job["review"].get("summary", ""), "short", exclude=vid)
+            if cand:
+                pid_k = new_pid(ST)
+                ST["props"][pid_k] = {"type": "shortlink", "long": vid, "shorts": [c[0] for c in cand[:3]], "created": time.time()}
+                send("🔗 You also sent " + ("this Short" if len(cand) == 1 else "these Shorts") + " about the same story:\n" + "\n".join("• " + c[1]["title"][:70] for c in cand[:3])
+                     + "\nTap to add \"▶ Full story\" with this long video's link to " + ("it." if len(cand) == 1 else "them."),
+                     [[btn("🔗 Link them", pid_k, "sk"), btn("Skip", pid_k, "ck")]])
+        except Exception as e:
+            print("pair short:", clean(e)[:80])
     pid = new_pid(ST)
     ST["props"][pid] = {"type": "subgen", "video_id": vid, "created": time.time()}
     pid_pl = new_pid(ST)
@@ -2383,6 +2492,10 @@ def send_share(title, blurb, link, st=None):
     """Ready posts for X, Facebook, Instagram and TikTok. Free: buttons open each app; the owner taps Post. Nothing is posted by the bot."""
     p = share_pack(title, blurb)
     tg_ = p.get("tags", [])
+    try:
+        social_log(title, link, tg_)
+    except Exception as e:
+        print("social log:", clean(e)[:80])
     send("🏷 Hashtags checked against your channel's trending list and the story itself (nothing unrelated), within each platform's limit:\n"
          f"• X: {' '.join(tg_[:5])}\n• Facebook: {' '.join(tg_[:5])}\n• Instagram (limit 5): {' '.join(tg_[:5])}\n• TikTok: {' '.join(tg_[:5])}")
     send(f"📣 {title}\n\n🐦 X:\n{p['x']}\n{link}", [[{"text": "🐦 Open in X (text filled in)", "url": x_intent(p["x"], link)}]])
@@ -3083,6 +3196,10 @@ def on_prop(jid, act, st):
         except Exception as e:
             return send("Facebook did not post it: " + clean(e)[:220] + "\nIf it says the key expired or is invalid, send /fbsetup to reconnect.")
         st["props"].pop(jid, None)
+        for e_ in reversed(mem().get("social") or []):
+            if e_.get("link") == prop["link"] and not e_.get("fb"):
+                e_["fb"] = str(j.get("id", ""))
+                break
         return send("✅ Posted to your Facebook Page " + fb_cfg().get("page_name", "") + ".\nhttps://www.facebook.com/" + str(j.get("id", "")))
     if act == "fp" and kind == "fbpost":
         rec = mem()["videos"].get(prop["video_id"]) or {}
@@ -3101,6 +3218,35 @@ def on_prop(jid, act, st):
         st["props"].pop(jid, None)
         mem()["needvid"] = [e for e in (mem().get("needvid") or []) if e.get("slug") != prop["slug"]]
         return revideo_article({"slug": prop["slug"], "title": prop["title"]}, prop["vid"], st)
+    if act == "gx":
+        st["props"].pop(jid, None)
+        return send("Skipped.")
+    if act == "gb" and kind == "boost":
+        st["props"].pop(jid, None)
+        return boost_video(prop["vid"], st)
+    if act == "gi" and kind == "boost":
+        return cmd_idea(st)
+    if act == "gf" and kind == "socrate":
+        key, _, k = st.get("_val", "x:0").partition(":")
+        for e_ in mem().get("social") or []:
+            if e_["id"] == prop["sid"]:
+                e_["rated"][key] = int(k or 0)
+                break
+        return send(f"👍 Noted: {key} = {SCORE_LABEL.get(int(k or 0), '')}. Tap the other apps too if you used them.")
+    if act == "ck" and kind == "shortlink":
+        st["props"].pop(jid, None)
+        return send("Skipped.")
+    if act == "sk" and kind == "shortlink":
+        st["props"].pop(jid, None)
+        done = 0
+        for sv in prop["shorts"]:
+            try:
+                prepend_description(sv, f"▶ Full story: https://youtu.be/{prop['long']}")
+                (mem()["videos"].get(sv) or {})["full"] = prop["long"]
+                done += 1
+            except Exception as e:
+                print("link short:", clean(e)[:80])
+        return send(f"✅ Linked {done} Short(s) to the long video." if done else "I could not change the Short's description. Try again in a minute.")
     if act == "sx" and kind == "artshare":
         it = prop["items"][int(st.get("_val", "0"))]
         try:
@@ -4787,6 +4933,19 @@ def housekeeping(st):
         nb_watch(st)
     except Exception as e:
         print("watch:", clean(e)[:100])
+    try:
+        vel_scan(st)
+    except Exception as e:
+        print("velocity:", clean(e)[:100])
+    try:
+        social_scan(st)
+    except Exception as e:
+        print("social scan:", clean(e)[:100])
+    try:
+        if time.time() - (m.get("selftest") or {}).get("last", 0) > 22 * 3600:
+            cmd_selftest(st, auto=True)
+    except Exception as e:
+        print("selftest:", clean(e)[:100])
     if now - m["last_check"] > 1800:
         m["last_check"] = now
         for step in (lambda: run_results(False), lambda: run_exps(st)):
@@ -4909,21 +5068,10 @@ def nb_lessons(obs):
     return out[:8]
 
 
-def nb_scan(st, force=False):
-    n = nb()
-    if n["off"] or (not force and time.time() - n["last"] < 20 * 3600):
-        return None
-    now = time.time()
-    n["last"] = now
-    first = not n["obs"]
-    tok = yt_token()
-    vids, chid = latest_vids(tok, 50)
-    secs = {}
-    ids = [v["id"] for v in vids]
-    if ids:
-        for it in yt_get("videos", tok, part="contentDetails", id=",".join(ids)).get("items", []):
-            secs[it.get("id")] = iso_seconds((it.get("contentDetails") or {}).get("duration"))
-    calls = 0
+def nb_observe(n, vids, tok=None, now=None, max_calls=12):
+    """Record every video that is at least 3 days old (views, length, hour, hashtags...). Analytics calls (retention, subscribers) only when tok is given: oldest-checked first."""
+    now = now or time.time()
+    seen = []
     for v in vids:
         sn = v["snippet"]
         pub = iso_ts(sn.get("publishedAt", ""))
@@ -4935,18 +5083,37 @@ def nb_scan(st, force=False):
             hour = datetime.datetime.fromtimestamp(pub, us_zone()).hour
         except Exception:
             hour = None
-        o.update({"title": sn.get("title", ""), "secs": secs.get(v["id"], 0), "hour": hour, "tags": len(current_hashtags(desc)),
-                  "wn": has_watch_next(desc), "tfrac": (n["thumbs"].get(v["id"]) or {}).get("frac"), "views": int(v["statistics"].get("viewCount", 0)), "age": round((now - pub) / 86400, 1)})
-        if calls < 12 and now - o.get("pct_ts", 0) > 7 * 86400:
-            calls += 1
+        secs = iso_seconds((v.get("contentDetails") or {}).get("duration")) or o.get("secs", 0)
+        o.update({"title": sn.get("title", ""), "secs": secs, "hour": hour, "tags": len(current_hashtags(desc)),
+                  "wn": has_watch_next(desc), "tfrac": (n["thumbs"].get(v["id"]) or {}).get("frac"),
+                  "views": int((v.get("statistics") or {}).get("viewCount", 0)), "age": round((now - pub) / 86400, 1)})
+        seen.append(v["id"])
+    if tok and max_calls:
+        due = sorted((i for i in seen if now - n["obs"][i].get("pct_ts", 0) > 7 * 86400), key=lambda i: n["obs"][i].get("pct_ts", 0))
+        for vid in due[:max_calls]:
+            o = n["obs"][vid]
             try:
-                pct, subs, views = an_query(tok, "averageViewPercentage,subscribersGained,views", 90, "video==" + v["id"])
+                pct, subs, views = an_query(tok, "averageViewPercentage,subscribersGained,views", 90, "video==" + vid)
                 o["pct_ts"] = now
                 if views:
                     o["pct"] = round(pct, 1)
                     o["subs"] = subs
             except Exception as e:
                 print("notebook analytics:", clean(e)[:80])
+    return len(seen)
+
+
+def nb_scan(st, force=False):
+    n = nb()
+    if n["off"] or (not force and time.time() - n["last"] < 20 * 3600):
+        return None
+    now = time.time()
+    n["last"] = now
+    first = not n["obs"]
+    tok = yt_token()
+    _v50, chid = latest_vids(tok, 1)
+    vids = all_videos(tok)                                 # every video on the channel, not only the newest 50
+    nb_observe(n, vids, tok, now, 12)
     old = {f["key"] for f in n["facts"]}
     nb_score(n)
     n["facts"] = [f for f in nb_lessons(n["obs"]) if f["key"] not in n["muted"]]
@@ -6890,6 +7057,86 @@ def channel_counts(tok):
     return {"total": len(vids), "vis": vis, "shorts": sum(1 for x in secs if 0 < x <= 180), "long": sum(1 for x in secs if x > 180)}
 
 
+def sync_tracked(vids):
+    """The bot's own list of videos must hold every video on the channel (not only the ones it uploaded). Returns how many were added."""
+    m = mem()
+    added = 0
+    for v in vids:
+        sn = v["snippet"]
+        secs = iso_seconds((v.get("contentDetails") or {}).get("duration"))
+        kind = "short" if 0 < secs <= 180 else "long"
+        r = m["videos"].get(v["id"])
+        if r is None:
+            m["videos"][v["id"]] = {"uploaded": iso_ts(sn.get("publishedAt", "")) or time.time(), "title": sn.get("title", ""), "file_id": "",
+                                    "summary": (sn.get("description") or "").split("\n\n")[0][:300], "checked": True, "next": "", "sources": [],
+                                    "synced": True, "kind": kind, "secs": secs, "full": ""}
+            added += 1
+        else:
+            r.setdefault("kind", kind)
+            r.setdefault("secs", secs)
+            if sn.get("title"):
+                r["title"] = sn["title"]
+    if added:
+        m["videos"] = dict(sorted(m["videos"].items(), key=lambda kv: kv[1].get("uploaded", 0)))
+    return added
+
+
+def numbers_report(tok=None, fix=True):
+    """One set of numbers that always add up: YouTube videos, website articles, films, bot notes. Returns (lines, problems)."""
+    tok = tok or yt_token()
+    vids = all_videos(tok)
+    c = channel_counts(tok)
+    added = sync_tracked(vids) if fix else 0
+    ids = {v["id"] for v in vids}
+    now = time.time()
+    n = nb()
+    if fix:
+        nb_observe(n, vids, None, now, 0)
+    old_enough = sum(1 for v in vids if (iso_ts(v["snippet"].get("publishedAt", "")) or now) < now - 3 * 86400)
+    studied = sum(1 for k in n["obs"] if k in ids)
+    tracked = sum(1 for k in mem()["videos"] if k in ids)
+    gone = sum(1 for k in mem()["videos"] if k not in ids)
+    v_ = c["vis"]
+    lines = ["📊 Your numbers, live from YouTube and your website",
+             f"▶ YouTube: {c['total']} videos = {c['shorts']} Shorts + {c['long']} long ({v_['public']} public, {v_['scheduled']} scheduled, {v_['unlisted']} unlisted, {v_['private']} private)"]
+    problems = []
+    sz = mem().get("site_zip")
+    if sz:
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                by, none = article_video_groups(site_zip_from(sz["file_id"], d))
+            arts = sum(len(a) for a in by.values()) + len(none)
+            sharing = sum(len(a) - 1 for a in by.values() if len(a) > 1)
+            orphan = [x for x in by if x not in ids]
+            noart = [v for v in vids if v["id"] not in by]
+            own = arts - sharing - len(none)
+            lines.append(f"📰 Website: {arts} articles = {own} with their own film + {sharing} sharing a film + {len(none)} with no film")
+            lines.append(f"🔗 Films used by articles: {len(by) - len(orphan)} of {c['total']} videos")
+            if noart:
+                lines.append(f"✍️ {len(noart)} video(s) have no article yet (send /articles): " + "; ".join(v["snippet"]["title"][:38] for v in noart[:4]) + ("…" if len(noart) > 4 else ""))
+            if sharing or none:
+                lines.append(f"🎞 {sharing + len(none)} article(s) have no film of their own (send /needvideos)")
+            if orphan:
+                lines.append(f"⚠️ {len(orphan)} article film(s) are no longer on your channel (deleted or private): send /fixvideos")
+                problems.append("article films missing from channel: " + str(len(orphan)))
+            if len(noart) != sharing + len(none) and not orphan:
+                lines.append(f"ℹ️ {len(noart)} videos without an article vs {sharing + len(none)} articles without their own film: these differ because of the {c['total'] - len(by)} unused videos")
+            else:
+                lines.append(f"✓ It adds up: {c['total']} videos = {len(by) - len(orphan)} with an article + {len(noart)} without. {arts} articles = {len(by)} films + {sharing + len(none)} that still need their own film.")
+        except Exception as e:
+            lines.append("✗ Website numbers: " + clean(e)[:80])
+            problems.append("website numbers: " + clean(e)[:80])
+    else:
+        lines.append("📰 Website: no site zip yet (send your site .zip)")
+    lines.append(f"🤖 Bot notes: tracking {tracked} of {c['total']} videos" + (f" (added {added} it had not seen)" if added else "") +
+                 f" · studied {studied} of {old_enough} old enough (3+ days){' · ' + str(gone) + ' old note(s) of deleted videos' if gone else ''} · lessons {len(mem()['lessons'])}")
+    if tracked != c["total"]:
+        problems.append(f"bot tracks {tracked} of {c['total']} videos")
+    if studied < old_enough:
+        problems.append(f"studied {studied} of {old_enough}")
+    return lines, problems
+
+
 def count_text(c):
     v = c["vis"]
     return (f"{c['total']} videos uploaded on YouTube: {v['public']} public, {v['scheduled']} scheduled, {v['unlisted']} unlisted, {v['private']} private.\n"
@@ -6897,13 +7144,294 @@ def count_text(c):
 
 
 def cmd_count(st):
-    c = channel_counts(yt_token())
-    m = mem()
-    arts = len(m.get("articles") or {})
-    send("📊 " + count_text(c) +
-         f"\n\nWhy other numbers differ: the bot's own notes track {len(m['videos'])} videos (only those it uploaded or checked), "
-         "the website counts only videos used by an article, and /learned counts the videos it has studied with views. "
-         "This number comes straight from YouTube, so it is the correct one.")
+    lines, _ = numbers_report(yt_token())
+    send("\n".join(lines) + "\n\nThe YouTube line comes straight from YouTube, so it is the real total. Every other number is checked against it.")
+
+
+def errlog_add(err, where=""):
+    """Remember what failed, so /selftest can show the pattern and I can fix the real cause."""
+    try:
+        lg = mem().setdefault("errlog", [])
+        lg.append({"ts": time.time(), "err": clean(str(err))[:200], "where": where[:90]})
+        del lg[:-40]
+    except Exception:
+        pass
+
+
+def selftest_checks(deep=True):
+    """The bot checks itself. Returns [(ok, name, detail)]. deep=False skips the slow network checks."""
+    res = []
+
+    def add(ok, name, detail=""):
+        res.append((ok, name, detail))
+    try:
+        ok_ff = ensure_ffmpeg()
+        out = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=30).stdout.split("\n")[0] if ok_ff else ""
+        add(bool(out), "Video tools (ffmpeg)", out[:48] or "missing and could not be fetched")
+    except Exception as e:
+        add(False, "Video tools (ffmpeg)", clean(e)[:90])
+    try:
+        okc = (video_kind(45, 1080, 1920)[0] == "short" and video_kind(45, 1920, 1080)[0] == "long"
+               and video_kind(400, 1080, 1920)[0] == "long" and video_kind(170, 1080, 1080)[0] == "short")
+        add(okc, "Short vs long detection", "vertical or square and 3 minutes or less = Short, everything else = long")
+    except Exception as e:
+        add(False, "Short vs long detection", clean(e)[:90])
+    try:
+        a, b = pick_hashtags("pyramid giza builders", short=True, trend={}), pick_hashtags("pyramid giza builders", short=False, trend={})
+        add(len(a) == 5 and len(set(x.lower() for x in a)) == 5 and "#Shorts" in a and "#Shorts" not in b and len(b) == 5, "Hashtag rules", "5 per post, #Shorts only on Shorts")
+    except Exception as e:
+        add(False, "Hashtag rules", clean(e)[:90])
+    try:
+        ht = help_text()
+        src = Path(__file__).read_text(encoding="utf-8")
+        miss = [c for c in re.findall(r"^/(\w+)", ht, re.M) if not re.search(r"""(==|startswith\(|in \(|,)\s*["']/""" + c + r"""["'\s,)]""", src)]
+        add(len(ht) <= 3800 and not miss, "Help menu", f"{len(ht)} of 3800 characters" + (", no handler for: /" + ", /".join(miss[:5]) if miss else ""))
+    except Exception as e:
+        add(False, "Help menu", clean(e)[:90])
+    try:
+        kb = (STATE_FILE.stat().st_size / 1024) if STATE_FILE.exists() else 0
+        jobs = [j for j in (ST.get("jobs") or {}).values() if j.get("stage") not in ("done", "cancelled") and time.time() - j.get("created", time.time()) > 86400]
+        fq = (mem().get("fixq") or {}).get("items") or []
+        add(kb < 3000 and not jobs, "Bot memory", f"{kb:.0f} KB, {len(ST.get('props') or {})} open buttons, {len(jobs)} stuck upload(s), fix-all queue {len(fq)}")
+    except Exception as e:
+        add(False, "Bot memory", clean(e)[:90])
+    lg = [x for x in (mem().get("errlog") or []) if time.time() - x["ts"] < 86400]
+    if lg:
+        cnt = {}
+        for x in lg:
+            k = (x["where"] or x["err"])[:60]
+            cnt[k] = cnt.get(k, 0) + 1
+        top = sorted(cnt.items(), key=lambda kv: -kv[1])[:3]
+        add(False, f"Errors in the last 24 hours: {len(lg)}", "; ".join(f"{k} x{n}" for k, n in top) + " | last: " + lg[-1]["err"][:110])
+    else:
+        add(True, "Errors in the last 24 hours", "none")
+    repo, gt = os.getenv("GITHUB_REPOSITORY", ""), os.getenv("GITHUB_TOKEN", "")
+    if repo and gt and deep:
+        try:
+            r = S.get(f"https://api.github.com/repos/{repo}/actions/runs", params={"per_page": 20}, headers={"Authorization": "Bearer " + gt}, timeout=30)
+            r.raise_for_status()
+            runs = r.json().get("workflow_runs", [])
+            dur = []
+            for x in runs:
+                if x.get("status") == "completed":
+                    a_, b_ = iso_ts(x.get("run_started_at") or x["created_at"]), iso_ts(x["updated_at"])
+                    if a_ and b_:
+                        dur.append((b_ - a_) / 60)
+            q = sum(1 for x in runs if x.get("status") in ("queued", "waiting"))
+            bad = sum(1 for x in runs[:10] if x.get("conclusion") == "failure")
+            avg = sum(dur[:10]) / len(dur[:10]) if dur else 0
+            add(avg <= 7 and q <= 2 and bad <= 2, "Server runs (GitHub)", f"average {avg:.1f} min, {q} waiting, {bad} failed of the last 10" + ("; slow runs queue each other: check the workflow file" if avg > 7 else ""))
+        except Exception as e:
+            add(True, "Server runs (GitHub)", "not readable: " + clean(e)[:60])
+    return res
+
+
+def cmd_selftest(st, auto=False):
+    if not auto:
+        send("🔬 Testing myself (about 30 seconds)...")
+    res = selftest_checks()
+    prob = [r for r in res if not r[0]]
+    try:
+        nl, npb = numbers_report(yt_token())
+        res.append((not npb, "Numbers add up", "; ".join(npb) if npb else "YouTube, website and bot notes match"))
+        prob = [r for r in res if not r[0]]
+    except Exception as e:
+        res.append((False, "Numbers", clean(e)[:90]))
+        prob = [r for r in res if not r[0]]
+    mem()["selftest"] = {"last": time.time(), "bad": len(prob)}
+    if auto and not prob:
+        return
+    lines = [("🔬 Self-test " + BOT_VERSION) if not auto else ("🔬 Daily self-check " + BOT_VERSION) + f": {len(prob)} problem(s)"]
+    lines += [f"{'✓' if ok else '✗'} {n}" + (f": {d}" if d else "") for ok, n, d in res]
+    lines.append("All good. ✅" if not prob else "Copy the ✗ lines to me and I will fix them. (Send /health for the logins to Google, Telegram and the website.)")
+    send("\n".join(lines))
+
+
+# ---------------- growth lab: learn fast what makes the channel and the accounts take off ----------------
+def _median(xs):
+    xs = sorted(xs)
+    return xs[len(xs) // 2] if xs else 0
+
+
+def social_log(title, link, tags):
+    lg = mem().setdefault("social", [])
+    lg.append({"id": "s%d" % int(time.time()), "ts": time.time(), "title": title[:90], "link": link, "tags": list(tags)[:5], "rated": {}, "asked": False, "fb": ""})
+    del lg[:-60]
+
+
+SCORE_LABEL = {0: "💤 nothing", 1: "😐 some", 2: "🔥 good"}
+
+
+def social_bias():
+    """{hashtag: (average score 0-2, posts)} from the taps and Facebook numbers of past posts."""
+    agg = {}
+    for e in mem().get("social") or []:
+        if not e.get("rated"):
+            continue
+        sc = sum(e["rated"].values()) / len(e["rated"])
+        for t in e.get("tags", []):
+            a = agg.setdefault(t.lower(), [0.0, 0])
+            a[0] += sc
+            a[1] += 1
+    return {t: (a[0] / a[1], a[1]) for t, a in agg.items()}
+
+
+def fb_engagement(post_id):
+    cfg = fb_cfg()
+    j = fb_call("GET", post_id, params={"access_token": cfg["token"], "fields": "shares,reactions.summary(true).limit(0),comments.summary(true).limit(0)"})
+    return ((j.get("reactions") or {}).get("summary", {}).get("total_count", 0) + 3 * (j.get("comments") or {}).get("summary", {}).get("total_count", 0)
+            + 5 * (j.get("shares") or {}).get("count", 0))
+
+
+def social_scan(st):
+    """36 hours after a share pack: Facebook is measured by the bot, X / Instagram / TikTok are rated by one tap. The bot then prefers the hashtags that worked."""
+    now = time.time()
+    for e in mem().get("social") or []:
+        if e.get("asked") or now - e["ts"] < 36 * 3600:
+            continue
+        if now - e["ts"] > 10 * 86400:
+            e["asked"] = True
+            continue
+        e["asked"] = True
+        if e.get("fb") and fb_cfg():
+            try:
+                eng = fb_engagement(e["fb"])
+                past = [x.get("fb_eng") for x in mem().get("social") or [] if x.get("fb_eng") is not None]
+                med = _median(past) if len(past) >= 3 else 3
+                e["fb_eng"] = eng
+                e["rated"]["facebook"] = 2 if eng >= max(10, 2 * med) else 1 if eng >= max(2, med) else 0
+            except Exception as ex:
+                print("fb engagement:", clean(ex)[:80])
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "socrate", "sid": e["id"], "created": now}
+        rows = [[btn(f"{p} {SCORE_LABEL[k].split()[0]}", pid, "gf", f"{key}:{k}") for k in (2, 1, 0)] for p, key in (("🐦 X", "x"), ("📸 Insta", "instagram"), ("🎵 TikTok", "tiktok"))]
+        rows.append([btn("Skip", pid, "gx")])
+        fbl = (f"\nFacebook: {SCORE_LABEL[e['rated']['facebook']]} (I measured it: {e.get('fb_eng', 0)} reactions, comments and shares)" if "facebook" in e["rated"] else "")
+        send(f"📈 How did your post about \"{e['title'][:60]}\" do 2 days ago?{fbl}\nOne tap per app you used. I learn which hashtags and topics work and use the best ones next time.", rows)
+        return                                              # one question per run
+
+
+def slug_map_safe():
+    sz = mem().get("site_zip")
+    if not sz:
+        return {}
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            return vid_slug_map(site_zip_from(sz["file_id"], d))
+    except Exception as e:
+        print("slug map:", clean(e)[:80])
+        return {}
+
+
+def boost_video(vid, st):
+    v = next((x for x in all_videos(yt_token()) if x["id"] == vid), None)
+    if not v:
+        return send("I cannot find that video any more.")
+    sn = v["snippet"]
+    slug = slug_map_safe()
+    link = f"{SITE_BASE}/articles/{slug[vid]}/" if vid in slug else f"https://youtu.be/{vid}"
+    send_share(sn.get("title", ""), (sn.get("description") or "").split("\n\n")[0], link, st)
+    send("Next: send /starter for a pinned question that gets comments (comments tell YouTube to show it to more people) and /community for the places to share it.")
+
+
+def vel_scan(st, force=False):
+    """Every 3 hours: watch how fast each recent video gains views. Tell the owner the moment one takes off (ride it) or stalls (act)."""
+    v_ = mem().setdefault("vel", {"last": 0, "snap": {}, "alerted": {}})
+    now = time.time()
+    if not force and now - v_["last"] < 3 * 3600:
+        return
+    v_["last"] = now
+    vids = all_videos(yt_token())
+    rate, life, rows = {}, [], []
+    for v in vids:
+        sn = v["snippet"]
+        pub = iso_ts(sn.get("publishedAt", ""))
+        views = int((v.get("statistics") or {}).get("viewCount", 0))
+        age = (now - pub) / 86400 if pub else 999
+        if age > 45:
+            v_["snap"].pop(v["id"], None)
+            continue
+        h = v_["snap"].setdefault(v["id"], [])
+        h.append([int(now), views])
+        del h[:-8]
+        ref = next((x for x in h if 2 * 3600 <= now - x[0] <= 26 * 3600), None)
+        if ref:
+            rate[v["id"]] = (views - ref[1], (views - ref[1]) / ((now - ref[0]) / 86400))
+        if age >= 5:
+            life.append(views / age)
+        rows.append((v, age, views))
+    base = max(_median([r[1] for r in rate.values()]), 5)
+    life_med = _median(life)
+    for v, age, views in rows:
+        vid, t = v["id"], v["snippet"].get("title", "")
+        if now - v_["alerted"].get(vid, 0) < 3 * 86400:
+            continue
+        r = rate.get(vid)
+        if r and r[0] >= 15 and r[1] >= max(30, 4 * base):
+            v_["alerted"][vid] = now
+            pid = new_pid(st)
+            st["props"][pid] = {"type": "boost", "vid": vid, "created": now}
+            send(f"🔥 \"{t[:70]}\" is taking off: +{r[0]} views since I last looked (about {r[1]:.0f} a day, your usual is about {base:.0f}).\n"
+                 "The first 48 hours decide how far YouTube pushes it. Tap now and I prepare the posts for X, Facebook, Instagram and TikTok.", [[btn("📣 Ride it: prepare the posts", pid, "gb"), btn("Skip", pid, "gx")]])
+            return
+        if 2 <= age <= 5 and life_med >= 10 and views / max(age, 1) < 0.25 * life_med:
+            v_["alerted"][vid] = now
+            pid = new_pid(st)
+            st["props"][pid] = {"type": "boost", "vid": vid, "created": now}
+            send(f"💤 \"{t[:70]}\" is slower than your usual ({views} views in {age:.0f} days; your normal is about {life_med:.0f} a day). "
+                 "A push in the first days helps most.", [[btn("📣 Prepare the posts now", pid, "gb"), btn("Skip", pid, "gx")]])
+            return
+
+
+def cmd_viral(st):
+    send("🚀 Growth lab: reading your numbers...")
+    tok = yt_token()
+    vids = all_videos(tok)
+    now = time.time()
+    rows = []
+    for v in vids:
+        pub = iso_ts(v["snippet"].get("publishedAt", ""))
+        if not pub or now - pub < 3 * 86400:
+            continue
+        age = (now - pub) / 86400
+        views = int((v.get("statistics") or {}).get("viewCount", 0))
+        secs = iso_seconds((v.get("contentDetails") or {}).get("duration"))
+        rows.append((views / age, views, age, secs, v))
+    lines = ["🚀 Growth lab", ""]
+    if rows:
+        top = sorted(rows, key=lambda r: -r[0])[:5]
+        lines.append("Your 5 fastest videos (views per day):")
+        lines += [f"• {r[0]:.1f}/day, {r[1]} views, {'Short' if 0 < r[3] <= 180 else 'long'}: {r[4]['snippet']['title'][:55]}" for r in top]
+        sh = [r[0] for r in rows if 0 < r[3] <= 180]
+        lg = [r[0] for r in rows if r[3] > 180]
+        if sh and lg:
+            lines.append(f"\nMedian per video: Shorts {_median(sh):.1f}/day, long videos {_median(lg):.1f}/day.")
+        try:
+            n_ = nb()
+            facts = [f["text"] for f in n_["facts"] if f.get("conf") != "early hint"][:3]
+            if facts:
+                lines += ["\nWhat the numbers say works (from /learned):"] + ["• " + f[:150] for f in facts]
+        except Exception:
+            pass
+    bias = social_bias()
+    good = sorted(((a, n, t) for t, (a, n) in bias.items() if n >= 2), reverse=True)
+    if good:
+        lines.append("\nHashtags that worked on your social posts: " + ", ".join(f"{t} ({a:.1f}/2)" for a, n, t in good[:4]))
+        weak = [t for a, n, t in good if a <= 0.4 and n >= 3]
+        if weak:
+            lines.append("I use these less now: " + ", ".join(weak[:4]))
+    else:
+        lines.append("\nSocial learning has no taps yet. After every share pack I ask how the post did two days later, one tap per app, and from then on I pick the hashtags that worked.")
+    v_ = mem().get("vel") or {}
+    hot = [(t, k) for k, t in (v_.get("alerted") or {}).items() if now - t < 3 * 86400]
+    if hot:
+        lines.append(f"\n🔥 {len(hot)} video(s) took off in the last 3 days. I tell you the moment one does (I check every 3 hours).")
+    lines += ["", "What to do next:", "1. Boost your newest video below (posts for 4 apps).", "2. /idea: new ideas from what works.",
+              "3. /funnel and /shortcuts: turn each strong Short into a long video and the other way round."]
+    pid = new_pid(st)
+    newest = vids[0]["id"] if vids else ""
+    st["props"][pid] = {"type": "boost", "vid": newest, "created": now}
+    send("\n".join(lines)[:3900], [[btn("📣 Boost my newest video", pid, "gb"), btn("💡 New ideas", pid, "gi")]])
 
 
 def cmd_health(st):
@@ -6971,10 +7499,10 @@ def cmd_health(st):
     lines.append(proof_line())
     m = mem()
     try:
-        lines.append("📊 YouTube: " + count_text(channel_counts(yt_token())).replace("\n", " "))
+        nl, _pr = numbers_report(yt_token())
+        lines += nl
     except Exception as e:
-        lines.append("✗ YouTube video count: " + clean(e)[:80])
-    lines.append(f"Videos tracked by the bot: {len(m['videos'])} | Lessons learned: {len(m['lessons'])}")
+        lines.append("✗ Numbers: " + clean(e)[:80])
     lines.append("Autopilot: " + ("PAUSED (/resume to restart)" if st.get("paused") else "on"))
     if fb_cfg():
         lines.append("Facebook Page: connected (" + fb_cfg().get("page_name", "") + ")")
@@ -7679,7 +8207,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/titles - better titles for your older videos (you approve each)\n"
         "/comments - draft replies to comments (you approve)\n"
         "/comments redo - bring back skipped comments\n"
-        "/subtitles - English + Arabic subtitles for your latest video\n"
+        "/subtitles - English + Arabic subtitles\n"
         "/crosspost - captions for TikTok, Reels, Facebook\n"
         "/series - add your latest video to a playlist\n"
         "/progress - how close you are to earning on YouTube\n"
@@ -7688,7 +8216,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/bigsetup - let me handle videos over 20 MB (I shrink them for you)\n"
         "/ytauth - new YouTube login so I can post comments and captions\n"
         "/asked - viewer questions into videos\n"
-        "/review - weekly self-review now (also runs by itself on Sundays)\n"
+        "/review - weekly self-review now\n"
         "/funnel - point your Shorts viewers to a long video\n"
         "/besttime - when to post, from your own data\n"
         "/watchnext - add 'Watch next' links to old descriptions\n"
@@ -7700,7 +8228,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/translate - ES, PT, HI subtitles for my latest video\n"
         "/shortcuts - best moments of my long video, for Shorts\n"
         "/playlists - build themed playlists for my videos (you approve)\n"
-        "/watch - check the channel for problems (also runs by itself)\n"
+        "/watch - check the channel for problems\n"
         "/recheck - full checkup of all videos\n"
         "/checklast - check my YouTube upload (or paste link)\n"
         "/image <subject> - AI picture + real photo\n"
@@ -7719,10 +8247,10 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/articlecheck - deepen articles\n"
         "/visuals - real, mix or AI pics\n"
         "/schedule - pick a publish time (/autoschedule on|off, /besthour 17)\n"
-        "/trends - what is hot now in the niche (tags, topics)\n"
+        "/trends - what is hot now (tags, topics)\n"
         "/thumbtest - 3 thumbnail options and how to test them\n"
         "/post - 3 Community posts to paste into YouTube\n"
-        "/fbsetup - link your Facebook Page (for /crosspost)\n"
+        "/fbsetup - link your Facebook Page\n"
         "/news - fresh Egypt news to turn into videos\n"
         "/pins - fix repeated or weak pinned comments (you tap)\n"
         "/audit - Kemet Audited: test a myth (or /audit your claim)\n"
@@ -7744,7 +8272,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/poll - feedback poll: what to film next\n"
         "/cadence 3 - how often to post\n"
         "/links /addlink /removelink - links added to your descriptions\n"
-        "/health - check that everything works\n/pause /resume - stop or restart my own messages\n"
+        "/health - check that everything works\n/selftest - the bot tests itself, shows what is wrong\n/viral - growth lab: what is taking off, what to do\n/pause /resume - stop or restart my own messages\n"
         "Or just write or speak to me normally: I work out what you want.\n"
         "/results - how your latest video is doing\n/plan - this week's plan\n"
         "/lessons - what I have learned about your channel\n"
@@ -7850,7 +8378,8 @@ def on_message(msg, st):
         if not vids:
             send("Upload a video through me first, then I can write its subtitles.")
         else:
-            vid = max(vids.items(), key=lambda kv: kv[1]["uploaded"])[0]
+            cand_ = {k: r for k, r in vids.items() if r.get("file_id")}
+            vid = max(cand_.items(), key=lambda kv: kv[1]["uploaded"])[0] if cand_ else ""
             make_subtitles({"video_id": vid}, st)
     elif text == "/lessons":
         show_lessons()
@@ -8041,6 +8570,10 @@ def on_message(msg, st):
         cmd_articlelinks(st)
     elif text == "/count":
         cmd_count(st)
+    elif text == "/viral":
+        cmd_viral(st)
+    elif text == "/selftest":
+        cmd_selftest(st)
     elif text.startswith("/synctitles"):
         cmd_synctitles(st)
     elif text.startswith("/seriespages"):
@@ -8077,7 +8610,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -11280,6 +11813,8 @@ def main():
     try:
         tg("setMyCommands", commands=sorted([
             {"command": "idea", "description": "Fresh video ideas + script"},
+            {"command": "selftest", "description": "Bot tests itself"},
+            {"command": "viral", "description": "Growth lab"},
             {"command": "titles", "description": "Better titles for old videos"},
             {"command": "subtitles", "description": "English + Arabic subtitles"},
             {"command": "crosspost", "description": "TikTok / Reels / Facebook kit"},
@@ -11401,6 +11936,7 @@ def main():
                     where = f" (in {fr.name}, line {fr.lineno}: {(fr.line or '').strip()[:70]})"
                 except Exception:
                     where = ""
+                errlog_add(e, where.strip(" ()"))
                 try:
                     if isinstance(e, GeminiBusy) or "Gemini failed" in str(e):
                         send("⏳ " + (str(e) if isinstance(e, GeminiBusy) else "Google's AI did not answer just now (it is overloaded at times).") + "\nNothing was published and nothing was lost.")
