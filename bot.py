@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.132"
+BOT_VERSION = "v10.136"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1707,7 +1707,7 @@ def tag_to_hash(t):
 HASHTAG_GENERIC_WORDS = {"ancient", "egypt", "egyptian", "egyptians", "history", "historical", "kemet", "world", "facts", "fact", "story", "mystery"}
 
 
-def pick_hashtags(about, short=False, trend=None, keep=()):
+def pick_hashtags(about, short=False, trend=None, keep=(), n=5):
     """Exactly 5 hashtags, the most trending ones that are TRUE for this video. Order: #AncientEgypt, #Shorts (Shorts), then trending niche
     tags, then viral worldwide tags that fit any history video, then the video's own existing tags, then safe history defaults.
     An unrelated viral tag (like a celebrity or #fyp) is never added: YouTube can punish misleading hashtags."""
@@ -1718,7 +1718,7 @@ def pick_hashtags(about, short=False, trend=None, keep=()):
         return h.lower() in [x.lower() for x in out]
 
     def add(ht):
-        if ht and not has(ht) and len(out) < 5:
+        if ht and not has(ht) and len(out) < n:
             out.append(ht)
     topic = title_words(about)
 
@@ -1742,9 +1742,9 @@ def pick_hashtags(about, short=False, trend=None, keep=()):
             if nice[1:].islower():
                 nice = "#" + nice[1:2].upper() + nice[2:]
             add(nice)
-    for d in ("#History", "#Egyptology", "#Archaeology", "#Pharaoh", "#Egypt", "#Mystery"):
+    for d in ("#History", "#Egyptology", "#Archaeology", "#Pharaoh", "#Egypt", "#Mystery", "#AncientHistory", "#Museum", "#Archaeologist", "#WorldHistory"):
         add(d)
-    return out[:5]
+    return out[:n]
 
 
 def rewrite_hashtags(desc, tags):
@@ -2333,10 +2333,11 @@ def do_upload(job):
 SHARE_PROMPT = """Write social posts for the history channel "Kemet | Ancient Egypt" promoting: {title}
 What it is about: {blurb}
 Rules for all: honest, no clickbait or claim the film does not make, a curious first line, no links (I add them).
-- x: at most 240 characters, at most 2 hashtags, at most 1 emoji.
+No hashtags at all (I add checked ones myself).
+- x: at most 160 characters, at most 1 emoji.
 - facebook: 2 to 3 short sentences for a Page post, a question at the end to invite comments.
-- instagram: a caption of 3 to 5 short lines, then 8 to 10 relevant hashtags on the last line. End with: Link in bio.
-- tiktok: one punchy line under 150 characters plus 4 to 5 hashtags.
+- instagram: a caption of 3 to 5 short lines. End with: Link in bio.
+- tiktok: one punchy line under 120 characters.
 Return JSON only: {{"x": "...", "facebook": "...", "instagram": "...", "tiktok": "..."}}"""
 
 
@@ -2355,15 +2356,35 @@ def share_pack(title, blurb):
         print("share pack:", clean(e)[:100])
         d = {}
     out = {}
-    for k, cap in (("x", 250), ("facebook", 600), ("instagram", 900), ("tiktok", 300)):
+    for k, cap in (("x", 170), ("facebook", 600), ("instagram", 800), ("tiktok", 150)):
         t = re.sub(r"https?://\S+", "", str(d.get(k, ""))).strip()
-        out[k] = t[:cap] or (title[:240] if k != "instagram" else title[:240] + "\n\nLink in bio.")
+        t = re.sub(r"(?:(?<=\s)|^)#\w+", "", t).strip()                  # the model must not add its own hashtags: only checked ones go in
+        out[k] = t[:cap] or (title[:200] if k != "instagram" else title[:200] + "\n\nLink in bio.")
+    try:
+        tags = pick_hashtags(title + " " + (blurb or ""), n=5)         # trending niche tags first, only those that are TRUE for this story
+    except Exception as e:
+        print("share tags:", clean(e)[:100])
+        tags = ["#AncientEgypt", "#History", "#Egyptology"]
+    out["tags"] = tags
+    xt = re.sub(r"[ \t]{2,}", " ", out["x"]).strip()
+    xtags = " ".join(tags[:5])
+    while xt and len(xt) + 1 + len(xtags) > 255:        # X allows 280 characters and counts the link as 23, so keep the text, five tags and link under that
+        xt = xt[:-1]
+    out["x"] = (xt.rstrip() + " " + xtags).strip()
+    out["facebook"] = (out["facebook"] + "\n\n" + " ".join(tags[:5])).strip()
+    ig = out["instagram"]
+    ig = re.sub(r"\s*Link in bio\.?\s*$", "", ig, flags=re.I).strip()
+    out["instagram"] = ig + "\n\n" + " ".join(tags[:5]) + "\n\nLink in bio."        # Instagram allows 5 hashtags per post since December 2025
+    out["tiktok"] = (out["tiktok"] + " " + " ".join(tags[:5])).strip()
     return out
 
 
 def send_share(title, blurb, link, st=None):
     """Ready posts for X, Facebook, Instagram and TikTok. Free: buttons open each app; the owner taps Post. Nothing is posted by the bot."""
     p = share_pack(title, blurb)
+    tg_ = p.get("tags", [])
+    send("🏷 Hashtags checked against your channel's trending list and the story itself (nothing unrelated), within each platform's limit:\n"
+         f"• X: {' '.join(tg_[:5])}\n• Facebook: {' '.join(tg_[:5])}\n• Instagram (limit 5): {' '.join(tg_[:5])}\n• TikTok: {' '.join(tg_[:5])}")
     send(f"📣 {title}\n\n🐦 X:\n{p['x']}\n{link}", [[{"text": "🐦 Open in X (text filled in)", "url": x_intent(p["x"], link)}]])
     if fb_cfg() and st is not None:
         pid = new_pid(st)
@@ -2373,9 +2394,9 @@ def send_share(title, blurb, link, st=None):
     else:
         send(f"📘 Facebook Page:\n{p['facebook']}\n{link}\n\n(Send /fbsetup to link your Page and post with one tap.)",
              [[{"text": "📘 Share on Facebook", "url": fb_share(link)}]])
-    send(f"📸 Instagram caption (press and hold to copy):\n{p['instagram']}",
+    send(f"📸 Instagram caption (press and hold to copy):\n{p['instagram']}\n\n🔗 Put this link in your Instagram bio: {link}",
          [[{"text": "📸 Open Instagram", "url": "https://www.instagram.com/"}]])
-    send(f"🎵 TikTok caption (press and hold to copy):\n{p['tiktok']}",
+    send(f"🎵 TikTok caption (press and hold to copy):\n{p['tiktok']}\n\n🔗 Put this link in your TikTok bio: {link}",
          [[{"text": "🎵 Open TikTok", "url": "https://www.tiktok.com/"}]])
     send("Facebook cannot pre-fill the text, so paste the Facebook post above after it opens. Instagram and TikTok need your vertical video from your phone: pick the Short, paste the caption, post. Nothing goes out unless you tap Post in each app.")
 
@@ -3080,6 +3101,13 @@ def on_prop(jid, act, st):
         st["props"].pop(jid, None)
         mem()["needvid"] = [e for e in (mem().get("needvid") or []) if e.get("slug") != prop["slug"]]
         return revideo_article({"slug": prop["slug"], "title": prop["title"]}, prop["vid"], st)
+    if act == "sx" and kind == "artshare":
+        it = prop["items"][int(st.get("_val", "0"))]
+        try:
+            blurb = it.get("deck") or it["title"]
+            return send_share(it["title"], blurb, f"{SITE_BASE}/articles/{it['slug']}/", st)
+        except Exception as e:
+            return send("I could not prepare the posts (" + clean(e)[:80] + "). Send /xpost to try again.")
     if act == "vp" and kind == "revideo":
         pick = prop["item"]["picks"][int(st.get("_val", "0"))]
         st["props"].pop(jid, None)
@@ -8049,7 +8077,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -9593,6 +9621,18 @@ def offer_article_after_site(st):
     mem().pop("after_pub", None)
 
 
+def offer_article_share(st):
+    """Articles written since the last publish are now live: offer ready posts for X, Facebook, Instagram and TikTok with the article link."""
+    pend = [x for x in (mem().get("share_pending") or []) if time.time() - x.get("ts", 0) < 14 * 86400]
+    if not pend:
+        return
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "artshare", "items": pend, "created": time.time()}
+    send("📣 " + ("This article is" if len(pend) == 1 else f"These {len(pend)} articles are") + " live. Want ready posts for X, Facebook, Instagram and TikTok, with the article link and checked hashtags? Nothing is posted until you tap.",
+         [[btn(("📣 Posts for: " + x["title"])[:60], pid, "sx", str(i))] for i, x in enumerate(pend[:5])] + [[btn("Not now", pid, "cs")]])
+    mem()["share_pending"] = []
+
+
 def do_site_publish(prop, st):
     send("🚀 Publishing...")
     ok, info = cf_deploy(prop["file_id"])
@@ -9611,6 +9651,10 @@ def do_site_publish(prop, st):
         offer_article_after_site(st)
     except Exception as e:
         print("offer article:", clean(e)[:100])
+    try:
+        offer_article_share(st)
+    except Exception as e:
+        print("offer share:", clean(e)[:100])
 
 
 # ---------------- the weekly site routine ----------------
@@ -11043,6 +11087,9 @@ def write_article(c, st):
     if newid:
         mem()["site_zip"] = {"file_id": newid, "name": zp.name, "ts": time.time(), "n": sz.get("n", 0)}
     mem().setdefault("articles", {})[vid] = {"slug": slug, "title": art["title"], "ts": time.time()}
+    sp_ = [x for x in (mem().get("share_pending") or []) if x.get("slug") != slug]
+    sp_.append({"vid": vid, "slug": slug, "title": art["title"], "deck": str(art.get("deck", ""))[:400], "ts": time.time()})
+    mem()["share_pending"] = sp_[-6:]                  # offered for sharing once the site is live
     msg = f"✅ Article ready: {art['title']}" + (f"\nSeries: {series['title']} (its page is updated too)" if series else "\nNot in any playlist yet, so it stands alone.") + f"\nAddress after you upload it: {SITE_BASE}/articles/{slug}/\n\n{art['deck']}\n\nSections:\n" + "\n".join("• " + s["h"] for s in art["sections"] if s["h"])
     if ran:
         msg += f"\n\n🔎 Fact-check of the finished article: ✅ {solid} claims confirmed" + (f", ⚠️ {softened} softened or corrected" if softened else "")
