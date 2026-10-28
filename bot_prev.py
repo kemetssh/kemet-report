@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.138"
+BOT_VERSION = "v10.139"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1047,25 +1047,6 @@ def links_block(job):
     return "\n\n" + "\n".join(f"{l['label']}: {l['url']}" for l in links)
 
 
-def plan_line(job):
-    """What will happen after the upload, shown BEFORE the upload tap: the date and time it goes public (auto-scheduling on)."""
-    if not auto_schedule_on():
-        return ""
-    pl = job.get("plan")
-    if not pl or time.time() - pl.get("ts", 0) > 7200 or pl["slot"][0] - time.time() < 3600:
-        try:
-            sl = best_slots(yt_token())
-            pl = {"ts": time.time(), "slot": list(sl[0])} if sl else None
-        except Exception as e:
-            print("plan:", clean(e)[:100])
-            pl = None
-        job["plan"] = pl
-    if not pl:
-        return ""
-    return (f"📅 Uploads as private, then I schedule it to go public on {pl['slot'][1]}.\n"
-            f"Why: {pl['slot'][2]}.\nYou can change or cancel that right after the upload. Turn it off with /autoschedule off.")
-
-
 def ask_confirm(job):
     job["stage"] = "confirm"
     jid = job["id"]
@@ -1081,7 +1062,7 @@ def ask_confirm(job):
          + (f"Sources checked: {len((job.get('evidence') or {}).get('sources') or [])} (kept for the website, not shown in the description)\n"
             if (job.get("evidence") or {}).get("sources") else "⛔ No sources found yet: every video is fact-checked against sources.\n") +
          ("\n⚠️ Worth a look: " + "; ".join(guard_check(job)) + "\n" if guard_check(job) else "") +
-         ("\n" + plan_line(job) if plan_line(job) else "\nIt stays private until you publish it."),
+         "\nIt stays private until you publish it.",
          ([[btn("⬆️ Upload as private", jid, "u")]] if (job.get("evidence") or {}).get("sources") else
           [[btn("🔄 Fetch sources", jid, "sf")]] +
           ([[btn("⬆️ Upload private anyway (sources can be added later)", jid, "ug")]] if job.get("src_tries", 0) >= 2 else []))
@@ -2076,8 +2057,6 @@ def cmd_checkvideo(st, vid):
     names, placed, _vv = playlist_scan(tok)
     rc_card(st, v, pool, placed)
     tail = "Nothing changes until you tap a button."
-    if vis in ("private", "unlisted"):
-        tail += f"\nThis video is {vis}. When you are happy with it, send /schedule and I will propose the best time to publish it (your tap)."
     tail += "\nFor its pinned comment send /pins."
     send(tail)
 
@@ -2405,8 +2384,6 @@ def do_upload(job):
     ST["props"][pid_pl] = {"type": "plgen", "video_id": vid, "created": time.time()}
     pid_x = new_pid(ST)
     ST["props"][pid_x] = {"type": "xgen", "video_id": vid, "created": time.time()}
-    pid_s = new_pid(ST)
-    ST["props"][pid_s] = {"type": "schedgen", "video_id": vid, "created": time.time()}
     kit = {"pinned": pinned_for(vid, job.get("title", ""), job.get("desc") or "")}
     pid_c = None
     kit_note = ""
@@ -2422,21 +2399,13 @@ def do_upload(job):
         kit_note += (f"\n\n▶ Viewers are pointed to \"{job['next_title']}\" in the first line of the description.\n"
                      f"🎞️ One 30-second step only you can do (YouTube does not allow it by code): Studio → Content → this video → Editor → "
                      f"End screen → Video → pick \"{job['next_title']}\".")
-    auto_msg = auto_schedule_on() and status == "private"
-    send(f"✅ Uploaded. {thumb_note}{label_note}" + (f"Linked to its long video (https://youtu.be/{job['full_id']}). " if job.get("full_id") else "") + f"Status: {status.upper()}\nhttps://youtu.be/{vid}{kit_note}" + ("" if auto_msg else f"\n\n{NOTICE}"),
+    send(f"✅ Uploaded. {thumb_note}{label_note}" + (f"Linked to its long video (https://youtu.be/{job['full_id']}). " if job.get("full_id") else "") + f"Status: {status.upper()}\nhttps://youtu.be/{vid}{kit_note}" + f"\n\n{NOTICE}",
          ([[btn("📌 Post my comment (then pin it)", pid_c, "pc")]] if pid_c else []) +
          [[btn("Try to make it public", job["id"], "p")],
-          [btn("🕒 Schedule at the best time", pid_s, "sh")],
           [btn("Add subtitles (English + Arabic)", pid, "sg")],
           [btn("Add to a playlist", pid_pl, "pg")],
           [btn("Cross-post kit (TikTok, Reels, Facebook)", pid_x, "xg")],
           [btn("I will publish it myself", job["id"], "k")]])
-    if auto_msg:
-        try:
-            auto_schedule(ST, vid, job["title"], tok, job.get("plan"))
-        except Exception as e:
-            print("auto schedule:", clean(e)[:120])
-            send("I could not pick a publish time just now. Send /schedule when you are ready.")
 
 
 SHARE_PROMPT = """Write social posts for the history channel "Kemet | Ancient Egypt" promoting: {title}
@@ -2519,29 +2488,17 @@ def cmd_xpost(st, arg=""):
     n = max(1, min(3, int(m_.group()))) if m_ else 1
     send("Writing posts for your latest video" + ("s" if n > 1 else "") + " (X, Facebook, Instagram, TikTok)...")
     tok = yt_token()
-    vids, _ = latest_vids(tok, 10)
-    vids = [v for v in vids if (v.get("status") or {}).get("privacyStatus", "public") == "public"][:n] or vids[:n]
-    slug = {}
-    sz = mem().get("site_zip")
-    if sz:
-        try:
-            with tempfile.TemporaryDirectory() as d:
-                slug = vid_slug_map(site_zip_from(sz["file_id"], d))
-        except Exception as e:
-            print("xpost site:", clean(e)[:100])
+    vids, _ = latest_vids(tok, 30)
+    vids = [v for v in vids if (v.get("status") or {}).get("privacyStatus", "public") == "public"]
+    slug = slug_map_safe()
     if not vids:
         return send("I found no videos yet.")
+    vids = [v for v in vids if v["id"] in slug][:n]
+    if not vids:
+        return send("None of your newest videos has a live article yet. I only make posts with the website link (never the YouTube link). Send /articles to write them first.")
     for v in vids:
         sn = v["snippet"]
-        link = f"{SITE_BASE}/articles/{slug[v['id']]}/" if v["id"] in slug else f"https://youtu.be/{v['id']}"
-        send_share(sn.get("title", ""), (sn.get("description") or "").split("\n\n")[0], link, st)
-
-
-def cmd_xpost_after_publish(job, st=None):
-    try:
-        send_share(job["title"], job["review"].get("summary", ""), f"https://youtu.be/{job['video_id']}", st)
-    except Exception as e:
-        print("share after publish:", clean(e)[:100])
+        send_share(sn.get("title", ""), (sn.get("description") or "").split("\n\n")[0], f"{SITE_BASE}/articles/{slug[v['id']]}/", st)
 
 
 def do_publish(job, st=None):
@@ -2555,9 +2512,10 @@ def do_publish(job, st=None):
         print("publish error:", clean(e))
     if status == "public":
         job["stage"] = "done"
-        send(f"🚀 It is PUBLIC now: https://youtu.be/{vid}")
-        cmd_xpost_after_publish(job, st)
-        offer_site_after_public(job, st)
+        rec_ = mem()["videos"].get(vid)
+        if rec_ is not None:
+            rec_["public_at"] = rec_.get("public_at") or time.time()           # so the automatic public-detector does not repeat this
+        first_hour(vid, rec_ or {"title": job["title"], "summary": (job.get("review") or {}).get("summary", "")}, job)
     else:
         send("YouTube kept it PRIVATE. New API projects are locked to private until Google "
              "audits them, so this is expected.\n\nTo publish: YouTube app → Profile → Your "
@@ -2990,9 +2948,6 @@ def on_prop(jid, act, st):
         m_ = mem()
         m_["reasons"] = (m_.get("reasons", []) + [{"title": prop["title"][:120], "why": str(st.get("_val", ""))[:40]}])[-20000:]
         return send("Noted. I will take that into account.")
-    if act == "sh" and kind == "schedgen":
-        st["props"].pop(jid, None)
-        return cmd_schedule(st, prop["video_id"])
     if kind == "rck" and act in ("rt", "rp", "rw", "rh", "rs", "rv"):
         order = ["rt", "rp", "rw", "rh"] if act == "rv" else [act]
         done = [rc_do(st, prop, w) for w in order if (w != "rs" or act in ("rs", "rv"))]
@@ -3021,10 +2976,6 @@ def on_prop(jid, act, st):
         except Exception:
             return send("That list is too old. Send /learned again.")
         return nb_fix(st, key)
-    if kind == "hour" and act == "hq":
-        mem()["best_hour"] = float(prop["h"])
-        st["props"].pop(jid, None)
-        return send(f"✅ Saved. I will schedule your videos for {int(prop['h'])}:00 US Eastern time.")
     if kind == "nbk" and act == "nr":
         return cmd_fullrefresh(st)
     if kind == "nbk" and act == "ns":
@@ -3115,11 +3066,6 @@ def on_prop(jid, act, st):
                     print("watchnext all:", clean(e)[:100])
         st["props"].pop(jid, None)
         return send(f"✅ Added Watch-next links to {done} videos.")
-    if act == "su" and kind == "unsched":
-        st["props"].pop(jid, None)
-        return cmd_unschedule(st, prop["video_id"])
-    if act == "sy" and kind == "sched":
-        return do_schedule(st, jid, st.get("_val"))
     if act == "ta" and kind == "title":
         why = exp_blocker(prop["video_id"], prop.get("published", ""), prop.get("min_age"))
         if why:
@@ -4338,12 +4284,16 @@ def pinned_for(vid, title, about=""):
     return text
 
 
-def first_hour(vid, rec):
+def first_hour(vid, rec, job=None):
+    """The video is public. Everything that follows, in one fixed order: pinned comment, series page, site publish, article, site publish, posts with the ARTICLE link."""
     kit = {"pinned": pinned_for(vid, rec.get("title", ""), rec.get("desc") or rec.get("description") or "")}
-    pid = None
-    txt = ("🚀 Your video just went live: https://youtu.be/" + vid + "\n\nThe first hour decides how far YouTube pushes it. Do these now:\n"
-           "1. Pin a question comment (below).\n2. Reply to every comment fast: I will draft the replies, you tap.\n"
-           "3. Share it once with people who like Egypt history, where it fits (not spam).")
+    has_site = bool(mem().get("site_zip"))
+    steps = ["📌 Pin a question comment (tap below)"]
+    if has_site:
+        steps += ["🗂 Put it on your website's series page, then publish the site", "✍️ Write its article, then publish again",
+                  "📣 Posts for X, Facebook, Instagram and TikTok with the article link (never the YouTube link)"]
+    txt = ("🚀 Your video is PUBLIC: https://youtu.be/" + vid + "\n\nWhat happens next, in this order:\n" +
+           "\n".join(f"{i + 1}. {x}" for i, x in enumerate(steps)) + "\nI send each step when the one before it is done. Replies to viewers: /comments.")
     rows = []
     if kit.get("pinned"):
         pid = new_pid(ST)
@@ -4352,9 +4302,9 @@ def first_hour(vid, rec):
         rows = [[btn("📌 Post my comment (then pin it)", pid, "pc")]]
     send(txt, rows or None)
     try:
-        cmd_comments(ST)
+        offer_site_after_public(job or {"video_id": vid, "title": rec.get("title", ""), "review": {"summary": rec.get("summary", "")}}, ST)
     except Exception as e:
-        print("first hour comments:", clean(e))
+        print("first hour site:", clean(e)[:100])
 
 
 def run_exps(st):
@@ -4532,241 +4482,6 @@ def us_zone():
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 US_DEFAULT_HOUR = 17.0          # US Eastern: 1-2 hours before the evening on the East and Central coasts, still afternoon on the West coast
 HOUR_BUCKETS = {"morning": (6, 11, 9.0), "afternoon": (12, 16, 14.0), "evening": (17, 21, 18.0)}
-
-
-def learn_hour(tok):
-    """Learn the best US Eastern publish hour from the owner's OWN videos (needs 12+ videos older than 3 days and a clear winner)."""
-    c = mem().get("sched_learn") or {}
-    if time.time() - c.get("ts", 0) < 3 * 86400:
-        return c.get("hour")
-    z = us_zone()
-    vids, _ = latest_vids(tok, 50)
-    rows = []
-    for v in vids:
-        pub = iso_ts(v["snippet"].get("publishedAt", ""))
-        age = (time.time() - pub) / 86400 if pub else 0
-        if age >= 3:
-            rows.append((datetime.datetime.fromtimestamp(pub, z).hour, int(v.get("statistics", {}).get("viewCount", 0)) / age))
-    hour, note = None, ""
-    if len(rows) >= 12:
-        means = {}
-        for name, (lo, hi, _c) in HOUR_BUCKETS.items():
-            g = [x for h, x in rows if lo <= h <= hi]
-            if len(g) >= 3:
-                means[name] = (sum(g) / len(g), len(g))
-        if means:
-            best = max(means, key=lambda k: means[k][0])
-            rest = [x for h, x in rows if not HOUR_BUCKETS[best][0] <= h <= HOUR_BUCKETS[best][1]]
-            if rest and sum(rest) > 0 and means[best][0] / (sum(rest) / len(rest)) >= 1.4:
-                hour = HOUR_BUCKETS[best][2]
-                note = f"your {best} US-Eastern uploads got the most views per day ({means[best][1]} videos)"
-    mem()["sched_learn"] = {"ts": time.time(), "hour": hour, "note": note, "n": len(rows)}
-    return hour
-
-
-def best_slots(tok, n=3, now=None):
-    """Up to n publish times (epoch, label, reason), best first. Target: US Eastern evening-ish hour (the owner's audience is
-    mostly in the USA), refined by his own results; day: his strongest weekdays when 3+ weeks of data exist, else the earliest slot."""
-    zu, zc = us_zone(), cairo_zone()
-    now = now or time.time()
-    hour, why_h = None, ""
-    if mem().get("best_hour") is not None:
-        hour, why_h = float(mem()["best_hour"]), "the US Eastern hour you told me"
-    if hour is None:
-        try:
-            hour = learn_hour(tok)
-            why_h = (mem().get("sched_learn") or {}).get("note", "") if hour is not None else ""
-        except Exception as e:
-            print("learn hour:", clean(e)[:80])
-    if hour is None:
-        hour, why_h = US_DEFAULT_HOUR, "1-2 hours before the American evening (still afternoon on the West coast); I adjust it as your own results show a better hour"
-    ranks, why_d = {}, {}
-    try:
-        rows = an_dim(tok, "views", "day", 56)
-        wd = {}
-        for d, v in rows:
-            try:
-                w = (calendar.timegm(time.strptime(d, "%Y-%m-%d")) // 86400 + 3) % 7      # Monday = 0
-            except Exception:
-                continue
-            wd.setdefault(w, []).append(v)
-        if len(rows) >= 21 and len(wd) == 7:
-            avg = {w: sum(v) / len(v) for w, v in wd.items()}
-            order = sorted(avg, key=lambda w: -avg[w])
-            ranks = {w: i for i, w in enumerate(order)}
-            why_d = {w: f"{DAY_NAMES[w]} is one of your stronger days ({avg[w]:.0f} views/day)" for w in order[:3]}
-    except Exception as e:
-        print("slots days:", clean(e)[:80])
-    us_note = ""
-    try:
-        crows = an_dim(tok, "views", "country", 28, {"sort": "-views", "maxResults": 8})
-        tot = sum(v for _, v in crows) or 0
-        us = sum(v for c, v in crows if c == "US")
-        if tot:
-            us_note = f"The USA is {us / tot:.0%} of your views in the last 28 days. "
-    except Exception:
-        pass
-    hour = round(hour * 2) / 2
-    h, mi = int(hour) % 24, int((hour % 1) * 60)
-    base = datetime.datetime.fromtimestamp(now, zu)
-    cands = []
-    for k in range(0, 9):
-        d = (base + datetime.timedelta(days=k)).replace(hour=h, minute=mi, second=0, microsecond=0)
-        if d.timestamp() - now >= 90 * 60:
-            cands.append(d)
-    cands = cands[:5]
-    if ranks:
-        top = [d for d in cands if ranks.get(d.weekday(), 9) <= 2] or cands
-        rest = [d for d in cands if d not in top]
-        chosen = (sorted(top, key=lambda d: ranks.get(d.weekday(), 9)) + rest)[:n]
-    else:
-        chosen = cands[:n]
-    out = []
-    for d in chosen:
-        reason = us_note + (why_d.get(d.weekday(), "") + "; " if d.weekday() in why_d else "") + why_h[:1].upper() + why_h[1:]
-        lab = d.strftime("%a %d %b, %H:%M") + " US Eastern (" + datetime.datetime.fromtimestamp(d.timestamp(), zc).strftime("%H:%M") + " Cairo)"
-        out.append((d.timestamp(), lab, reason))
-    return out
-
-
-def yt_schedule(vid, tok, when):
-    """True when YouTube accepted the schedule. The PUT succeeding is the proof; the read-back can lag, so it is only
-    retried a few times (Studio showed 'Scheduled' while the first read-back was still empty)."""
-    iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(when))
-    r = S.put(f"{YT}/youtube/v3/videos?part=status", headers={"Authorization": f"Bearer {tok}"},
-              json={"id": vid, "status": {"privacyStatus": "private", "publishAt": iso, "selfDeclaredMadeForKids": False}}, timeout=60)
-    r.raise_for_status()
-    for i in range(3):
-        try:
-            items = yt_get("videos", tok, part="status", id=vid).get("items") or []
-            st_ = (items[0].get("status") or {}) if items else {}
-            if st_.get("publishAt"):
-                return True
-            if st_.get("privacyStatus") in ("public", "unlisted"):
-                return False                       # it went live instead of waiting: not a schedule
-        except Exception as e:
-            print("schedule read-back:", clean(e)[:80])
-        time.sleep(0 if os.getenv("RUN_SECONDS") == "0" else 2)
-    return True
-
-
-def cmd_schedule(st, video_id=None):
-    tok = yt_token()
-    vids = mem().get("videos") or {}
-    if not video_id:
-        for v, rec in sorted(vids.items(), key=lambda kv: -kv[1].get("uploaded", 0)):
-            if rec.get("scheduled"):
-                continue
-            try:
-                if yt_privacy(v, tok) == "private":
-                    video_id = v
-            except Exception:
-                pass
-            break
-    if not video_id:
-        return send("I see no private video of yours that waits for a publish time. Upload one first, or it is already public or scheduled.")
-    rec = vids.get(video_id) or {}
-    slots = best_slots(tok)
-    if not slots:
-        return send("I could not find a free time slot. Try again in a moment.")
-    pid = new_pid(st)
-    st["props"][pid] = {"type": "sched", "video_id": video_id, "title": rec.get("title", ""), "slots": [list(x) for x in slots],
-                        "created": time.time()}
-    t0, l0, r0 = slots[0]
-    rows = [[btn("✅ Schedule: " + l0, pid, "sy", "0")]]
-    for i, (_, lab, _r) in enumerate(slots[1:], 1):
-        rows.append([btn("Or " + lab, pid, "sy", str(i))])
-    rows.append([btn("Not now", pid, "cs")])
-    send(f"🕒 Best time to publish \"{rec.get('title', video_id)}\":\n\n{l0}\nWhy: {r0}.\n\n"
-         "The video stays PRIVATE and YouTube makes it public at that minute.", rows)
-
-
-def do_schedule(st, jid, idx, auto=False):
-    prop = st["props"].get(jid)
-    if not prop:
-        return send("That suggestion is too old. Send /schedule again.")
-    try:
-        when, label, why = prop["slots"][int(idx or 0)]
-    except Exception:
-        return send("I could not read that choice. Send /schedule again.")
-    tok = yt_token()
-    ok, err = False, ""
-    try:
-        ok = yt_schedule(prop["video_id"], tok, when)
-    except Exception as e:
-        err = clean(e)[:120]
-    url = "https://youtu.be/" + prop["video_id"]
-    if ok:
-        rec = mem()["videos"].get(prop["video_id"])
-        if rec is not None:
-            rec["scheduled"] = when
-        st["props"].pop(jid, None)
-        pc, pu = new_pid(st), new_pid(st)
-        st["props"][pc] = {"type": "schedgen", "video_id": prop["video_id"], "created": time.time()}
-        st["props"][pu] = {"type": "unsched", "video_id": prop["video_id"], "created": time.time()}
-        return send(f"🕒 Scheduled: \"{prop['title']}\" goes public on {label}.\nWhy this time: {why}.\n{url}",
-                    [[btn("Choose another time", pc, "sh")], [btn("↩️ Cancel the schedule", pu, "su")]])
-    mem().setdefault("remind", []).append({"ts": when, "text": f"⏰ Publish time for \"{prop['title']}\": {url}\nYouTube app → Profile → Your videos → open it → Edit → "
-                                           "Visibility → Public.", "vid": prop["video_id"]})
-    st["props"].pop(jid, None)
-    send("YouTube did not accept a schedule from me" + (f" ({err})" if err else "") + ". New API projects are often locked to private until Google audits them, "
-         f"so I cannot schedule by code.\n\nDo it once by hand (30 seconds): YouTube app → Profile → Your videos → open it → Edit → Visibility → "
-         f"Schedule → {label}.\n{url}\n\nI will also remind you here at that time.")
-
-
-def auto_schedule_on():
-    return mem().get("auto_schedule", True)
-
-
-def auto_schedule(st, vid, title, tok, plan=None):
-    """Right after an upload that the owner approved: schedule the time that was shown on the confirm screen (or pick the best one)."""
-    slots = best_slots(tok)
-    if plan and plan.get("slot") and plan["slot"][0] - time.time() > 1800:
-        slots = [tuple(plan["slot"])] + [x for x in slots if abs(x[0] - plan["slot"][0]) > 60][:2]
-    if not slots:
-        return send("I could not find a publish time. Send /schedule when you are ready.")
-    pid = new_pid(st)
-    st["props"][pid] = {"type": "sched", "video_id": vid, "title": title, "slots": [list(x) for x in slots], "created": time.time(), "auto": True}
-    do_schedule(st, pid, 0, auto=True)
-
-
-def cmd_autoschedule(st, raw):
-    parts = raw.split()
-    if len(parts) > 1 and parts[1].lower() in ("on", "off"):
-        mem()["auto_schedule"] = parts[1].lower() == "on"
-    send("Auto-scheduling is " + ("ON: after every upload I pick the best US-time slot and schedule it (you can change or cancel it from the message)."
-                                  if auto_schedule_on() else "OFF: videos stay private until you send /schedule or publish them yourself.") +
-         "\nSwitch with /autoschedule on or /autoschedule off. Hour: /besthour 17 (US Eastern) or /besthour auto.")
-
-
-def cmd_unschedule(st, video_id):
-    tok = yt_token()
-    r = S.put(f"{YT}/youtube/v3/videos?part=status", headers={"Authorization": f"Bearer {tok}"},
-              json={"id": video_id, "status": {"privacyStatus": "private", "selfDeclaredMadeForKids": False}}, timeout=60)
-    r.raise_for_status()
-    rec = mem()["videos"].get(video_id)
-    if rec is not None:
-        rec.pop("scheduled", None)
-    mem()["remind"] = [x for x in (mem().get("remind") or []) if x.get("vid") != video_id]
-    send("↩️ Schedule cancelled. The video stays private. Send /schedule when you want a new time.")
-
-
-def cmd_besthour(st, raw):
-    parts = raw.split()
-    if len(parts) > 1 and parts[1].lower() == "auto":
-        mem().pop("best_hour", None)
-        return send("✅ Back to automatic: I choose the hour myself and adjust it from your results.")
-    try:
-        h = float(parts[1].replace(":", ".").replace(",", ".")) if len(parts) > 1 else None
-        if h is None or not 0 <= h < 24:
-            raise ValueError
-    except Exception:
-        cur = mem().get("best_hour")
-        return send("Tell me the US Eastern hour you want videos to go public, like /besthour 17 (or 17.5 for 17:30). "
-                    "/besthour auto goes back to letting me learn it from your results." +
-                    (f" Now I use {cur}:00 Eastern." if cur is not None else ""))
-    mem()["best_hour"] = h
-    send(f"✅ Saved. I will schedule your videos for {int(h)}:{int((h % 1) * 60):02d} US Eastern time.")
 
 
 def send_due_reminders():
@@ -5452,11 +5167,7 @@ def nb_fix(st, key):
         send(("🛠 Fixing: " + f["text"] + "\nNothing changes until you tap Apply on each proposal. From now on my new ideas and scripts also lean this way."))
         return cmd_titles(st, {"name": name, "dir": d or 1})
     if kind == "v" and name.startswith("posted in the US evening"):
-        h = 18.0 if good else 13.0
-        pid = new_pid(st)
-        st["props"][pid] = {"type": "hour", "h": h, "created": time.time()}
-        return send(f"🛠 Fixing: {f['text']}\nI can make {int(h)}:00 US Eastern your default publish hour. Your next scheduled videos would use it.",
-                    [[btn(f"✅ Use {int(h)}:00 US Eastern", pid, "hq"), btn("Skip", pid, "cs")]])
+        return send("🛠 " + f["text"] + "\nThis is only a hint about when viewers watch. I do not schedule anything, so nothing is changed.")
     if kind == "v" and name == "3 or more hashtags":
         if good:
             send("🛠 Fixing: " + f["text"] + "\nI will refresh the hashtags of your older videos. Nothing changes until you tap.")
@@ -7329,8 +7040,9 @@ def boost_video(vid, st):
         return send("I cannot find that video any more.")
     sn = v["snippet"]
     slug = slug_map_safe()
-    link = f"{SITE_BASE}/articles/{slug[vid]}/" if vid in slug else f"https://youtu.be/{vid}"
-    send_share(sn.get("title", ""), (sn.get("description") or "").split("\n\n")[0], link, st)
+    if vid not in slug:
+        return send("This video has no live article yet, and I only make posts with the website link (never the YouTube link). Send /articles to write it, then boost it.")
+    send_share(sn.get("title", ""), (sn.get("description") or "").split("\n\n")[0], f"{SITE_BASE}/articles/{slug[vid]}/", st)
     send("Next: send /starter for a pinned question that gets comments (comments tell YouTube to show it to more people) and /community for the places to share it.")
 
 
@@ -7553,7 +7265,7 @@ def viewer_comments(tok, vids, chid, per=30):
 
 
 COMMUNITY_PROMPT = """Use web search to check every fact. The owner of the tiny YouTube channel "Kemet | Ancient Egypt" (calm, evidence-first history) wants to share his newest video where Egypt fans already talk. He is a real person, not a brand: no hype, no "subscribe" begging, no fake claims.
-Video: "{title}" - {url}
+Video: "{title}" - its article: {url}
 About it: {about}
 Write 3 posts, each leading with a real, checked fact or a real question and putting the video link last, softly:
 1. Reddit (for a subreddit like r/AncientEgypt or r/history): a title and a body of 3-5 short lines.
@@ -7570,7 +7282,10 @@ def cmd_community(st):
         return send("I found no videos yet.")
     v = vids[0]
     sn = v["snippet"]
-    url = "https://youtu.be/" + v["id"]
+    slug = slug_map_safe()
+    if v["id"] not in slug:
+        return send("Your newest video has no live article yet. The community kit uses the website link only (never the YouTube link). Send /articles to write it first.")
+    url = f"{SITE_BASE}/articles/{slug[v['id']]}/"
     text, sources = gemini_text(COMMUNITY_PROMPT.format(title=sn["title"], url=url, about=(sn.get("description") or "")[:500]), search=True)
     posts = [p for p in parse_obj(text).get("posts", []) if isinstance(p, dict) and p.get("body")][:3]
     if not posts:
@@ -7995,7 +7710,7 @@ Choose the action. Actions: idea (wants video ideas), script (gave a topic to wr
 titles (better titles for old videos), comments (reply to comments), results (how the latest video did), plan (this week's plan),
 subtitles, crosspost (captions for TikTok/Reels/Facebook), series (add the latest video to a playlist), sequel (a video is doing well: suggest follow-up episodes), sources (add sources to the descriptions of older videos), patterns (what the owner's own numbers show about titles and formats), brief (a summary of everything that needs him),
 progress (how close to earning on YouTube), retention (where viewers leave a video), news (fresh Egypt news to make videos about), audit (check a claim, myth or theory about Ancient Egypt against evidence; put the claim in "topic"), audited (same, and also make the finished video; put the claim in "topic"),
-articles (write long website articles from the most viewed videos), funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), schedule (schedule the latest private video for its best publish time), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), visuals (choose real photos only, a mix, or AI images only for videos; put real, mix or ai in "topic"), image (make an AI picture plus a real photo of a subject, for a thumbnail or post; put the subject in "topic"), checklast (check and fix the newest video, for example one he uploaded straight to YouTube because it was too big for Telegram), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), pins (check and fix the pinned comment of every video), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), fullrefresh (refresh everything the bot knows with the newest data in one go), script (write a fact-checked Shorts script on a topic in the owner's style; topic is the subject), affiliate (find real affiliate programs and sponsors that fit the channel), translate (translated subtitles in Spanish, Portuguese, Hindi), shortcuts (the best moments of a long video to cut into Shorts), playlists (build themed playlists), watch (check the channel for problems), learned (everything the bot has learned from your numbers and viewers' comments, and pause/forget it), lessons (short list of past lessons), health (is everything working),
+articles (write long website articles from the most viewed videos), funnel (link a Short to a long video), trends (what is trending now, hashtags), besttime (when to post), recheck (full checkup of every video: facts, sources, hashtags, Watch-next, playlist), visuals (choose real photos only, a mix, or AI images only for videos; put real, mix or ai in "topic"), image (make an AI picture plus a real photo of a subject, for a thumbnail or post; put the subject in "topic"), checklast (check and fix the newest video, for example one he uploaded straight to YouTube because it was too big for Telegram), hashtags (refresh the hashtags of old videos from what is trending), watchnext (add a Watch-next link to the top of old video descriptions so viewers keep watching), thumbtest (thumbnail options), post (Community posts: a poll, a fact and a teaser to paste into YouTube), asked (turn viewers' questions from comments into videos), review (self-review of how the channel did this week), longform (plan long 5-8 minute videos), batch (a pack of scripts to film in one sitting), collab (draft messages to similar channels), community (posts to share the newest video in Reddit/Facebook groups/Quora), starter (a pinned comment question), pins (check and fix the pinned comment of every video), sublines (subscribe line tests), hook (opening lines for the next Short), goal (subscriber goal and progress), demand (what people search for, topic demand), refresh (refresh old video descriptions), calendar (ideas timed to real events), subs (where subscribers come from), praise (save the best comments), voice (voice and pacing coach), poll (feedback poll for the Community tab), fullrefresh (refresh everything the bot knows with the newest data in one go), script (write a fact-checked Shorts script on a topic in the owner's style; topic is the subject), affiliate (find real affiliate programs and sponsors that fit the channel), translate (translated subtitles in Spanish, Portuguese, Hindi), shortcuts (the best moments of a long video to cut into Shorts), playlists (build themed playlists), watch (check the channel for problems), learned (everything the bot has learned from your numbers and viewers' comments, and pause/forget it), lessons (short list of past lessons), health (is everything working),
 report (daily channel report), pause, resume, chat (anything else, including questions about Ancient Egypt or YouTube strategy).
 What you know:
 {context}
@@ -8025,8 +7740,6 @@ def run_action(action, topic, st, text=""):
         return cmd_funnel(st)
     if action == "besttime":
         return cmd_besttime(st)
-    if action == "schedule":
-        return cmd_schedule(st)
     if action == "watchnext":
         return cmd_watchnext(st)
     if action == "hashtags":
@@ -8265,7 +7978,6 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/xpost - X, Facebook, Insta, TikTok posts\n"
         "/articlecheck - deepen articles\n"
         "/visuals - real, mix or AI pics\n"
-        "/schedule - pick a publish time (/autoschedule on|off, /besthour 17)\n"
         "/trends - what is hot now (tags, topics)\n"
         "/thumbtest - 3 thumbnail options and how to test them\n"
         "/post - 3 Community posts to paste into YouTube\n"
@@ -8464,12 +8176,6 @@ def on_message(msg, st):
             cmd_recheck(st, restart=False)
         else:
             cmd_recheck(st)
-    elif text == "/schedule":
-        cmd_schedule(st)
-    elif text.startswith("/autoschedule"):
-        cmd_autoschedule(st, raw)
-    elif text.startswith("/besthour"):
-        cmd_besthour(st, raw)
     elif text == "/trends":
         cmd_trends(st)
     elif text == "/thumbtest":
@@ -8693,7 +8399,7 @@ def on_callback(cb, st):
         mem()["videos"].setdefault(vid, {"uploaded": time.time(), "title": job["title"], "file_id": job.get("file_id", ""),
                                          "summary": job["review"].get("summary", ""), "checked": False})
         job["stage"] = "cancelled"
-        return send("Good, nothing uploaded twice. The existing video is kept. Send /schedule to pick its publish time or /series for a playlist.")
+        return send("Good, nothing uploaded twice. The existing video is kept. Send /series for a playlist.")
     if act == "dy" and stage == "confirm":
         job["dup_ok"] = True
         return do_upload(job)
@@ -11874,12 +11580,10 @@ def main():
             {"command": "review", "description": "Weekly self-review"},
             {"command": "funnel", "description": "Send Shorts viewers to a long video"},
             {"command": "besttime", "description": "When to post"},
-            {"command": "schedule", "description": "Schedule the latest video at the best time"},
             {"command": "watchnext", "description": "Add Watch-next links to old videos"},
             {"command": "hashtags", "description": "Refresh hashtags from what is trending"},
             {"command": "recheck", "description": "Full checkup of all my videos"},
             {"command": "learned", "description": "What the bot has learned"},
-            {"command": "autoschedule", "description": "Auto-schedule uploads on or off"},
             {"command": "trends", "description": "What is trending now"},
             {"command": "thumbtest", "description": "Thumbnail options and test"},
             {"command": "post", "description": "Community posts to paste"},
