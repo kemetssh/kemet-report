@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.139"
+BOT_VERSION = "v10.142"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2515,7 +2515,7 @@ def do_publish(job, st=None):
         rec_ = mem()["videos"].get(vid)
         if rec_ is not None:
             rec_["public_at"] = rec_.get("public_at") or time.time()           # so the automatic public-detector does not repeat this
-        first_hour(vid, rec_ or {"title": job["title"], "summary": (job.get("review") or {}).get("summary", "")}, job)
+        first_hour(vid, rec_ or {"title": job["title"], "summary": (job.get("review") or {}).get("summary", "")}, job, st)
     else:
         send("YouTube kept it PRIVATE. New API projects are locked to private until Google "
              "audits them, so this is expected.\n\nTo publish: YouTube app → Profile → Your "
@@ -3226,6 +3226,9 @@ def on_prop(jid, act, st):
     if act == "gh" and kind == "afterhubs":
         st["props"].pop(jid, None)
         return after_hubs(st)
+    if act == "gn" and kind == "afterart":
+        st["props"].pop(jid, None)
+        return offer_publish(st)
     if act == "gw" and kind == "afterart":
         st["props"].pop(jid, None)
         return write_article(prop["c"], st)
@@ -4284,25 +4287,26 @@ def pinned_for(vid, title, about=""):
     return text
 
 
-def first_hour(vid, rec, job=None):
+def first_hour(vid, rec, job=None, st=None):
     """The video is public. Everything that follows, in one fixed order: pinned comment, series page, site publish, article, site publish, posts with the ARTICLE link."""
+    st_ = st if st is not None else ST
     kit = {"pinned": pinned_for(vid, rec.get("title", ""), rec.get("desc") or rec.get("description") or "")}
     has_site = bool(mem().get("site_zip"))
     steps = ["📌 Pin a question comment (tap below)"]
     if has_site:
-        steps += ["🗂 Put it on your website's series page, then publish the site", "✍️ Write its article, then publish again",
+        steps += ["📂 Add it to its playlist (I propose, you tap)", "🗂 Build its website series page (not live yet)", "✍️ Write its article into the same site copy", "🚀 Publish the site ONCE: series page and article go live together",
                   "📣 Posts for X, Facebook, Instagram and TikTok with the article link (never the YouTube link)"]
     txt = ("🚀 Your video is PUBLIC: https://youtu.be/" + vid + "\n\nWhat happens next, in this order:\n" +
            "\n".join(f"{i + 1}. {x}" for i, x in enumerate(steps)) + "\nI send each step when the one before it is done. Replies to viewers: /comments.")
     rows = []
     if kit.get("pinned"):
-        pid = new_pid(ST)
-        ST["props"][pid] = {"type": "pin", "video_id": vid, "text": kit["pinned"], "created": time.time()}
+        pid = new_pid(st_)
+        st_["props"][pid] = {"type": "pin", "video_id": vid, "text": kit["pinned"], "created": time.time()}
         txt += "\n\n📌 " + kit["pinned"]
         rows = [[btn("📌 Post my comment (then pin it)", pid, "pc")]]
     send(txt, rows or None)
     try:
-        offer_site_after_public(job or {"video_id": vid, "title": rec.get("title", ""), "review": {"summary": rec.get("summary", "")}}, ST)
+        offer_site_after_public(job or {"video_id": vid, "title": rec.get("title", ""), "review": {"summary": rec.get("summary", "")}}, st_)
     except Exception as e:
         print("first hour site:", clean(e)[:100])
 
@@ -6193,13 +6197,19 @@ def playlist_scan(tok):
     return names, placed, vids
 
 
-def series_propose(st, names, v):
+def series_propose(st, names, v, force_new=False):
     sn = v["snippet"]
-    out = gemini([{"text": SERIES_PROMPT.format(
+    prompt = SERIES_PROMPT.format(
         series=SERIES_HINT, playlists=json.dumps(names), title=sn.get("title", ""),
-        summary=(sn.get("description") or "")[:600])}])
-    pl_id = out.get("playlist_id") if out.get("playlist_id") in names else ""
+        summary=(sn.get("description") or "")[:600])
+    if force_new:
+        prompt += "\nNo existing playlist fits: you MUST propose a new playlist title (3 to 6 words) that names a series this film starts and later films can join. Leave playlist_id empty."
+    out = gemini([{"text": prompt}])
+    pl_id = out.get("playlist_id") if out.get("playlist_id") in names and not force_new else ""
     new_title = "" if pl_id else (out.get("new_playlist_title") or "").strip()[:100]
+    if not pl_id and not new_title and force_new:
+        new_title = short_title(sn.get("title", "") or "More from Kemet", 60)
+        out["reason"] = out.get("reason") or "A playlist of its own, so later films on this topic can join it."
     if not pl_id and not new_title:
         return False
     pid = new_pid(st)
@@ -6270,6 +6280,10 @@ def apply_playlist(prop, jid, st):
                     [[btn("Try again", jid, "pa")]])
     st["props"].pop(jid, None)
     send(f"✅ Added to the playlist.\nhttps://www.youtube.com/playlist?list={pl_id}")
+    try:
+        playlist_added(st, prop["video_id"])
+    except Exception as e:
+        print("playlist continue:", clean(e)[:80])
 
 
 # ---------------- drop-off finder (audience retention) ----------------
@@ -8335,7 +8349,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -9846,13 +9860,42 @@ def offer_site_after_public(job, st):
     except Exception as e:
         print("attach offer:", clean(e)[:100])
     try:
-        mem()["after_pub"] = {"vid": job["video_id"], "title": job["title"], "hubs": False, "ts": time.time()}
-        pid = new_pid(st)
-        st["props"][pid] = {"type": "afterhubs", "created": time.time()}
-        send(f"🌐 Next for the website: put \"{job['title'][:60]}\" on its series page, then publish the site. After that I can write its article.",
-             [[btn("🗂 Update series pages", pid, "gh")], [btn("Not now", pid, "cs")]])
+        mem()["after_pub"] = {"vid": job["video_id"], "title": job["title"], "hubs": False, "chain": True, "ts": time.time()}
+        in_pl, names, vids = True, [], []
+        try:
+            names, placed, vids = playlist_scan(yt_token())
+            in_pl = job["video_id"] in placed
+        except Exception as e:
+            print("after public playlist:", clean(e)[:100])
+        if in_pl:
+            offer_hubs(st)
+        else:                                                    # a series page lists playlist films, so the playlist comes FIRST
+            mem()["after_pub"]["need_pl"] = True
+            send("📂 Step 2: this film is in no playlist yet, and a series page only shows playlist films. Pick its playlist first; the website step follows right after.")
+            v = next((x for x in vids if x["id"] == job["video_id"]), None) or {"id": job["video_id"], "snippet": {"title": job["title"], "description": (job.get("review") or {}).get("summary", "")}}
+            if not series_propose(st, names, v):
+                send("None of your playlists fits this film, so I suggest a new one. Tap Yes and I create it and add the film; the website step follows.")
+                if not series_propose(st, names, v, force_new=True):
+                    send("I could not suggest a playlist name. Continuing with the website without a series page for this film.")
+                    mem()["after_pub"].pop("need_pl", None)
+                    offer_hubs(st)
     except Exception as e:
         print("after public:", clean(e)[:100])
+
+
+def offer_hubs(st):
+    ap = mem().get("after_pub") or {}
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "afterhubs", "created": time.time()}
+    send(f"🌐 Next for the website: I put \"{str(ap.get('title', ''))[:60]}\" on its series page. Nothing goes live yet: the article comes next, and then you publish ONCE for both.",
+         [[btn("🗂 Update series pages", pid, "gh")], [btn("Not now", pid, "cs")]])
+
+
+def playlist_added(st, video_id):
+    """The film joined a playlist: if the after-public steps were waiting for that, continue with the website."""
+    ap = mem().get("after_pub") or {}
+    if ap.get("vid") == video_id and ap.pop("need_pl", None):
+        offer_hubs(st)
 
 
 def after_hubs(st):
@@ -9865,6 +9908,17 @@ def after_hubs(st):
         print("after hubs check:", clean(e)[:100])
     ap["hubs"] = True
     cmd_hubs(st)
+
+
+def offer_article_in_chain(st):
+    """After the series page is built (not yet live): write the article into the same site copy, so ONE Publish puts both live."""
+    ap = mem().pop("after_pub", None) or {}
+    if not ap.get("vid") or ap["vid"] in (mem().get("articles") or {}):
+        return offer_publish(st)
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "afterart", "c": {"id": ap["vid"], "title": ap["title"]}, "created": time.time()}
+    send(f"✍️ Next: the article for \"{ap['title'][:60]}\". I research it, write about 2,000 words and check every claim. Then you tap Publish once and the series page and the article go live together.",
+         [[btn("✍️ Write the article", pid, "gw")], [btn("🚀 Publish without the article", pid, "gn")]])
 
 
 def offer_article_after_site(st):
@@ -10472,6 +10526,9 @@ def cmd_hubs(st):
     if not r.get("ok"):
         return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
     send(f"✅ {n} series pages built from your playlists. Each lists its films; a film shows \"Read the article\" once it has one, otherwise it links to YouTube. /articles writes the articles.")
+    ap = mem().get("after_pub") or {}
+    if ap.get("chain") and time.time() - ap.get("ts", 0) < 3 * 86400:
+        return offer_article_in_chain(st)
     offer_publish(st)
 
 
