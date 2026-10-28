@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.142"
+BOT_VERSION = "v10.143"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -4653,6 +4653,12 @@ def housekeeping(st):
     except Exception as e:
         print("watch:", clean(e)[:100])
     try:
+        if cf_cfg() and time.strftime("%Y-%m-%d") not in (mem().get("webstats") or {}) and time.time() - mem().get("web_try", 0) > 6 * 3600:
+            mem()["web_try"] = time.time()
+            web_block()                                    # one quiet snapshot a day: the history for the learning loop
+    except Exception as e:
+        print("web snapshot:", clean(e)[:80])
+    try:
         vel_scan(st)
     except Exception as e:
         print("velocity:", clean(e)[:100])
@@ -6667,6 +6673,14 @@ def health_site(lines):
     except Exception as e:
         lines.append(f"✗ Sitemap: {clean(e)[:80]}")
     lines.append("✓ Cloudflare: connected (" + str(cf_cfg().get("project", "")) + ")" if cf_cfg() else "Cloudflare: not connected (/cfsetup for one-tap publishing)")
+    if cf_cfg():
+        try:
+            w_ = site_stats(1)
+            lines.append(f"✓ Website visitors (Cloudflare): {w_['views']} page views and {w_['visits']} visits in the last 24 hours")
+        except PermissionError:
+            lines.append("⚠️ Website visitors: " + CF_PERM_HELP)
+        except Exception as e:
+            lines.append("⚠️ Website visitors: not readable (" + clean(e)[:70] + ")")
     if not sz:
         lines.append("✗ Stored site copy: none (send your site .zip)")
         return
@@ -7109,6 +7123,127 @@ def vel_scan(st, force=False):
             return
 
 
+CF_PERM_HELP = ("I cannot read your website visitors yet: the Cloudflare key needs one more permission. Cloudflare → profile → API Tokens → edit your token → "
+                "add Account → Account Analytics → Read → save. The key stays the same, so you send me nothing.")
+
+
+def cf_graphql(query, variables):
+    cfg = cf_cfg()
+    r = S.post(f"{CF_API}/graphql", headers={"Authorization": "Bearer " + cfg["token"]}, json={"query": query, "variables": variables}, timeout=60)
+    try:
+        j = r.json()
+    except Exception:
+        raise RuntimeError(f"Cloudflare answered HTTP {r.status_code}")
+    errs = j.get("errors") or []
+    if errs:
+        msg = "; ".join(str(e.get("message", ""))[:100] for e in errs[:2])
+        if re.search(r"authoriz|permission|access|not allowed|unauth", msg, re.I) or r.status_code in (401, 403):
+            raise PermissionError(CF_PERM_HELP)
+        raise RuntimeError("Cloudflare said: " + msg)
+    return j.get("data") or {}
+
+
+def cf_site_tag():
+    cfg = cf_cfg()
+    if cfg.get("site_tag"):
+        return cfg["site_tag"]
+    r = S.get(f"{CF_API}/accounts/{cfg['account']}/rum/site_info/list", params={"per_page": 20}, headers={"Authorization": "Bearer " + cfg["token"]}, timeout=40)
+    if r.status_code in (401, 403):
+        raise PermissionError(CF_PERM_HELP)
+    j = r.json()
+    sites = j.get("result") or []
+    host = SITE_BASE.split("//")[-1].strip("/")
+    pick = next((x for x in sites if host in json.dumps(x)), None) or (sites[0] if len(sites) == 1 else None)
+    if not pick or not pick.get("site_tag"):
+        raise RuntimeError("I could not find your site in Cloudflare Web Analytics.")
+    cfg["site_tag"] = pick["site_tag"]
+    return cfg["site_tag"]
+
+
+WEB_Q = """query($acc: String!, $tag: String!, $since: Time!, $until: Time!) { viewer { accounts(filter: {accountTag: $acc}) {
+ total: rumPageloadEventsAdaptiveGroups(filter: {siteTag: $tag, datetime_geq: $since, datetime_leq: $until}, limit: 1) { count sum { visits } }
+ pages: rumPageloadEventsAdaptiveGroups(filter: {siteTag: $tag, datetime_geq: $since, datetime_leq: $until}, limit: 200, orderBy: [count_DESC]) { count sum { visits } dimensions { requestPath } }
+ refs: rumPageloadEventsAdaptiveGroups(filter: {siteTag: $tag, datetime_geq: $since, datetime_leq: $until}, limit: 20, orderBy: [count_DESC]) { count dimensions { refererHost } }
+} } }"""
+
+
+def ref_kind(host):
+    h = (host or "").lower()
+    if not h:
+        return "direct or app links"
+    if "youtube" in h or "youtu.be" in h:
+        return "YouTube"
+    if h in ("t.co", "x.com", "twitter.com") or h.endswith(".x.com"):
+        return "X"
+    if "facebook" in h or h.startswith("l.facebook") or "fb.com" in h:
+        return "Facebook"
+    if "instagram" in h:
+        return "Instagram"
+    if "tiktok" in h:
+        return "TikTok"
+    if "google" in h or "bing" in h or "duckduckgo" in h or "yahoo" in h:
+        return "search engines"
+    if "pages.dev" in h:
+        return "your own site"
+    return h
+
+
+def site_stats(days=7):
+    """Website visitors from Cloudflare Web Analytics: views, visits, top pages, where visitors came from."""
+    if not cf_cfg():
+        raise RuntimeError("Cloudflare is not connected (/cfsetup).")
+    cfg = cf_cfg()
+    tag = cf_site_tag()
+    now = time.time()
+    fmt = lambda t: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+    d = cf_graphql(WEB_Q, {"acc": cfg["account"], "tag": tag, "since": fmt(now - days * 86400), "until": fmt(now)})
+    acc = ((d.get("viewer") or {}).get("accounts") or [{}])[0]
+    tot = (acc.get("total") or [{}])[0] if acc.get("total") else {}
+    views, visits = int(tot.get("count", 0) or 0), int(((tot.get("sum") or {}).get("visits", 0)) or 0)
+    pages = [((g.get("dimensions") or {}).get("requestPath", "?"), int(g.get("count", 0))) for g in (acc.get("pages") or [])]
+    refs = {}
+    for g in acc.get("refs") or []:
+        k = ref_kind((g.get("dimensions") or {}).get("refererHost", ""))
+        refs[k] = refs.get(k, 0) + int(g.get("count", 0))
+    return {"days": days, "views": views, "visits": visits, "pages": pages, "refs": sorted(refs.items(), key=lambda kv: -kv[1])}
+
+
+def web_block(days=7):
+    """Plain-words website block for /viral, or one line saying what is missing."""
+    try:
+        w = site_stats(days)
+    except PermissionError as e:
+        return "🌐 " + str(e)
+    except Exception as e:
+        return "🌐 Website visitors: not readable now (" + clean(e)[:90] + ")"
+    ppv = w["views"] / w["visits"] if w["visits"] else 0
+    arts = {x.get("slug"): x.get("title", "") for x in (mem().get("articles") or {}).values()}
+    seen = {}
+    for p, c in w["pages"]:
+        m_ = re.match(r"/articles/([^/]+)/?", p or "")
+        if m_:
+            seen[m_.group(1)] = seen.get(m_.group(1), 0) + c
+    top = sorted(seen.items(), key=lambda kv: -kv[1])[:4]
+    lines = [f"🌐 Website, last {w['days']} days: {w['views']} page views, {w['visits']} visits, {ppv:.1f} pages per visit."]
+    if w["refs"]:
+        lines.append("Visitors come from: " + ", ".join(f"{k} {v}" for k, v in w["refs"][:4]))
+    if top:
+        lines.append("Most read articles: " + "; ".join(f"{(arts.get(sl) or sl.replace('-', ' '))[:40]} ({c})" for sl, c in top))
+    unread = [t for sl, t in arts.items() if sl and sl not in seen]
+    if unread:
+        lines.append(f"{len(unread)} article(s) had no visit this week: the posts and the description links are what bring readers (/articlelinks, /xpost).")
+    if ppv and ppv < 1.3:
+        lines.append("Almost everyone reads one page and leaves: the links between articles and series pages are the fix, so publishing more articles helps most.")
+    try:
+        snap = mem().setdefault("webstats", {})
+        snap[time.strftime("%Y-%m-%d")] = {"views": w["views"], "visits": w["visits"], "days": w["days"]}
+        for k in sorted(snap)[:-60]:
+            snap.pop(k, None)
+    except Exception:
+        pass
+    return "\n".join(lines)
+
+
 def loop_status():
     """The learning loop in numbers: watch, guess, measure, adjust."""
     n = nb()
@@ -7154,6 +7289,10 @@ def cmd_viral(st):
                 lines += ["\nWhat the numbers say works (from /learned):"] + ["• " + f[:150] for f in facts]
         except Exception:
             pass
+    try:
+        lines += ["", web_block()]
+    except Exception as e:
+        print("web block:", clean(e)[:80])
     try:
         lines += ["", loop_status()]
     except Exception as e:
