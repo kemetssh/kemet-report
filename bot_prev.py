@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.137"
+BOT_VERSION = "v10.138"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -7383,6 +7383,21 @@ def vel_scan(st, force=False):
             return
 
 
+def loop_status():
+    """The learning loop in numbers: watch, guess, measure, adjust."""
+    n = nb()
+    h, t = n["score"]
+    soc = [e for e in (mem().get("social") or []) if e.get("rated")]
+    tests = n.get("tests") or []
+    won = sum(1 for x in tests if x.get("win"))
+    best = [t_ for t_, (a, c) in social_bias().items() if c >= 2 and a >= 1.3]
+    return ("🔁 The learning loop (it runs by itself)\n"
+            f"1. Watch: {len(n['obs'])} videos studied daily, view speed every 3 hours.\n"
+            f"2. Guess: {len(n['facts'])} patterns found; before each upload I guess above/typical/below. Right so far: {h} of {t}.\n"
+            f"3. Measure: {len(soc)} social posts rated; {len(tests)} title test(s), {won} improved views.\n"
+            f"4. Adjust: patterns that miss lose trust; hashtags that worked are promoted ({len(best)} now); winners feed new titles, hooks and ideas.")
+
+
 def cmd_viral(st):
     send("🚀 Growth lab: reading your numbers...")
     tok = yt_token()
@@ -7413,6 +7428,10 @@ def cmd_viral(st):
                 lines += ["\nWhat the numbers say works (from /learned):"] + ["• " + f[:150] for f in facts]
         except Exception:
             pass
+    try:
+        lines += ["", loop_status()]
+    except Exception as e:
+        print("loop status:", clean(e)[:80])
     bias = social_bias()
     good = sorted(((a, n, t) for t, (a, n) in bias.items() if n >= 2), reverse=True)
     if good:
