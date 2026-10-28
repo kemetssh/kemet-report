@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.143"
+BOT_VERSION = "v10.144"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -7136,9 +7136,9 @@ def cf_graphql(query, variables):
         raise RuntimeError(f"Cloudflare answered HTTP {r.status_code}")
     errs = j.get("errors") or []
     if errs:
-        msg = "; ".join(str(e.get("message", ""))[:100] for e in errs[:2])
-        if re.search(r"authoriz|permission|access|not allowed|unauth", msg, re.I) or r.status_code in (401, 403):
-            raise PermissionError(CF_PERM_HELP)
+        msg = "; ".join(str(e.get("message", ""))[:140] for e in errs[:2])
+        if r.status_code in (401, 403) or re.search(r"not authori[sz]ed|unauthori[sz]ed|authentication|does not have permission", msg, re.I):
+            raise PermissionError(CF_PERM_HELP + " (Cloudflare said: " + msg + ")")
         raise RuntimeError("Cloudflare said: " + msg)
     return j.get("data") or {}
 
@@ -7148,14 +7148,20 @@ def cf_site_tag():
     if cfg.get("site_tag"):
         return cfg["site_tag"]
     r = S.get(f"{CF_API}/accounts/{cfg['account']}/rum/site_info/list", params={"per_page": 20}, headers={"Authorization": "Bearer " + cfg["token"]}, timeout=40)
+    try:
+        j = r.json()
+    except Exception:
+        j = {}
+    why = "; ".join(str(e.get("message", ""))[:140] for e in (j.get("errors") or [])[:2])
     if r.status_code in (401, 403):
-        raise PermissionError(CF_PERM_HELP)
-    j = r.json()
+        raise PermissionError(CF_PERM_HELP + " (Cloudflare said: " + (why or f"HTTP {r.status_code}") + ")")
+    if not j.get("success", True):
+        raise RuntimeError("Cloudflare said: " + (why or f"HTTP {r.status_code}") + " (when listing your Web Analytics sites)")
     sites = j.get("result") or []
     host = SITE_BASE.split("//")[-1].strip("/")
     pick = next((x for x in sites if host in json.dumps(x)), None) or (sites[0] if len(sites) == 1 else None)
     if not pick or not pick.get("site_tag"):
-        raise RuntimeError("I could not find your site in Cloudflare Web Analytics.")
+        raise RuntimeError(f"Cloudflare lists {len(sites)} Web Analytics site(s) but none matches {host}. If you know the site tag, send /webtag TAG")
     cfg["site_tag"] = pick["site_tag"]
     return cfg["site_tag"]
 
@@ -8450,6 +8456,13 @@ def on_message(msg, st):
         cmd_count(st)
     elif text == "/viral":
         cmd_viral(st)
+    elif text.startswith("/webtag"):
+        _p = raw.split()
+        if len(_p) > 1 and re.fullmatch(r"[0-9a-fA-F]{32}", _p[1]) and cf_cfg():
+            cf_cfg()["site_tag"] = _p[1]
+            send("Saved the Web Analytics site tag. Send /health to check.")
+        else:
+            send("Send /webtag followed by the 32-character site tag (Cloudflare → Web Analytics → your site → Manage site → the token in the JS snippet).")
     elif text == "/selftest":
         cmd_selftest(st)
     elif text.startswith("/synctitles"):
