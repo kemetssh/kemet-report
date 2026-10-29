@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.148"
+BOT_VERSION = "v10.149"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -11508,8 +11508,12 @@ def cmd_articles(st):
                 send(f"📎 \"{t_[:70]}\" matches the article \"{best['title'][:70]}\", which now shows a film that belongs to another article. Show this film on it?",
                      [[btn("✅ Attach it to the article", pid_, "va")], [btn("No", pid_, "cs")]])
             else:
-                send(f"• \"{t_[:80]}\": " + (f"its closest article is \"{best['title'][:60]}\", which already has its own film, so I leave both as they are. Send /articles after you decide if it deserves an article of its own." if best and title_overlap(t_, best["title"]) >= 0.5
-                                                else "no article covers it yet, but it is not among your top videos to write now."))
+                pid_ = new_pid(st)
+                st["props"][pid_] = {"type": "afterart", "c": {"id": v["id"], "title": t_, "avoid": (best["title"] + ". " + best.get("desc", "")) if best and title_overlap(t_, best["title"]) >= 0.5 else ""}, "created": time.time()}
+                send(f"• \"{t_[:80]}\": " + (f"its closest article is \"{best['title'][:60]}\", which already has its own film, so it is a second film on the same story. " if best and title_overlap(t_, best["title"]) >= 0.5
+                                                else "no article covers it yet. ") +
+                     "You can give it an article of its own (I research a different angle, so it does not repeat the other one), or leave it without.",
+                     [[btn("✍️ Write its own article", pid_, "gw")], [btn("Leave it", pid_, "cs")]])
         return
     cands = cands + nxt[:3]
     pid = new_pid(st)
@@ -11556,6 +11560,9 @@ def write_article(c, st):
         print("research:", clean(e)[:120])
         facts, unverified = "", True
     prompt = ARTICLE_PROMPT.format(title=v["title"], desc=v["desc"][:700], about=about + (" Claims: " + "; ".join(claims) if claims else ""))
+    if c.get("avoid"):
+        prompt += ("\n\nANOTHER ARTICLE ON THIS STORY ALREADY EXISTS: \"" + str(c["avoid"])[:300] + "\". Write a clearly DIFFERENT angle: a different title, a different opening, "
+                   "different section topics (for example the people, the tools, the daily work, or what the unfinished state teaches), and do not repeat its wording or its structure.")
     if facts:
         prompt += "\n\nFACT SHEET (rely on it; CONFIRMED facts as plain statements; SINGLE SOURCE or DISPUTED ones with 'according to' or 'most likely'):\n" + facts[:7000]
     art = None
