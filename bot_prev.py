@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.146"
+BOT_VERSION = "v10.148"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -6676,7 +6676,8 @@ def health_site(lines):
     if cf_cfg():
         try:
             w_ = site_stats(1)
-            lines.append(f"✓ Website visitors (Cloudflare): {w_['views']} page views and {w_['visits']} visits in the last 24 hours")
+            lines.append(f"✓ Website visitors (Cloudflare): {w_['views']} page views and {w_['visits']} visits in the last 24 hours" +
+                         (" (if your Cloudflare dashboard shows visitors, send /webtest and copy me the answer)" if not w_["views"] else ""))
         except PermissionError:
             lines.append("⚠️ Website visitors: " + CF_PERM_HELP)
         except Exception as e:
@@ -6859,7 +6860,7 @@ def numbers_report(tok=None, fix=True):
                 lines.append(f"⚠️ {len(orphan)} article film(s) are no longer on your channel (deleted or private): send /fixvideos")
                 problems.append("article films missing from channel: " + str(len(orphan)))
             if len(noart) != sharing + len(none) and not orphan:
-                lines.append(f"ℹ️ {len(noart)} videos without an article vs {sharing + len(none)} articles without their own film: these differ because of the {c['total'] - len(by)} unused videos")
+                lines.append(f"ℹ️ Why {c['total']} videos but {arts} articles: {len(by) - len(orphan)} films are used by articles, {sharing + len(none)} article(s) have no film of their own, and {len(noart)} video(s) are used by no article. Attaching each unused video to the article that lacks a film (/articles, then tap Attach) makes them match.")
             else:
                 lines.append(f"✓ It adds up: {c['total']} videos = {len(by) - len(orphan)} with an article + {len(noart)} without. {arts} articles = {len(by)} films + {sharing + len(none)} that still need their own film.")
         except Exception as e:
@@ -6929,13 +6930,31 @@ def selftest_checks(deep=True):
         add(False, "Help menu", clean(e)[:90])
     try:
         kb = (STATE_FILE.stat().st_size / 1024) if STATE_FILE.exists() else 0
-        jobs = [j for j in (ST.get("jobs") or {}).values() if j.get("stage") not in ("done", "cancelled") and time.time() - j.get("created", time.time()) > 86400]
+        now_ = time.time()
+        healed = []
+        for j in (ST.get("jobs") or {}).values():                      # uploads nobody tapped for 2 days: nothing was uploaded, so cancel them
+            if j.get("stage") not in ("done", "cancelled", "uploaded") and now_ - j.get("created", now_) > 2 * 86400:
+                j["stage"] = "cancelled"
+                healed.append(j.get("name", "video"))
+        old_props = [k for k, v in (ST.get("props") or {}).items() if now_ - v.get("created", now_) > 3 * 86400]
+        if len(ST.get("props") or {}) > 150:                           # old untapped buttons pile up: drop the ones older than 3 days
+            for k in old_props:
+                ST["props"].pop(k, None)
+        else:
+            old_props = []
+        jobs = [j for j in (ST.get("jobs") or {}).values() if j.get("stage") not in ("done", "cancelled") and now_ - j.get("created", now_) > 86400 and j.get("stage") != "uploaded"]
         fq = (mem().get("fixq") or {}).get("items") or []
-        add(kb < 3000 and not jobs, "Bot memory", f"{kb:.0f} KB, {len(ST.get('props') or {})} open buttons, {len(jobs)} stuck upload(s), fix-all queue {len(fq)}")
+        n_props = len(ST.get("props") or {})
+        note = (f"; cleaned {len(healed)} abandoned upload(s)" if healed else "") + (f"; removed {len(old_props)} old buttons" if old_props else "")
+        add(kb < 3000 and not jobs and n_props < 400, "Bot memory", f"{kb:.0f} KB, {n_props} open buttons, {len(jobs)} stuck upload(s), fix-all queue {len(fq)}{note}")
     except Exception as e:
         add(False, "Bot memory", clean(e)[:90])
-    lg = [x for x in (mem().get("errlog") or []) if time.time() - x["ts"] < 86400]
-    if lg:
+    lg_all = [x for x in (mem().get("errlog") or []) if time.time() - x["ts"] < 86400]
+    busy = [x for x in lg_all if re.search(r"AI is busy|free limit|overloaded|Gemini failed|HTTP 429|HTTP 503", x["err"], re.I)]
+    lg = [x for x in lg_all if x not in busy]                           # Google being busy is temporary, not a bug in the bot
+    if busy and not lg:
+        add(True, "Errors in the last 24 hours", f"none, only {len(busy)} time(s) Google's AI was busy (temporary, nothing lost)")
+    elif lg:
         cnt = {}
         for x in lg:
             k = (x["where"] or x["err"])[:60]
@@ -7194,7 +7213,12 @@ def ref_kind(host):
     return h
 
 
-def site_stats(days=7):
+WEB_TAGS_Q = """query($acc: String!, $since: Time!, $until: Time!) { viewer { accounts(filter: {accountTag: $acc}) {
+ g: rumPageloadEventsAdaptiveGroups(filter: {datetime_geq: $since, datetime_leq: $until}, limit: 20, orderBy: [count_DESC]) { count dimensions { siteTag } }
+} } }"""
+
+
+def site_stats(days=7, _retry=True):
     """Website visitors from Cloudflare Web Analytics: views, visits, top pages, where visitors came from."""
     if not cf_cfg():
         raise RuntimeError("Cloudflare is not connected (/cfsetup).")
@@ -7206,12 +7230,54 @@ def site_stats(days=7):
     acc = ((d.get("viewer") or {}).get("accounts") or [{}])[0]
     tot = (acc.get("total") or [{}])[0] if acc.get("total") else {}
     views, visits = int(tot.get("count", 0) or 0), int(((tot.get("sum") or {}).get("visits", 0)) or 0)
+    if views == 0 and _retry:                              # zero for this tag: see which Web Analytics site tags really have visitors
+        try:
+            d2 = cf_graphql(WEB_TAGS_Q, {"acc": cfg["account"], "since": fmt(now - days * 86400), "until": fmt(now)})
+            g = ((((d2.get("viewer") or {}).get("accounts") or [{}])[0]).get("g")) or []
+            live = [(int(x.get("count", 0)), (x.get("dimensions") or {}).get("siteTag", "")) for x in g if int(x.get("count", 0)) > 0]
+            if len(live) == 1 and live[0][1] != tag:
+                cfg["site_tag"] = live[0][1]
+                return site_stats(days, _retry=False)
+            if live and not any(t == tag for _, t in live):
+                raise RuntimeError(f"visitors exist on {len(live)} Web Analytics sites but none is tag {tag[:6]}…; send /webtag with the right tag")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            print("web tags:", clean(e)[:100])
     pages = [((g.get("dimensions") or {}).get("requestPath", "?"), int(g.get("count", 0))) for g in (acc.get("pages") or [])]
     refs = {}
     for g in acc.get("refs") or []:
         k = ref_kind((g.get("dimensions") or {}).get("refererHost", ""))
         refs[k] = refs.get(k, 0) + int(g.get("count", 0))
     return {"days": days, "views": views, "visits": visits, "pages": pages, "refs": sorted(refs.items(), key=lambda kv: -kv[1])}
+
+
+def cmd_webtest():
+    """Diagnosis for website visitors: which Web Analytics sites Cloudflare lists, and the raw answer to the visitors query."""
+    cfg = cf_cfg()
+    if not cfg:
+        return send("Cloudflare is not connected (/cfsetup).")
+    out = ["🔬 Website visitors test"]
+    try:
+        r = S.get(f"{CF_API}/accounts/{cfg['account']}/rum/site_info/list", params={"per_page": 20}, headers={"Authorization": "Bearer " + cfg["token"]}, timeout=40)
+        j = r.json()
+        sites = j.get("result") or []
+        out.append(f"Sites listed: {len(sites)} (HTTP {r.status_code}, success={j.get('success')})")
+        for x in sites[:5]:
+            out.append("• " + json.dumps({k: x.get(k) for k in ("site_tag", "host", "auto_install", "created")} | {"ruleset": (x.get("ruleset") or {}).get("zone_name")})[:240])
+    except Exception as e:
+        out.append("Site list failed: " + clean(e)[:150])
+    out.append("Tag in use: " + str(cfg.get("site_tag", "(not saved yet)")))
+    for days in (1, 7):
+        try:
+            now = time.time()
+            fmt = lambda t: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+            d = cf_graphql(WEB_Q, {"acc": cfg["account"], "tag": cf_site_tag(), "since": fmt(now - days * 86400), "until": fmt(now)})
+            acc = ((d.get("viewer") or {}).get("accounts") or [{}])[0]
+            out.append(f"Last {days} day(s): total={json.dumps(acc.get('total'))[:120]} pages={len(acc.get('pages') or [])} refs={len(acc.get('refs') or [])}")
+        except Exception as e:
+            out.append(f"Last {days} day(s) failed: " + clean(e)[:200])
+    send("\n".join(out)[:3800])
 
 
 def web_block(days=7):
@@ -8456,6 +8522,8 @@ def on_message(msg, st):
         cmd_count(st)
     elif text == "/viral":
         cmd_viral(st)
+    elif text == "/webtest":
+        cmd_webtest()
     elif text.startswith("/webtag"):
         _p = raw.split()
         if len(_p) > 1 and re.fullmatch(r"[0-9a-fA-F]{32}", _p[1]) and cf_cfg():
