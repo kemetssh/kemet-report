@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.144"
+BOT_VERSION = "v10.146"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -11338,7 +11338,9 @@ def cmd_articlelinks(st):
     for k in range(0, len(ids), 50):                      # YouTube answers at most 50 videos per request
         for i in yt_get("videos", tok, part="snippet", id=",".join(ids[k:k + 50])).get("items", []):
             items[i["id"]] = i["snippet"]
-    pending = {p.get("video_id") for p in st["props"].values() if p.get("type") == "alb"}
+    for k_ in [k for k, p in st["props"].items() if p.get("type") in ("alb", "ala")]:      # old untapped cards: show them again instead of silently skipping those videos
+        st["props"].pop(k_, None)
+    pending = set()
     notlive, have, pids = [], 0, []
     for vid, a in arts.items():
         url = f"{SITE_BASE}/articles/{a['slug']}/"
@@ -11371,7 +11373,7 @@ def cmd_articlelinks(st):
     if notlive:
         msg.append("Not live on the site yet (upload the zip first): " + "; ".join(notlive[:5]))
     if have:
-        msg.append(f"{have} video(s) already link to their article. ✅")
+        msg.append(f"{have} of {have + len(pids)} video(s) already link to their article." + (" ✅" if not pids else f" {len(pids)} still need it (below)."))
     if not pids:
         send("\n".join(msg) or "Nothing to add right now.")
     elif msg:
@@ -11388,12 +11390,15 @@ def cmd_articles(st):
     vids = all_videos(tok)   # every upload, not only the newest 50
     done = dict(mem().get("articles") or {})
     site_titles, similar = [], []
+    groups_, cat_, own_film = {}, [], set()
     try:                                                    # articles already in the site count too, even if they were made before the bot or on another film
         with tempfile.TemporaryDirectory() as d_:
             root_ = site_zip_from(sz["file_id"], d_)
             for vid_, slug_ in vid_slug_map(root_).items():
                 done.setdefault(vid_, {"slug": slug_})
-            site_titles = [c["title"] for c in site_catalog(root_)]
+            cat_ = site_catalog(root_)
+            site_titles = [c["title"] for c in cat_]
+            groups_ = article_video_groups(root_)[0]
     except Exception as e:
         print("articles site scan:", clean(e)[:100])
 
@@ -11421,7 +11426,23 @@ def cmd_articles(st):
     except Exception as e:
         print("next in series:", clean(e)[:100])
     if not cands and not nxt:
-        return send("Every video I can see already has an article. 🎉")
+        unused = [v for v in vids if v["id"] not in groups_]       # videos no article shows as its film (the same list /health counts)
+        if not unused:
+            return send("Every video has an article and every article has its own film. 🎉")
+        send(f"No NEW article is needed, but {len(unused)} video(s) are not the film of any article (this is the same count /health shows):")
+        for v in unused[:3]:
+            t_ = v["snippet"]["title"]
+            best = max(cat_, key=lambda c: title_overlap(t_, c["title"]), default=None)
+            film = next((f for f, a in groups_.items() if best and any(x[0] == best["slug"] for x in a)), None)
+            if best and title_overlap(t_, best["title"]) >= 0.5 and film and len(groups_[film]) > 1:
+                pid_ = new_pid(st)
+                st["props"][pid_] = {"type": "attach", "slug": best["slug"], "title": best["title"], "vid": v["id"], "created": time.time()}
+                send(f"📎 \"{t_[:70]}\" matches the article \"{best['title'][:70]}\", which now shows a film that belongs to another article. Show this film on it?",
+                     [[btn("✅ Attach it to the article", pid_, "va")], [btn("No", pid_, "cs")]])
+            else:
+                send(f"• \"{t_[:80]}\": " + (f"its closest article is \"{best['title'][:60]}\", which already has its own film, so I leave both as they are. Send /articles after you decide if it deserves an article of its own." if best and title_overlap(t_, best["title"]) >= 0.5
+                                                else "no article covers it yet, but it is not among your top videos to write now."))
+        return
     cands = cands + nxt[:3]
     pid = new_pid(st)
     st["props"][pid] = {"type": "articles", "cands": cands, "ts": time.time()}
