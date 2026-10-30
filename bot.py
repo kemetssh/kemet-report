@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.150"
+BOT_VERSION = "v10.151"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -590,8 +590,54 @@ class GeminiBusy(RuntimeError):
     pass
 
 
+G_CACHE_FNS = {"cmd_comments", "cmd_asked", "nb_scan", "nb_comp", "cmd_hook", "cmd_demand", "cmd_refresh", "cmd_praise",
+               "cmd_voice", "cmd_audit", "cmd_playlists", "cmd_needvideos", "cmd_funnel", "cmd_collab"}   # same input in = same answer is fine here
+_G_SKIP = {"_gpost", "gemini", "gemini_text", "_gemini_text", "_gcaller", "_guse", "gemini_upload"}
+
+
+def _gcaller():
+    try:
+        f = sys._getframe(1)
+        while f is not None:
+            if f.f_code.co_name not in _G_SKIP:
+                return f.f_code.co_name
+            f = f.f_back
+    except Exception:
+        pass
+    return "?"
+
+
+def _guse(kind, caller=None):
+    """Count Gemini requests per day (ok / refused / skipped) and who made them; shown in /health."""
+    try:
+        d = time.strftime("%Y-%m-%d", time.gmtime())
+        g = mem().setdefault("gusage", {})
+        day = g.setdefault(d, {"ok": 0, "busy": 0, "skip": 0, "saved": 0, "by": {}})
+        day[kind] = day.get(kind, 0) + 1
+        if caller and kind in ("ok", "busy"):
+            day["by"][caller] = day["by"].get(caller, 0) + 1
+        if kind == "ok":
+            g["last_ok"] = time.time()
+        for k in sorted(k for k in g if k[:2] == "20")[:-7]:
+            g.pop(k, None)
+    except Exception:
+        pass
+
+
+def gemini_today():
+    g = (mem().get("gusage") or {}).get(time.strftime("%Y-%m-%d", time.gmtime())) or {}
+    return {"ok": g.get("ok", 0), "busy": g.get("busy", 0), "skip": g.get("skip", 0), "saved": g.get("saved", 0), "by": g.get("by", {})}
+
+
 def _gpost(body, rounds=3):
-    """POST to Gemini with patient backoff across models. Returns response or raises GeminiBusy."""
+    """POST to Gemini with patient backoff across models. Returns response or raises GeminiBusy.
+    When Google says the DAILY free limit is used up, stop at once (cooldown) instead of hammering it."""
+    caller = _gcaller()
+    blk = mem().get("g_block") or {}
+    if blk.get("until", 0) > time.time():
+        _guse("skip")
+        raise GeminiBusy("Google's AI is at its free limit right now" + (" for today" if blk.get("why") == "day" else "")
+                         + ". Nothing was lost: send it again later (about " + str(max(1, int((blk["until"] - time.time()) / 60))) + " min).")
     last = "no model answered"
     busy = False
     for rnd in range(rounds):
@@ -601,6 +647,14 @@ def _gpost(body, rounds=3):
             if r.status_code in (429, 500, 502, 503, 504):
                 last = f"{m} HTTP {r.status_code}"
                 busy = True
+                _guse("busy", caller)
+                try:
+                    txt = r.text or ""
+                except Exception:
+                    txt = ""
+                if r.status_code == 429 and ("PerDay" in txt or "per day" in txt.lower()):
+                    mem()["g_block"] = {"until": time.time() + 3 * 3600, "why": "day"}
+                    raise GeminiBusy("Google's AI used up today's free limit. Nothing was lost: it resets daily, send it again later.")
                 try:
                     wait = float(r.headers.get("Retry-After", 0))
                 except ValueError:
@@ -611,8 +665,10 @@ def _gpost(body, rounds=3):
                 last = f"{m} not found"
                 continue
             r.raise_for_status()
+            _guse("ok", caller)
             return r
     if busy:
+        mem()["g_block"] = {"until": time.time() + 90, "why": "minute"}      # everything refused: give Google 90 s before asking again
         raise GeminiBusy("Google's AI is busy or at its free limit right now. Nothing was lost: send it again in a few minutes.")
     raise RuntimeError(f"Gemini failed: {last}")
 
@@ -620,6 +676,13 @@ def _gpost(body, rounds=3):
 def gemini(parts):
     body = {"contents": [{"parts": parts}],
             "generationConfig": {"responseMimeType": "application/json"}}
+    ck = None
+    if _gcaller() in G_CACHE_FNS and all(set(p) == {"text"} for p in parts):
+        ck = hashlib.sha1(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:16]
+        hit = (mem().get("gcache") or {}).get(ck)
+        if hit and time.time() - hit.get("ts", 0) < 24 * 3600:
+            _guse("saved")
+            return json.loads(json.dumps(hit["v"]))
     last = None
     for _try in range(2):                      # one fresh answer if the first one is not clean JSON
         r = _gpost(body)
@@ -627,9 +690,16 @@ def gemini(parts):
         text = "".join(p.get("text", "") for p in cand)
         a = text.find("{")
         try:
-            return json.JSONDecoder().raw_decode(text[a:])[0]      # first complete object; extra text after it is ignored
+            v = json.JSONDecoder().raw_decode(text[a:])[0]      # first complete object; extra text after it is ignored
         except ValueError as e:
             last = e
+            continue
+        if ck:
+            gc = mem().setdefault("gcache", {})
+            gc[ck] = {"ts": time.time(), "v": v}
+            for k in sorted(gc, key=lambda k: gc[k].get("ts", 0))[:-25]:
+                gc.pop(k, None)
+        return v
     raise RuntimeError("Gemini sent an answer I could not read (" + clean(last)[:60] + ")")
 
 
@@ -7402,7 +7472,15 @@ def cmd_health(st):
             lines.append(f"✗ {name}: {clean(e)[:90]}")
 
     chk("Telegram", lambda: "@" + tg("getMe")["username"])
-    chk("Gemini", lambda: "answering" if gemini_text("Reply with the word ok")[0] else "empty answer")
+    def gem_chk():
+        gt = gemini_today()
+        if time.time() - ((mem().get("gusage") or {}).get("last_ok", 0)) < 900:          # it answered a real job minutes ago: no test call needed
+            return "answering"
+        return "answering" if gemini_text("Reply with the word ok")[0] else "empty answer"
+    chk("Gemini", gem_chk)
+    gt = gemini_today()
+    top = ", ".join(f"{k} {v}" for k, v in sorted(gt["by"].items(), key=lambda x: -x[1])[:3])
+    lines.append(f"   Gemini today: {gt['ok']} answered, {gt['busy']} refused, {gt['skip']} skipped while at limit, {gt['saved']} reused" + (f" (most: {top})" if top else ""))
 
     def login():
         tok["t"] = yt_token()
@@ -7605,6 +7683,52 @@ Recent videos with views per day (best first): {rows}
 Write 3 stronger OPENING LINES (spoken in the first 3 seconds) for the NEXT Short, each on a different Ancient Egypt topic that fits what works. Each is one sentence, true, specific, starts with the surprise or the question, no clickbait lies.
 Also say in one line what the best videos' openings seem to share (judging only from the titles and numbers).
 Return JSON only: {{"pattern": "", "hooks": [{{"topic": "", "line": ""}}]}}"""
+
+
+FLOW_PROMPT = """You write prompts for Google Flow (an AI video maker; each clip is 8 seconds, vertical 9:16, no speech needed).
+The channel "Kemet | Ancient Egypt" has this Short: {title}
+About it: {about}
+
+Plan {n} scenes that together show the story as moody, cinematic documentary atmosphere. Rules:
+- Period-accurate: only objects, clothing, buildings and light that really existed in that time. No modern items, no text, no logos, no writing, no faces of real people.
+- Same visual style in every scene so the clips cut together: warm desert light, stone, dust, torchlight, handheld documentary feel.
+- These are atmosphere only, NEVER evidence: do not show a fake artefact as if it were a real find.
+- One clear subject and one slow camera move per scene.
+Return JSON only: {{"style": "one line: the style shared by all scenes", "scenes": [{{"title": "3-5 words", "prompt": "the full ready-to-paste prompt, 2-4 sentences: subject, action, camera, lighting, style. End with: Vertical 9:16, 8 seconds, no text, no logos."}}]}}"""
+
+
+def cmd_flow(st, raw="/flow"):
+    """Ready-to-paste Google Flow prompts for the scenes of a Short (latest Short, or the video in a link)."""
+    arg = raw.partition(" ")[2].strip()
+    tok = yt_token()
+    vids = all_videos(tok)
+    pick = None
+    m = YT_LINK.search(arg)
+    if m:
+        pick = next((v for v in vids if v["id"] == m.group(1)), None)
+    elif arg:
+        pick = {"id": "", "snippet": {"title": arg[:100], "description": ""}}
+    else:
+        for v in vids:
+            if iso_dur(v.get("contentDetails", {}).get("duration", "")) <= 180:
+                pick = v
+                break
+        pick = pick or (vids[0] if vids else None)
+    if not pick:
+        return send("I could not find a video. Send /flow with a link or a topic, like /flow the Sphinx's lost chamber.")
+    sn = pick["snippet"]
+    n = 5
+    out = gemini([{"text": FLOW_PROMPT.format(n=n, title=sn["title"], about=(sn.get("description") or "")[:600])}])
+    scenes = [x for x in (out.get("scenes") or []) if isinstance(x, dict) and str(x.get("prompt", "")).strip()][:6]
+    if not scenes:
+        return send("I could not write scene prompts right now. Try again later.")
+    send(f"🎬 Google Flow prompts for: {sn['title']}\n\n{len(scenes)} clips x 8 s = about {len(scenes) * 8} s of Flow credits.\n"
+         f"Shared style: {str(out.get('style', ''))[:200]}\n\n"
+         "Paste each message below into Flow (vertical 9:16). Then send me the finished clips and I check them like any video.\n"
+         "Before publishing: turn the YouTube AI / altered-content label ON. These clips are atmosphere only, never evidence.")
+    for i, sc in enumerate(scenes, 1):
+        send(str(sc["prompt"]).strip()[:1500])
+    send("✅ That is all. Order of scenes: " + " → ".join(f"{i}. {str(sc.get('title', ''))[:30]}" for i, sc in enumerate(scenes, 1)))
 
 
 def cmd_hook(st):
@@ -8217,6 +8341,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/community - posts to share your newest video\n"
         "/starter - a comment-getting question\n"
         "/sublines - rotate the subscribe line, learn what works\n"
+        "/flow - Google Flow prompts for a Short's scenes\n"
         "/hook - 3 opening lines for your next Short\n"
         "/goal 100 - set a subscriber goal and track it\n"
         "/demand - what people search for\n/count - exact number of videos\n"
@@ -8462,6 +8587,8 @@ def on_message(msg, st):
         cmd_demand(st, text)
     elif text.startswith("/goal"):
         cmd_goal(st, text)
+    elif text == "/flow" or text.startswith("/flow "):
+        cmd_flow(st, text)
     elif text == "/health":
         cmd_health(st)
     elif text == "/pause":
@@ -11907,6 +12034,7 @@ def main():
             {"command": "community", "description": "Share video in Reddit/Facebook groups"},
             {"command": "starter", "description": "Comment question for latest video"},
             {"command": "sublines", "description": "Test subscribe wording"},
+            {"command": "flow", "description": "Google Flow prompts for a Short"},
             {"command": "hook", "description": "Opening lines for next Short"},
             {"command": "goal", "description": "Subscriber goal tracker"},
             {"command": "demand", "description": "What people search for"},
