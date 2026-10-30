@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.149"
+BOT_VERSION = "v10.150"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -10717,7 +10717,7 @@ def pack_site(root, d, caption):
     if cf_cfg():
         caption = re.sub(r"Unzip and upload the CONTENTS to Cloudflare Pages( as Production)?\.", "Tap 🚀 Publish below to put it live.", caption)
     import zipfile
-    zp = Path(d) / f"kemet-site-{datetime.datetime.now().strftime('%Y%m%d-%H%M')}.zip"
+    zp = Path(d) / f"kemet-site-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
     with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in sorted(root.rglob("*")):
             if f.is_file():
@@ -11313,6 +11313,7 @@ def cmd_fixvideos(st):
             return send("Every article has its own film. ✅")
         vids = all_videos(tok)
         vt = {v["id"]: v["snippet"]["title"] for v in vids}
+        free_vt = {i: t for i, t in vt.items() if i not in by}          # only films that no article shows yet: a film taken from another article just moves the problem
         todo = []
         for vid, arts in same.items():
             keep = max(arts, key=lambda a: title_overlap(a[1], vt.get(vid, "")))
@@ -11320,10 +11321,13 @@ def cmd_fixvideos(st):
                 if slug == keep[0]:
                     continue
                 art = page_article((root / "articles" / slug / "index.html").read_text(encoding="utf-8"))[0]
-                lst = "\n".join(f"{i} | {t[:90]}" for i, t in vt.items() if i != vid)[:14000]
+                lst = "\n".join(f"{i} | {t[:90]}" for i, t in free_vt.items() if i != vid)[:14000]
                 try:
-                    j = gemini([{"text": REVIDEO_PROMPT.format(title=title, deck=art.get("deck", "")[:400], vids=lst, exclude=vid)}])
-                    picks = [p for p in (j.get("picks") or []) if p in vt and p != vid][:3]
+                    if not lst:
+                        picks = []
+                    else:
+                        j = gemini([{"text": REVIDEO_PROMPT.format(title=title, deck=art.get("deck", "")[:400], vids=lst, exclude=vid)}])
+                        picks = [p for p in (j.get("picks") or []) if p in free_vt and p != vid][:3]
                 except Exception as e:
                     print("revideo picks:", clean(e)[:100])
                     picks = None                           # the AI failed: this is not the same as "no match"
@@ -11341,7 +11345,7 @@ def cmd_fixvideos(st):
         st["props"][pid] = {"type": "revideo", "item": it, "vt": {p: vt[p] for p in it["picks"]}, "created": time.time()}
         rows = [[btn("🎬 " + vt[p][:44], pid, "vp", str(i))] for i, p in enumerate(it["picks"])] + [[btn("Keep as it is", pid, "cs")]]
         send(f"📎 \"{it['title']}\" shows the film \"{vt.get(it['old'], it['old'])[:60]}\", which is better kept on the article about it. " +
-             ("Best matching film(s) on your channel:" if it["picks"] else "I found no clearly matching film on your channel, so I suggest leaving it."), rows)
+             ("Best matching film(s) that no other article uses yet:" if it["picks"] else "No unused film on your channel fits it, and taking one from another article would only move the problem. It needs its own video: send /needvideos for ideas, and when you upload it I attach it for you."), rows)
     if len(rpids) > 1:
         pa = new_pid(st)
         st["props"][pa] = {"type": "reva", "pids": rpids, "created": time.time()}
@@ -11633,7 +11637,7 @@ def write_article(c, st):
                 sm_.write_text(s_.replace("</urlset>", "".join(f"  <url><loc>{SITE_BASE}{u}</loc>\n    <lastmod>{today_}</lastmod></url>\n" for u in ["/playlists/"] + bu) + "</urlset>"), encoding="utf-8")
         except Exception as e:
             print("hubs:", clean(e)[:120])
-        zp = Path(d) / f"kemet-site-{datetime.datetime.now().strftime('%Y%m%d-%H%M')}.zip"
+        zp = Path(d) / f"kemet-site-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
         import zipfile
         with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in sorted(root.rglob("*")):
