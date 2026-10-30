@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.153"
+BOT_VERSION = "v10.154"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -6092,7 +6092,7 @@ FB_SETUP_HELP = (
     "Leave the app in Development mode: that is enough for your own Page.\n"
     "3. App settings → Basic. Copy the App ID. Tap Show next to App Secret and copy it too.\n"
     "4. Open developers.facebook.com/tools/explorer → pick your app → in Permissions add: pages_show_list, pages_read_engagement, "
-    "pages_manage_posts, publish_video, pages_manage_engagement → Generate Access Token → Continue as you → select your Kemet Page → Done. Copy the Access Token.\n"
+    "pages_manage_posts, publish_video, pages_manage_engagement, pages_read_user_content → Generate Access Token → Continue as you → select your Kemet Page → Done. Copy the Access Token.\n"
     "5. Send me ONE message (I delete it at once):\n"
     "/fbconnect APP_ID APP_SECRET ACCESS_TOKEN\n\n"
     "I swap it for a long-lasting Page key, keep it encrypted in my notes, and confirm the Page name. /fboff removes it. "
@@ -6252,13 +6252,16 @@ def fb_open_comments(cfg, cap=12):
     items, errs = fb_items(cfg)
     got = []
     done = set(mem().get("fbseen") or [])
+    stats = mem()["fb_last"] = {"items": len(items), "seen": 0, "claimed": 0}
     for pid_, title in items:
         try:
-            j = fb_call("GET", f"{pid_}/comments", params={"access_token": cfg["token"], "limit": 25, "filter": "toplevel",
+            j = fb_call("GET", f"{pid_}/comments", params={"access_token": cfg["token"], "limit": 25, "filter": "toplevel", "summary": "true",
                                                           "fields": "id,message,from,created_time,comment_count"})
         except Exception as e:
             errs.append(clean(e)[:100])
             continue
+        stats["claimed"] += int((j.get("summary") or {}).get("total_count", 0) or 0)
+        stats["seen"] += len(j.get("data", []))
         for c in j.get("data", []):
             if c["id"] in done or not (c.get("message") or "").strip():
                 continue
@@ -6282,7 +6285,12 @@ def cmd_fbcomments(st):
     send("Checking Facebook comments on your Page...")
     items, errs = fb_open_comments(cfg)
     if not items:
-        return send("No Facebook comments are waiting for a reply." + (f"\n(Facebook said: {errs[0]})" if errs else ""))
+        fl = mem().get("fb_last") or {}
+        why = (f"\nI looked at {fl.get('items', 0)} recent posts/reels and could read {fl.get('seen', 0)} comments (Facebook counts {fl.get('claimed', 0)})." if fl else "")
+        if fl.get("claimed", 0) > fl.get("seen", 0) or (fl.get("items", 0) == 0):
+            why += ("\n⚠️ Facebook is hiding comments from me: the Page key lacks permission to read what viewers write "
+                    "(pages_read_user_content) or lists your reels. Send /fbsetup, add pages_read_user_content and pages_manage_engagement in step 4, then /fbconnect again.")
+        return send("No Facebook comments are waiting for a reply." + why + (f"\n(Facebook said: {errs[0]})" if errs else ""))
     seen = mem().setdefault("fbseen", [])
     out = gemini([{"text": COMMENTS_PROMPT + json.dumps(items)}])
     by = {i["id"]: i for i in items}
