@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.152"
+BOT_VERSION = "v10.153"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -3181,12 +3181,12 @@ def on_prop(jid, act, st):
         mem()["dismissed"] = (mem().get("dismissed", []) + [prop.get("key", prop["parent"])])[-1500:]
         st["props"].pop(jid, None)
         return send("✅ Reply posted.")
-    if act == "fc" and kind == "fbcomment":
+    if act == "fbr" and kind == "fbcomment":
         fb_post_reply(prop["cid"], prop["reply"])
         mem()["fbseen"] = ((mem().get("fbseen") or []) + [prop["cid"]])[-1500:]
         st["props"].pop(jid, None)
         return send("✅ Reply posted on Facebook.")
-    if act == "fk" and kind == "fbcomment":
+    if act == "fbn" and kind == "fbcomment":
         mem()["fbseen"] = ((mem().get("fbseen") or []) + [prop["cid"]])[-1500:]
         st["props"].pop(jid, None)
         return send("Skipped.")
@@ -4177,7 +4177,7 @@ def factcheck_job(job, gate=False):
         text, sources = gemini_text(FACT_PROMPT.format(claims=json.dumps(claims[:9])), search=True)
     except Exception as e:
         print("factcheck failed:", clean(e)[:120])
-        send("Google's AI is overloaded right now (error 503), so the fact-check could not run. Nothing was uploaded.")
+        send("Google's AI is overloaded or at its free limit right now, so the fact-check could not run. Nothing was uploaded.")
         return None
     res = [r for r in parse_obj(text).get("results", []) if r.get("claim")]
     if not res:
@@ -4708,6 +4708,34 @@ def cmd_brief(st, force=False):
     send("☀️ Your daily brief\n\n" + "\n".join(lines), rows)
 
 
+def retry_factchecks(st):
+    """A video whose fact-check hit a busy Google is retried by itself every 5 minutes (6 times); the owner is told the result."""
+    now = time.time()
+    for jid, job in list((st.get("jobs") or {}).items()):
+        ar = job.get("auto_retry")
+        if not ar or ar.get("next", 0) > now:
+            continue
+        if job.get("stage") != "confirm":
+            job.pop("auto_retry", None)
+            continue
+        ar["n"] = ar.get("n", 0) + 1
+        ar["next"] = now + 300
+        blk = mem().get("g_block") or {}
+        if blk.get("until", 0) > now:
+            continue                                    # Google is still refusing: do not even ask
+        bad = factcheck_job(job, gate=True)
+        if bad is None:
+            if ar["n"] >= 6:
+                job.pop("auto_retry", None)
+                send("I could not reach Google's AI for 30 minutes. Choose:",
+                     [[btn("🔁 Check again", jid, "u")], [btn("⬆️ Upload private anyway", jid, "ug")], [btn("Cancel", jid, "x")]])
+            continue
+        job.pop("auto_retry", None)
+        if not bad:
+            send("✅ The fact-check passed. Tap to upload it as private.",
+                 [[btn("⬆️ Upload private", jid, "ug")], [btn("Cancel", jid, "x")]])
+
+
 def housekeeping(st):
     if st.get("paused"):
         return
@@ -4717,6 +4745,10 @@ def housekeeping(st):
         send_due_reminders()
     except Exception as e:
         print("reminders:", clean(e)[:100])
+    try:
+        retry_factchecks(st)
+    except Exception as e:
+        print("factcheck retry:", clean(e)[:100])
     try:
         rcs = m.get("recheck")
         if rcs and rcs.get("auto"):
@@ -6278,7 +6310,7 @@ def cmd_fbcomments(st):
         pid = new_pid(st)
         st["props"][pid] = {"type": "fbcomment", "cid": it["id"], "reply": reply, "created": time.time()}
         send(f"📘 {it['author']} on \"{it['video']}\":\n{it['text']}{extra}\n\nDraft reply:\n{reply}",
-             [[btn("✅ Post reply", pid, "fc"), btn("Skip", pid, "fk")]])
+             [[btn("✅ Post reply", pid, "fbr"), btn("Skip", pid, "fbn")]])
     del seen[:-1500]
     if not drafts:
         send("Nothing here is worth a reply (spam or abuse).")
@@ -8807,7 +8839,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "fc", "fk", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "fbr", "fbn", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -8861,8 +8893,16 @@ def on_callback(cb, st):
         bad = factcheck_job(job, gate=True)
         job["stage"] = "confirm"
         if bad is None:
-            return send("Choose: check again in a minute, or upload anyway (it is private, so nothing is public).",
+            ar = job.get("auto_retry") or {"n": 0}
+            if ar["n"] < 6:
+                job["auto_retry"] = {"n": ar["n"], "next": time.time() + 300}
+                note = f"I will retry the fact-check by myself every 5 minutes (up to {6 - ar['n']} more times) and message you with the result. Nothing uploads without a clean check or your tap."
+            else:
+                job.pop("auto_retry", None)
+                note = "I stopped retrying after 30 minutes."
+            return send(note + "\nOr choose now:",
                         [[btn("🔁 Check again", jid, "u")], [btn("⬆️ Upload private anyway", jid, "ug")], [btn("Cancel", jid, "x")]])
+        job.pop("auto_retry", None)
         if bad:
             return      # factcheck_job showed the flagged lines with its own buttons
         return do_upload(job)
