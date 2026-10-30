@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.156"
+BOT_VERSION = "v10.157"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2859,10 +2859,16 @@ Return JSON only: {{"items": [{{"id": "...", "claim": "", "verdict": "", "eviden
 Comments: {items}"""
 
 
-def evidence_replies(held):
+FB_STYLE = ("These are FACEBOOK comments, a friendly chat place. Write like a warm person, not a textbook: 1-2 short sentences, "
+            "acknowledge what they said first (\"Great point\", \"I love that you see more in it\"), then add one true fact if useful. "
+            "Never say the evidence or data \"does not support\" them, never lecture or correct harshly; if they are vague, "
+            "ask a curious question that invites them to say more. ")
+
+
+def evidence_replies(held, extra=""):
     """One grounded call for all held-back comments. Returns ({id: result}, sources). Never raises."""
     try:
-        text, sources = gemini_text(EVIDENCE_PROMPT.format(items=json.dumps(
+        text, sources = gemini_text(extra + EVIDENCE_PROMPT.format(items=json.dumps(
             [{"id": h["id"], "video": h["video"], "text": h["text"], "thread": h.get("thread", "")} for h in held])), search=True)
         a, b = text.find("{"), text.rfind("}")
         data = json.loads(text[a:b + 1])
@@ -6304,7 +6310,7 @@ def cmd_fbcomments(st):
             why += "\n(I could not read the key's permissions: " + clean(e)[:80] + ")"
         return send("No Facebook comments are waiting for a reply." + why + (f"\n(Facebook said: {errs[0]})" if errs else ""))
     seen = mem().setdefault("fbseen", [])
-    out = gemini([{"text": COMMENTS_PROMPT + json.dumps(items)}])
+    out = gemini([{"text": FB_STYLE + COMMENTS_PROMPT + json.dumps(items)}])
     by = {i["id"]: i for i in items}
     held = []
     drafts = []
@@ -6318,7 +6324,7 @@ def cmd_fbcomments(st):
         else:
             drafts.append((it, reply, ""))
     if held:
-        ev, _src = evidence_replies(held)
+        ev, _src = evidence_replies(held, FB_STYLE)
         for h in held:
             r = ev.get(h["id"]) or {}
             reply = (r.get("reply") or "").replace('"', "'").strip()[:500]
