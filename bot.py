@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.151"
+BOT_VERSION = "v10.152"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -3181,6 +3181,15 @@ def on_prop(jid, act, st):
         mem()["dismissed"] = (mem().get("dismissed", []) + [prop.get("key", prop["parent"])])[-1500:]
         st["props"].pop(jid, None)
         return send("✅ Reply posted.")
+    if act == "fc" and kind == "fbcomment":
+        fb_post_reply(prop["cid"], prop["reply"])
+        mem()["fbseen"] = ((mem().get("fbseen") or []) + [prop["cid"]])[-1500:]
+        st["props"].pop(jid, None)
+        return send("✅ Reply posted on Facebook.")
+    if act == "fk" and kind == "fbcomment":
+        mem()["fbseen"] = ((mem().get("fbseen") or []) + [prop["cid"]])[-1500:]
+        st["props"].pop(jid, None)
+        return send("Skipped.")
     if act == "ek" and kind == "exp":
         remember("picks", prop["new"])
         st["props"].pop(jid, None)
@@ -6051,7 +6060,7 @@ FB_SETUP_HELP = (
     "Leave the app in Development mode: that is enough for your own Page.\n"
     "3. App settings → Basic. Copy the App ID. Tap Show next to App Secret and copy it too.\n"
     "4. Open developers.facebook.com/tools/explorer → pick your app → in Permissions add: pages_show_list, pages_read_engagement, "
-    "pages_manage_posts, publish_video → Generate Access Token → Continue as you → select your Kemet Page → Done. Copy the Access Token.\n"
+    "pages_manage_posts, publish_video, pages_manage_engagement → Generate Access Token → Continue as you → select your Kemet Page → Done. Copy the Access Token.\n"
     "5. Send me ONE message (I delete it at once):\n"
     "/fbconnect APP_ID APP_SECRET ACCESS_TOKEN\n\n"
     "I swap it for a long-lasting Page key, keep it encrypted in my notes, and confirm the Page name. /fboff removes it. "
@@ -6187,6 +6196,105 @@ def cmd_searchkey(msg, st, raw):
 def cmd_searchoff(st):
     mem().pop("tavily", None)
     send("Tavily key deleted from my notes. I use Google search again, then the free scholarly fallback.")
+
+
+def fb_items(cfg, limit=10):
+    """Newest Page posts, reels and videos as (id, text). A failing edge is skipped so one missing permission does not hide the rest."""
+    out, seen, errs = [], set(), []
+    for edge, fld in (("posts", "message"), ("video_reels", "description"), ("videos", "description")):
+        try:
+            j = fb_call("GET", f"{cfg['page_id']}/{edge}", params={"access_token": cfg["token"], "fields": f"id,{fld},created_time", "limit": limit})
+        except Exception as e:
+            errs.append(clean(e)[:100])
+            continue
+        for x in j.get("data", []):
+            if x["id"] not in seen:
+                seen.add(x["id"])
+                out.append((x.get("created_time", ""), x["id"], (x.get(fld) or "")[:80] or "your Facebook post"))
+    out.sort(reverse=True)
+    return [(i, t) for _, i, t in out[:limit]], errs
+
+
+def fb_open_comments(cfg, cap=12):
+    """Top-level comments on the newest posts that the Page has not answered yet."""
+    items, errs = fb_items(cfg)
+    got = []
+    done = set(mem().get("fbseen") or [])
+    for pid_, title in items:
+        try:
+            j = fb_call("GET", f"{pid_}/comments", params={"access_token": cfg["token"], "limit": 25, "filter": "toplevel",
+                                                          "fields": "id,message,from,created_time,comment_count"})
+        except Exception as e:
+            errs.append(clean(e)[:100])
+            continue
+        for c in j.get("data", []):
+            if c["id"] in done or not (c.get("message") or "").strip():
+                continue
+            if (c.get("from") or {}).get("id") == cfg["page_id"]:
+                continue
+            if c.get("comment_count"):
+                try:
+                    rs = fb_call("GET", f"{c['id']}/comments", params={"access_token": cfg["token"], "fields": "from", "limit": 10}).get("data", [])
+                    if any((r.get("from") or {}).get("id") == cfg["page_id"] for r in rs):
+                        continue
+                except Exception:
+                    pass
+            got.append({"id": c["id"], "video": title, "author": (c.get("from") or {}).get("name", "A viewer"), "text": c["message"][:500]})
+    return got[:cap], errs
+
+
+def cmd_fbcomments(st):
+    cfg = fb_cfg()
+    if not cfg:
+        return send("Facebook is not connected yet. Send /fbsetup.")
+    send("Checking Facebook comments on your Page...")
+    items, errs = fb_open_comments(cfg)
+    if not items:
+        return send("No Facebook comments are waiting for a reply." + (f"\n(Facebook said: {errs[0]})" if errs else ""))
+    seen = mem().setdefault("fbseen", [])
+    out = gemini([{"text": COMMENTS_PROMPT + json.dumps(items)}])
+    by = {i["id"]: i for i in items}
+    held = []
+    drafts = []
+    for r in out.get("items", []):
+        it = by.get(r.get("id"))
+        if not it:
+            continue
+        reply = (r.get("reply") or "").replace('"', "'").strip()[:500]
+        if r.get("action") != "reply" or not reply:
+            held.append(it)
+        else:
+            drafts.append((it, reply, ""))
+    if held:
+        ev, _src = evidence_replies(held)
+        for h in held:
+            r = ev.get(h["id"]) or {}
+            reply = (r.get("reply") or "").replace('"', "'").strip()[:500]
+            if r.get("action") == "reply" and reply:
+                drafts.append((h, reply, f"\nWhat they claim: {r.get('claim') or 'unclear'}. Verdict: {r.get('verdict', 'unknown')}."))
+            else:
+                seen.append(h["id"])
+    for it, reply, extra in drafts:
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "fbcomment", "cid": it["id"], "reply": reply, "created": time.time()}
+        send(f"📘 {it['author']} on \"{it['video']}\":\n{it['text']}{extra}\n\nDraft reply:\n{reply}",
+             [[btn("✅ Post reply", pid, "fc"), btn("Skip", pid, "fk")]])
+    del seen[:-1500]
+    if not drafts:
+        send("Nothing here is worth a reply (spam or abuse).")
+
+
+def fb_post_reply(cid, text):
+    cfg = fb_cfg()
+    if not cfg:
+        raise RuntimeError("Facebook is not connected. Send /fbsetup.")
+    try:
+        fb_call("POST", f"{cid}/comments", data={"message": text, "access_token": cfg["token"]})
+    except RuntimeError as e:
+        if "code 200" in str(e) or "ermission" in str(e):
+            raise RuntimeError("Facebook did not allow replying: the Page key lacks the permission pages_manage_engagement. "
+                               "Send /fbsetup, add that permission in step 4, and send /fbconnect again. (" + clean(e)[:80] + ")")
+        raise
 
 
 def cmd_fboff(st):
@@ -8294,7 +8402,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/progress - how close you are to earning on YouTube\n"
         "/retention - where viewers leave your latest video, and why\n"
         "/scout - what works on other Egypt channels, and ideas\n"
-        "/bigsetup - let me handle videos over 20 MB (I shrink them for you)\n"
+        "/bigsetup - handle videos over 20 MB (I shrink them)\n"
         "/ytauth - new YouTube login so I can post comments and captions\n"
         "/asked - viewer questions into videos\n"
         "/review - weekly self-review now\n"
@@ -8334,14 +8442,15 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/news - fresh Egypt news to turn into videos\n"
         "/pins - fix repeated or weak pinned comments (you tap)\n"
         "/audit - Kemet Audited: test a myth (or /audit your claim)\n"
-        "/audited - /audit + video (Charon); add pov first for POV version\n"
+        "/audited - /audit + video (Charon); \"pov\" first = POV\n"
         "/longform - plan long videos (they earn more)\n"
         "/batch - 5 scripts to film in one sitting\n"
         "/collab - draft messages to similar channels\n"
         "/community - posts to share your newest video\n"
         "/starter - a comment-getting question\n"
         "/sublines - rotate the subscribe line, learn what works\n"
-        "/flow - Google Flow prompts for a Short's scenes\n"
+        "/fbcomments - reply to Facebook comments\n"
+        "/flow - Google Flow prompts for a Short\n"
         "/hook - 3 opening lines for your next Short\n"
         "/goal 100 - set a subscriber goal and track it\n"
         "/demand - what people search for\n/count - exact number of videos\n"
@@ -8587,6 +8696,8 @@ def on_message(msg, st):
         cmd_demand(st, text)
     elif text.startswith("/goal"):
         cmd_goal(st, text)
+    elif text == "/fbcomments":
+        cmd_fbcomments(st)
     elif text == "/flow" or text.startswith("/flow "):
         cmd_flow(st, text)
     elif text == "/health":
@@ -8696,7 +8807,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "fc", "fk", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -12034,6 +12145,7 @@ def main():
             {"command": "community", "description": "Share video in Reddit/Facebook groups"},
             {"command": "starter", "description": "Comment question for latest video"},
             {"command": "sublines", "description": "Test subscribe wording"},
+            {"command": "fbcomments", "description": "Reply to Facebook comments"},
             {"command": "flow", "description": "Google Flow prompts for a Short"},
             {"command": "hook", "description": "Opening lines for next Short"},
             {"command": "goal", "description": "Subscriber goal tracker"},
