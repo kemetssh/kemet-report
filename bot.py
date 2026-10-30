@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.157"
+BOT_VERSION = "v10.158"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -6355,6 +6355,56 @@ def fb_post_reply(cid, text):
         raise
 
 
+def fb_views(cfg, pid_):
+    """Plays of one Page video or reel. Tries the plain field, then the insights metrics; returns None when Facebook gives no number."""
+    try:
+        j = fb_call("GET", pid_, params={"access_token": cfg["token"], "fields": "views"})
+        if j.get("views") is not None:
+            return int(j["views"])
+    except Exception:
+        pass
+    for metric in ("blue_reels_play_count", "total_video_views", "post_video_views"):
+        try:
+            j = fb_call("GET", f"{pid_}/video_insights", params={"access_token": cfg["token"], "metric": metric})
+            v = ((j.get("data") or [{}])[0].get("values") or [{}])[0].get("value")
+            if isinstance(v, (int, float)):
+                return int(v)
+        except Exception:
+            continue
+    return None
+
+
+def cmd_fbviews(st):
+    """Facebook plays next to YouTube views for the same video, so the owner sees which topics each platform pushes."""
+    cfg = fb_cfg()
+    if not cfg:
+        return send("Facebook is not connected yet. Send /fbsetup.")
+    send("Reading your Facebook reel numbers...")
+    items, errs = fb_items(cfg, 15)
+    yt = all_videos(yt_token())
+    rows, none = [], 0
+    for pid_, text in items:
+        v = fb_views(cfg, pid_)
+        if v is None:
+            none += 1
+            continue
+        best = max(yt, key=lambda y: title_overlap(text, y["snippet"]["title"] + " " + (y["snippet"].get("description") or "")[:200]), default=None)
+        ok = best and title_overlap(text, best["snippet"]["title"] + " " + (best["snippet"].get("description") or "")[:200]) >= 0.3
+        rows.append((v, text, int(best["statistics"].get("viewCount", 0)) if ok else None))
+    mem()["fbviews"] = {"ts": time.time(), "rows": [[v, t[:60], y] for v, t, y in rows]}
+    if not rows:
+        return send("Facebook gave me no view numbers" + (f" ({errs[0]})" if errs else "") + ". The Page key may need read_insights: send /fbsetup and add it in step 4, then /fbconnect again.")
+    rows.sort(reverse=True)
+    lines = [f"{v:>5} on Facebook" + (f", {y} on YouTube" if y is not None else "") + f" — {t[:55]}" for v, t, y in rows[:10]]
+    tot = sum(v for v, _, _ in rows)
+    msg = f"📘 Facebook plays on your latest {len(rows)} posts: {tot} in total, about {tot // len(rows)} each.\n\n" + "\n".join(lines)
+    if len(rows) >= 4:
+        msg += f"\n\nBest: {rows[0][1][:60]}\nWeakest: {rows[-1][1][:60]}"
+    if none:
+        msg += f"\n\n({none} posts gave no number.)"
+    send(msg)
+
+
 def cmd_fboff(st):
     mem().pop("fb", None)
     send("Facebook is disconnected and the key is deleted from my notes. To remove the app's access fully, open Facebook → Settings → "
@@ -8460,7 +8510,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/progress - how close you are to earning on YouTube\n"
         "/retention - where viewers leave your latest video, and why\n"
         "/scout - what works on other Egypt channels, and ideas\n"
-        "/bigsetup - handle videos over 20 MB (I shrink them)\n"
+        "/bigsetup - videos over 20 MB (I shrink)\n"
         "/ytauth - new YouTube login so I can post comments and captions\n"
         "/asked - viewer questions into videos\n"
         "/review - weekly self-review now\n"
@@ -8500,14 +8550,14 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/news - fresh Egypt news to turn into videos\n"
         "/pins - fix repeated or weak pinned comments (you tap)\n"
         "/audit - Kemet Audited: test a myth (or /audit your claim)\n"
-        "/audited - /audit + video (Charon); \"pov\" first = POV\n"
+        "/audited - /audit + video; \"pov\" first = POV\n"
         "/longform - plan long videos (they earn more)\n"
         "/batch - 5 scripts to film in one sitting\n"
         "/collab - draft messages to similar channels\n"
         "/community - posts to share your newest video\n"
         "/starter - a comment-getting question\n"
-        "/sublines - rotate the subscribe line, learn what works\n"
-        "/fbcomments - reply to Facebook comments\n"
+        "/sublines - rotate the subscribe line\n"
+        "/fbcomments - reply to Facebook comments\n/fbviews - Facebook vs YouTube views\n"
         "/flow - Google Flow prompts for a Short\n"
         "/hook - 3 opening lines for your next Short\n"
         "/goal 100 - set a subscriber goal and track it\n"
@@ -8754,6 +8804,8 @@ def on_message(msg, st):
         cmd_demand(st, text)
     elif text.startswith("/goal"):
         cmd_goal(st, text)
+    elif text == "/fbviews":
+        cmd_fbviews(st)
     elif text == "/fbcomments":
         cmd_fbcomments(st)
     elif text == "/flow" or text.startswith("/flow "):
@@ -12211,6 +12263,7 @@ def main():
             {"command": "community", "description": "Share video in Reddit/Facebook groups"},
             {"command": "starter", "description": "Comment question for latest video"},
             {"command": "sublines", "description": "Test subscribe wording"},
+            {"command": "fbviews", "description": "Facebook views vs YouTube"},
             {"command": "fbcomments", "description": "Reply to Facebook comments"},
             {"command": "flow", "description": "Google Flow prompts for a Short"},
             {"command": "hook", "description": "Opening lines for next Short"},
