@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.155"
+BOT_VERSION = "v10.156"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -3183,11 +3183,11 @@ def on_prop(jid, act, st):
         return send("✅ Reply posted.")
     if act == "fbr" and kind == "fbcomment":
         fb_post_reply(prop["cid"], prop["reply"])
-        mem()["fbseen"] = ((mem().get("fbseen") or []) + [prop["cid"]])[-1500:]
+        mem()["fbseen"] = ((mem().get("fbseen") or []) + [prop["cid"], prop.get("ck", "")])[-1500:]
         st["props"].pop(jid, None)
         return send("✅ Reply posted on Facebook.")
     if act == "fbn" and kind == "fbcomment":
-        mem()["fbseen"] = ((mem().get("fbseen") or []) + [prop["cid"]])[-1500:]
+        mem()["fbseen"] = ((mem().get("fbseen") or []) + [prop["cid"], prop.get("ck", "")])[-1500:]
         st["props"].pop(jid, None)
         return send("Skipped.")
     if act == "ek" and kind == "exp":
@@ -6230,12 +6230,12 @@ def cmd_searchoff(st):
     send("Tavily key deleted from my notes. I use Google search again, then the free scholarly fallback.")
 
 
-def fb_items(cfg, limit=10):
+def fb_items(cfg, limit=30):
     """Newest Page posts, reels and videos as (id, text). A failing edge is skipped so one missing permission does not hide the rest."""
     out, seen, errs = [], set(), []
     for edge, fld in (("posts", "message"), ("video_reels", "description"), ("videos", "description")):
         try:
-            j = fb_call("GET", f"{cfg['page_id']}/{edge}", params={"access_token": cfg["token"], "fields": f"id,{fld},created_time", "limit": limit})
+            j = fb_call("GET", f"{cfg['page_id']}/{edge}", params={"access_token": cfg["token"], "fields": f"id,{fld},created_time", "limit": 25})
         except Exception as e:
             errs.append(clean(e)[:100])
             continue
@@ -6253,6 +6253,7 @@ def fb_open_comments(cfg, cap=12):
     got = []
     done = set(mem().get("fbseen") or [])
     stats = mem()["fb_last"] = {"items": len(items), "seen": 0, "claimed": 0}
+    keys = set()
     for pid_, title in items:
         try:
             j = fb_call("GET", f"{pid_}/comments", params={"access_token": cfg["token"], "limit": 25, "filter": "toplevel", "summary": "true",
@@ -6263,8 +6264,10 @@ def fb_open_comments(cfg, cap=12):
         stats["claimed"] += int((j.get("summary") or {}).get("total_count", 0) or 0)
         stats["seen"] += len(j.get("data", []))
         for c in j.get("data", []):
-            if c["id"] in done or not (c.get("message") or "").strip():
-                continue
+            ck = "k:" + hashlib.sha1(((c.get("from") or {}).get("name", "") + "|" + (c.get("message") or "").strip()[:120]).encode()).hexdigest()[:12]
+            if c["id"] in done or ck in done or ck in keys or not (c.get("message") or "").strip():
+                continue                                  # the same reel can show up under two ids: one card per comment
+            keys.add(ck)
             if (c.get("from") or {}).get("id") == cfg["page_id"]:
                 continue
             if c.get("comment_count"):
@@ -6274,7 +6277,7 @@ def fb_open_comments(cfg, cap=12):
                         continue
                 except Exception:
                     pass
-            got.append({"id": c["id"], "video": title, "author": (c.get("from") or {}).get("name", "A viewer"), "text": c["message"][:500]})
+            got.append({"id": c["id"], "ck": ck, "video": title, "author": (c.get("from") or {}).get("name", "A viewer"), "text": c["message"][:500]})
     return got[:cap], errs
 
 
@@ -6286,7 +6289,7 @@ def cmd_fbcomments(st):
     items, errs = fb_open_comments(cfg)
     if not items:
         fl = mem().get("fb_last") or {}
-        why = (f"\nI looked at {fl.get('items', 0)} recent posts/reels and could read {fl.get('seen', 0)} comments (Facebook counts {fl.get('claimed', 0)})." if fl else "")
+        why = (f"\nI looked at the {fl.get('items', 0)} newest posts/reels and could read {fl.get('seen', 0)} comments (Facebook counts {fl.get('claimed', 0)})." if fl else "")
         if fl.get("claimed", 0) > fl.get("seen", 0) or (fl.get("items", 0) == 0):
             why += ("\n⚠️ Facebook is hiding comments from me: the Page key lacks permission to read what viewers write "
                     "(pages_read_user_content) or lists your reels. Send /fbsetup, add pages_read_user_content and pages_manage_engagement in step 4, then /fbconnect again.")
@@ -6325,7 +6328,7 @@ def cmd_fbcomments(st):
                 seen.append(h["id"])
     for it, reply, extra in drafts:
         pid = new_pid(st)
-        st["props"][pid] = {"type": "fbcomment", "cid": it["id"], "reply": reply, "created": time.time()}
+        st["props"][pid] = {"type": "fbcomment", "cid": it["id"], "ck": it.get("ck", ""), "reply": reply, "created": time.time()}
         send(f"📘 {it['author']} on \"{it['video']}\":\n{it['text']}{extra}\n\nDraft reply:\n{reply}",
              [[btn("✅ Post reply", pid, "fbr"), btn("Skip", pid, "fbn")]])
     del seen[:-1500]
