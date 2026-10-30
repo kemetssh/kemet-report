@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.154"
+BOT_VERSION = "v10.155"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -6290,6 +6290,15 @@ def cmd_fbcomments(st):
         if fl.get("claimed", 0) > fl.get("seen", 0) or (fl.get("items", 0) == 0):
             why += ("\n⚠️ Facebook is hiding comments from me: the Page key lacks permission to read what viewers write "
                     "(pages_read_user_content) or lists your reels. Send /fbsetup, add pages_read_user_content and pages_manage_engagement in step 4, then /fbconnect again.")
+        try:
+            sc = (fb_call("GET", "debug_token", params={"input_token": cfg["token"], "access_token": cfg["token"]}).get("data") or {}).get("scopes") or []
+            if sc:
+                need = [p for p in ("pages_read_user_content", "pages_manage_engagement", "pages_read_engagement") if p not in sc]
+                why += ("\nYour Page key has: " + ", ".join(sorted(sc))[:300] + "."
+                        + (("\n❌ Missing: " + ", ".join(need) + ". That is why I see no comments. Send /fbsetup, add them in step 4, then /fbconnect again.") if need
+                           else "\nThe permissions are all there, so the newest 10 posts simply have no unanswered comments."))
+        except Exception as e:
+            why += "\n(I could not read the key's permissions: " + clean(e)[:80] + ")"
         return send("No Facebook comments are waiting for a reply." + why + (f"\n(Facebook said: {errs[0]})" if errs else ""))
     seen = mem().setdefault("fbseen", [])
     out = gemini([{"text": COMMENTS_PROMPT + json.dumps(items)}])
