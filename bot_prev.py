@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.159"
+BOT_VERSION = "v10.160"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -633,7 +633,8 @@ def _gpost(body, rounds=3):
     """POST to Gemini with patient backoff across models. Returns response or raises GeminiBusy.
     When Google says the DAILY free limit is used up, stop at once (cooldown) instead of hammering it."""
     caller = _gcaller()
-    blk = mem().get("g_block") or {}
+    kind = "s" if body.get("tools") else "p"            # web-search requests have their own, tighter free quota: a refused search must not block plain answers
+    blk = (mem().get("g_block") or {}).get(kind) or {}
     if blk.get("until", 0) > time.time():
         _guse("skip")
         raise GeminiBusy("Google's AI is at its free limit right now" + (" for today" if blk.get("why") == "day" else "")
@@ -653,7 +654,7 @@ def _gpost(body, rounds=3):
                 except Exception:
                     txt = ""
                 if r.status_code == 429 and ("PerDay" in txt or "per day" in txt.lower()):
-                    mem()["g_block"] = {"until": time.time() + 3 * 3600, "why": "day"}
+                    mem().setdefault("g_block", {})[kind] = {"until": time.time() + 3 * 3600, "why": "day"}
                     raise GeminiBusy("Google's AI used up today's free limit. Nothing was lost: it resets daily, send it again later.")
                 try:
                     wait = float(r.headers.get("Retry-After", 0))
@@ -668,7 +669,7 @@ def _gpost(body, rounds=3):
             _guse("ok", caller)
             return r
     if busy:
-        mem()["g_block"] = {"until": time.time() + 90, "why": "minute"}      # everything refused: give Google 90 s before asking again
+        mem().setdefault("g_block", {})[kind] = {"until": time.time() + 90, "why": "minute"}      # everything refused: give Google 90 s before asking again
         raise GeminiBusy("Google's AI is busy or at its free limit right now. Nothing was lost: send it again in a few minutes.")
     raise RuntimeError(f"Gemini failed: {last}")
 
@@ -4726,7 +4727,7 @@ def retry_factchecks(st):
             continue
         ar["n"] = ar.get("n", 0) + 1
         ar["next"] = now + 300
-        blk = mem().get("g_block") or {}
+        blk = (mem().get("g_block") or {}).get("s") or {}
         if blk.get("until", 0) > now:
             continue                                    # Google is still refusing: do not even ask
         bad = factcheck_job(job, gate=True)
