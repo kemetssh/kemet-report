@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.158"
+BOT_VERSION = "v10.159"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -6356,22 +6356,24 @@ def fb_post_reply(cid, text):
 
 
 def fb_views(cfg, pid_):
-    """Plays of one Page video or reel. Tries the plain field, then the insights metrics; returns None when Facebook gives no number."""
+    """(plays, why) of one Page video, reel or post. plays is None when Facebook gives no number; why says what Facebook answered."""
+    why = []
     try:
         j = fb_call("GET", pid_, params={"access_token": cfg["token"], "fields": "views"})
         if j.get("views") is not None:
-            return int(j["views"])
-    except Exception:
-        pass
-    for metric in ("blue_reels_play_count", "total_video_views", "post_video_views"):
+            return int(j["views"]), ""
+    except Exception as e:
+        why.append(clean(e)[:70])
+    for metric, edge in (("blue_reels_play_count", "video_insights"), ("total_video_views", "video_insights"), ("post_video_views", "video_insights"),
+                         ("post_media_view", "insights"), ("post_impressions", "insights")):
         try:
-            j = fb_call("GET", f"{pid_}/video_insights", params={"access_token": cfg["token"], "metric": metric})
+            j = fb_call("GET", f"{pid_}/{edge}", params={"access_token": cfg["token"], "metric": metric})
             v = ((j.get("data") or [{}])[0].get("values") or [{}])[0].get("value")
             if isinstance(v, (int, float)):
-                return int(v)
-        except Exception:
-            continue
-    return None
+                return int(v), ""
+        except Exception as e:
+            why.append(clean(e)[:70])
+    return None, (why[-1] if why else "no number")
 
 
 def cmd_fbviews(st):
@@ -6380,28 +6382,32 @@ def cmd_fbviews(st):
     if not cfg:
         return send("Facebook is not connected yet. Send /fbsetup.")
     send("Reading your Facebook reel numbers...")
-    items, errs = fb_items(cfg, 15)
+    items, errs = fb_items(cfg, 25)
     yt = all_videos(yt_token())
-    rows, none = [], 0
+    logged = {e.get("fb"): e.get("title", "") for e in mem().get("social") or [] if e.get("fb")}
+    rows, none, reasons = [], [], {}
     for pid_, text in items:
-        v = fb_views(cfg, pid_)
+        v, why = fb_views(cfg, pid_)
         if v is None:
-            none += 1
+            none.append(text)
+            reasons[why] = reasons.get(why, 0) + 1
             continue
-        best = max(yt, key=lambda y: title_overlap(text, y["snippet"]["title"] + " " + (y["snippet"].get("description") or "")[:200]), default=None)
-        ok = best and title_overlap(text, best["snippet"]["title"] + " " + (best["snippet"].get("description") or "")[:200]) >= 0.3
-        rows.append((v, text, int(best["statistics"].get("viewCount", 0)) if ok else None))
+        ref = logged.get(pid_) or logged.get(pid_.split("_")[-1]) or text
+        score = lambda y: title_overlap(ref, y["snippet"]["title"] + " " + (y["snippet"].get("description") or "")[:200])
+        best = max(yt, key=score, default=None)
+        rows.append((v, text, int(best["statistics"].get("viewCount", 0)) if best and score(best) >= 0.3 else None))
     mem()["fbviews"] = {"ts": time.time(), "rows": [[v, t[:60], y] for v, t, y in rows]}
     if not rows:
-        return send("Facebook gave me no view numbers" + (f" ({errs[0]})" if errs else "") + ". The Page key may need read_insights: send /fbsetup and add it in step 4, then /fbconnect again.")
+        return send("Facebook gave me no view numbers" + (f" ({errs[0]})" if errs else "") + (f" ({next(iter(reasons))})" if reasons else "") + ". The Page key may need read_insights: send /fbsetup and add it in step 4, then /fbconnect again.")
     rows.sort(reverse=True)
-    lines = [f"{v:>5} on Facebook" + (f", {y} on YouTube" if y is not None else "") + f" — {t[:55]}" for v, t, y in rows[:10]]
+    lines = [f"{v:>5} on Facebook" + (f", {y} on YouTube" if y is not None else "") + f" — {t[:55]}" for v, t, y in rows[:12]]
     tot = sum(v for v, _, _ in rows)
-    msg = f"📘 Facebook plays on your latest {len(rows)} posts: {tot} in total, about {tot // len(rows)} each.\n\n" + "\n".join(lines)
+    msg = f"📘 Facebook plays on {len(rows)} of your latest {len(items)} posts: {tot} in total, about {tot // len(rows)} each.\n\n" + "\n".join(lines)
     if len(rows) >= 4:
         msg += f"\n\nBest: {rows[0][1][:60]}\nWeakest: {rows[-1][1][:60]}"
     if none:
-        msg += f"\n\n({none} posts gave no number.)"
+        msg += f"\n\n{len(none)} posts gave no number. Facebook's answer: " + "; ".join(f"{w} (x{n})" for w, n in sorted(reasons.items(), key=lambda x: -x[1])[:2])
+        msg += "\nPlain photo or text posts have no play count; for a reel it usually means the key may not read insights."
     send(msg)
 
 
