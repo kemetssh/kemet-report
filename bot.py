@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.169"
+BOT_VERSION = "v10.170"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -7134,7 +7134,7 @@ def cmd_fbcomments(st):
                 need = [p for p in ("pages_read_user_content", "pages_manage_engagement", "pages_read_engagement") if p not in sc]
                 why += ("\nYour Page key has: " + ", ".join(sorted(sc))[:300] + "."
                         + (("\n❌ Missing: " + ", ".join(need) + ". That is why I see no comments. Send /fbsetup, add them in step 4, then /fbconnect again.") if need
-                           else "\nThe permissions are all there, so the newest 10 posts simply have no unanswered comments."))
+                           else ("\nThe permissions are all there. " + ("The comments I can see are ones you already answered or skipped, so none is waiting." if fl.get("seen") else "Your newest posts simply have no comments yet."))))
         except Exception as e:
             why += "\n(I could not read the key's permissions: " + clean(e)[:80] + ")"
         return send("No Facebook comments are waiting for a reply." + why + (f"\n(Facebook said: {errs[0]})" if errs else ""))
