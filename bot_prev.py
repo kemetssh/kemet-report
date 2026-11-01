@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.167"
+BOT_VERSION = "v10.168"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -3417,6 +3417,13 @@ def on_prop(jid, act, st):
         mem()["dismissed"] = (mem().get("dismissed", []) + [prop.get("key", prop["parent"])])[-1500:]
         st["props"].pop(jid, None)
         return send("✅ Reply posted.")
+    if act == "chp" and kind == "chapters":
+        ok = add_chapters_to_video(prop["video_id"], prop["chapters"])
+        st["props"].pop(jid, None)
+        return send("✅ Chapters added to the description." if ok else "That video already has chapters, so I left it alone.")
+    if act == "chs" and kind == "chapters":
+        st["props"].pop(jid, None)
+        return send("Skipped.")
     if act == "fbr" and kind == "fbcomment":
         fb_post_reply(prop["cid"], prop["reply"])
         mem()["fbseen"] = ((mem().get("fbseen") or []) + [prop["cid"], prop.get("ck", "")])[-1500:]
@@ -7219,6 +7226,69 @@ def cmd_fbviews(st):
     send(msg)
 
 
+CHAPTERS_PROMPT = """Watch this YouTube video of the channel "Kemet | Ancient Egypt" from start to end. It is {mins} long.
+Write YouTube chapters with the REAL time each topic starts, exactly as you see and hear it.
+Rules: 4 to 10 chapters; the first is 0:00; each at least 20 seconds after the one before; every time is inside the video; titles 2 to 6 words, plain and true to what is said (no clickbait); use m:ss (or h:mm:ss for a video over an hour).
+Return JSON only: {{"chapters": ["0:00 Opening", "1:25 The discovery"]}}"""
+
+HAS_CHAPTERS = re.compile(r"(?m)^\s*\(?(?:\d+:)?\d{1,2}:\d{2}\)?\s+\S")
+
+
+def long_videos_for_chapters(tok):
+    """(videos that need chapters, how many long videos already have them)."""
+    need, have = [], 0
+    for v in all_videos(tok):
+        secs = iso_seconds((v.get("contentDetails") or {}).get("duration"))
+        if secs <= 180:
+            continue
+        if len(HAS_CHAPTERS.findall(v["snippet"].get("description") or "")) >= 3:
+            have += 1
+        else:
+            need.append((v, secs))
+    return need, have
+
+
+def cmd_chapters(st):
+    """Watch each long video that has no chapters, write real timestamps, and offer to add them to its description (nothing changes until the owner taps)."""
+    tok = yt_token()
+    need, have = long_videos_for_chapters(tok)
+    if not need:
+        return send(f"✅ Every long video already has chapters ({have} checked). Shorts need none.")
+    send(f"⏱ {len(need) + have} long video(s) on your channel; {have} already have chapters, {len(need)} do not. Watching them to find the real times (a minute each)...")
+    done = 0
+    for v, secs in need[:3]:
+        vid, title = v["id"], v["snippet"]["title"]
+        try:
+            j = gemini([{"file_data": {"file_uri": f"https://www.youtube.com/watch?v={vid}"}},
+                        {"text": CHAPTERS_PROMPT.format(mins=f"{int(secs // 60)}:{int(secs % 60):02d}")}])
+        except GeminiBusy as e:
+            send("⏳ " + str(e))
+            break
+        except Exception as e:
+            send(f"I could not watch \"{title[:60]}\" just now ({clean(e)[:80]}).")
+            continue
+        ch = clean_chapters(j.get("chapters"), secs)
+        if not ch:
+            send(f"I could not find clear chapters in \"{title[:60]}\". Nothing changed.")
+            continue
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "chapters", "video_id": vid, "chapters": ch, "created": time.time()}
+        send(f"⏱ Chapters for \"{title[:70]}\":\n\n" + "\n".join(ch) + "\n\nThey go into the description under the first paragraph.",
+             [[btn("✅ Add to description", pid, "chp"), btn("Skip", pid, "chs")]])
+        done += 1
+    if len(need) > 3:
+        send(f"{len(need) - 3} more long video(s) have no chapters. Send /chapters again for the next ones.")
+
+
+def add_chapters_to_video(video_id, chapters):
+    tok = yt_token()
+    sn = yt_get("videos", tok, part="snippet", id=video_id)["items"][0]["snippet"]
+    desc = sn.get("description", "")
+    if len(HAS_CHAPTERS.findall(desc)) >= 3:
+        return False
+    return _put_description(video_id, tok, sn, add_chapters(desc, chapters))
+
+
 def cmd_fboff(st):
     mem().pop("fb", None)
     send("Facebook is disconnected and the key is deleted from my notes. To remove the app's access fully, open Facebook → Settings → "
@@ -9505,7 +9575,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/community - posts to share your newest video\n"
         "/starter - a comment-getting question\n"
         "/sublines - rotate the subscribe line\n"
-        "/fbcomments - reply to Facebook comments\n/fbviews - Facebook vs YouTube views\n"
+        "/chapters - add timestamps to long videos\n/fbcomments - reply to Facebook comments\n/fbviews - Facebook vs YouTube views\n"
         "/flow - Google Flow prompts for a Short\n"
         "/hook - 3 opening lines for your next Short\n"
         "/goal 100 - set a subscriber goal and track it\n"
@@ -9517,8 +9587,8 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/voice - pacing coach from your own numbers\n"
         "/poll - feedback poll: what to film next\n"
         "/cadence 3 - how often to post\n"
-        "/links /addlink /removelink - links added to your descriptions\n"
-        "/health - check that everything works\n/selftest - the bot tests itself, shows what is wrong\n/viral - growth lab: what is taking off, what to do\n/pause /resume - stop or restart my own messages\n"
+        "/links /addlink /removelink - description links\n"
+        "/health - check that everything works\n/selftest - the bot tests itself\n/viral - growth lab: what is taking off, what to do\n/pause /resume - stop or restart my own messages\n"
         "Or just write or speak to me normally: I work out what you want.\n"
         "/results - how your latest video is doing\n/plan - this week's plan\n"
         "/lessons - what I have learned about your channel\n"
@@ -10040,6 +10110,8 @@ def on_message(msg, st):
         cmd_demand(st, text)
     elif text.startswith("/goal"):
         cmd_goal(st, text)
+    elif text == "/chapters":
+        cmd_chapters(st)
     elif text == "/fbviews":
         cmd_fbviews(st)
     elif text == "/fbcomments":
@@ -10155,7 +10227,7 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
-    if act in ("ta", "ts", "tu", "ca", "cs", "fbr", "fbn", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "fbr", "fbn", "chp", "chs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -13662,6 +13734,7 @@ def main():
             {"command": "community", "description": "Share video in Reddit/Facebook groups"},
             {"command": "starter", "description": "Comment question for latest video"},
             {"command": "sublines", "description": "Test subscribe wording"},
+            {"command": "chapters", "description": "Add timestamps to long videos"},
             {"command": "fbviews", "description": "Facebook views vs YouTube"},
             {"command": "fbcomments", "description": "Reply to Facebook comments"},
             {"command": "flow", "description": "Google Flow prompts for a Short"},
