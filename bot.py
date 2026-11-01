@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.171"
+BOT_VERSION = "v10.172"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -8348,14 +8348,21 @@ def social_scan(st):
                     past = [x.get("fb_eng") for x in mem().get("social") or [] if x.get("fb_eng") is not None]
                     med = _median(past) if len(past) >= 3 else 3
                     e["fb_eng"] = eng
-                    e["rated"]["facebook"] = 2 if eng >= max(10, 2 * med) else 1 if eng >= max(2, med) else 0
+                    plays, _why = fb_views(fb_cfg(), e["fb"])
+                    if plays is not None:                      # plays are the real reach on Facebook; reactions and comments are rare on a small Page
+                        e["fb_plays"] = plays
+                        pp = [x.get("fb_plays") for x in mem().get("social") or [] if x.get("fb_plays") is not None and x is not e]
+                        pmed = _median(pp) if len(pp) >= 3 else 150
+                        e["rated"]["facebook"] = 2 if plays >= max(300, 1.5 * pmed) else 1 if plays >= max(80, 0.6 * pmed) else 0
+                    else:
+                        e["rated"]["facebook"] = 2 if eng >= max(10, 2 * med) else 1 if eng >= max(2, med) else 0
             except Exception as ex:
                 print("fb engagement:", clean(ex)[:80])
         pid = new_pid(st)
         st["props"][pid] = {"type": "socrate", "sid": e["id"], "created": now}
         rows = [[btn(f"{p} {SCORE_LABEL[k].split()[0]}", pid, "gf", f"{key}:{k}") for k in (2, 1, 0)] for p, key in (("🐦 X", "x"), ("📸 Insta", "instagram"), ("🎵 TikTok", "tiktok"))]
         rows.append([btn("Skip", pid, "gx")])
-        fbl = (f"\nFacebook: {SCORE_LABEL[e['rated']['facebook']]} (I measured it: {e.get('fb_eng', 0)} reactions, comments and shares)" if "facebook" in e["rated"] else "")
+        fbl = (f"\nFacebook: {SCORE_LABEL[e['rated']['facebook']]} (I measured it: " + (f"{e['fb_plays']} plays, " if e.get("fb_plays") is not None else "") + f"{e.get('fb_eng', 0)} reactions, comments and shares)" if "facebook" in e["rated"] else "")
         try:
             result = send(f"📈 How did your post about \"{e['title'][:60]}\" do 2 days ago?{fbl}\nOne tap per app you used. I learn which hashtags and topics work and use the best ones next time.", rows)
             if result is False:
@@ -8679,6 +8686,14 @@ def cmd_viral(st):
                 lines += ["\nWhat the numbers say works (from /learned):"] + ["• " + f[:150] for f in facts]
         except Exception:
             pass
+    try:
+        fv = mem().get("fbviews") or {}
+        if fv.get("rows") and time.time() - fv.get("ts", 0) < 5 * 86400:
+            top = sorted(fv["rows"], key=lambda r: -r[0])[:3]
+            lines += ["", f"📘 Facebook (from /fbviews): {sum(r[0] for r in fv['rows'])} plays on {len(fv['rows'])} posts. Best: "
+                      + "; ".join(f"{r[0]} {r[1][:34]}" for r in top)]
+    except Exception as e:
+        print("fb block:", clean(e)[:80])
     try:
         lines += ["", web_block()]
     except Exception as e:
