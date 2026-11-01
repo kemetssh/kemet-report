@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.168"
+BOT_VERSION = "v10.169"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -7041,6 +7041,17 @@ def cmd_searchoff(st):
     send("Tavily key deleted from my notes. I use Google search again, then the free scholarly fallback.")
 
 
+def fb_error_hint(errs):
+    """Plain words when Facebook refuses the Page key itself (not a missing permission). "" when the errors look different."""
+    t = " ".join(str(e) for e in errs or [])
+    if re.search(r"Cannot call API|code 190|code 102|code 2\)|session|expired|invalid.*token", t, re.I):
+        return ("⚠️ Facebook is refusing my Page key right now (" + clean(t)[:110] + "). This is not a missing permission. Usually it is one of two things:\n"
+                "1. A short Facebook problem: wait 15-30 minutes and send the command again.\n"
+                "2. The key was cancelled (you changed the Facebook password, logged out everywhere, or Facebook asked you to confirm it is you). "
+                "Open the Facebook app and clear any security notice, then send /fbsetup and /fbconnect again with a fresh token.")
+    return ""
+
+
 def fb_items(cfg, limit=30):
     """Newest Page posts, reels and videos as (id, text). A failing edge is skipped so one missing permission does not hide the rest."""
     out, seen, errs = [], set(), []
@@ -7109,6 +7120,9 @@ def cmd_fbcomments(st):
     send("Checking Facebook comments on your Page...")
     items, errs = fb_open_comments(cfg)
     if not items:
+        hint = fb_error_hint(errs)
+        if hint:
+            return send(hint)
         fl = mem().get("fb_last") or {}
         why = (f"\nI looked at the {fl.get('items', 0)} newest posts/reels and could read {fl.get('seen', 0)} comments (Facebook counts {fl.get('claimed', 0)})." if fl else "")
         if fl.get("claimed", 0) > fl.get("seen", 0) or (fl.get("items", 0) == 0):
@@ -7213,6 +7227,9 @@ def cmd_fbviews(st):
         rows.append((v, text, int(best["statistics"].get("viewCount", 0)) if best and score(best) >= 0.3 else None))
     mem()["fbviews"] = {"ts": time.time(), "rows": [[v, t[:60], y] for v, t, y in rows]}
     if not rows:
+        hint = fb_error_hint(errs + list(reasons))
+        if hint:
+            return send(hint)
         return send("Facebook gave me no view numbers" + (f" ({errs[0]})" if errs else "") + (f" ({next(iter(reasons))})" if reasons else "") + ". The Page key may need read_insights: send /fbsetup and add it in step 4, then /fbconnect again.")
     rows.sort(reverse=True)
     lines = [f"{v:>5} on Facebook" + (f", {y} on YouTube" if y is not None else "") + f" — {t[:55]}" for v, t, y in rows[:12]]
