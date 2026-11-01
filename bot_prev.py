@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.165"
+BOT_VERSION = "v10.167"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -12818,9 +12818,13 @@ def _all_videos_fresh(tok):
         page = r.get("nextPageToken")
         if not page:
             break
-    out = []
+    ids = list(dict.fromkeys(ids))                     # the uploads list can show one video twice (e.g. when a video is added or removed while it is being read)
+    out, seen = [], set()
     for i in range(0, len(ids), 50):
-        out += yt_get("videos", tok, part="snippet,contentDetails,statistics", id=",".join(ids[i:i + 50])).get("items", [])
+        for it in yt_get("videos", tok, part="snippet,contentDetails,statistics", id=",".join(ids[i:i + 50])).get("items", []):
+            if it["id"] not in seen:
+                seen.add(it["id"])
+                out.append(it)
     out.sort(key=lambda v: v.get("snippet", {}).get("publishedAt", ""), reverse=True)
     return out
 
@@ -12962,7 +12966,9 @@ def articles_without_video(root, vt):
     by, none = article_video_groups(root)
     out = []
     for vid, arts in by.items():
-        if len(arts) > 1:
+        if vid not in vt:                                  # the film was deleted or made private on YouTube: these articles need a video too
+            out += [(slug, title, "__gone__") for slug, title in arts]
+        elif len(arts) > 1:
             keep = max(arts, key=lambda a: title_overlap(a[1], vt.get(vid, "")))
             out += [(slug, title, vt.get(vid, vid)) for slug, title in arts if slug != keep[0]]
     out += [(slug, title, None) for slug, title in none]
@@ -13000,7 +13006,7 @@ def cmd_needvideos(st):
     mem()["needvid"] = [{"slug": n[0], "title": n[1], "idea": ""} for n in need]
     lines = [f"📹 {len(need)} article(s) have no video of their own:"]
     for slug, title, deck, film in need:
-        lines.append(f"• {title[:80]}" + (f"\n   (shows \"{film[:60]}\", which fits another article better)" if film else "\n   (shows no film)"))
+        lines.append(f"• {title[:80]}" + ("\n   (its film was deleted or made private on YouTube)" if film == "__gone__" else f"\n   (shows \"{film[:60]}\", which fits another article better)" if film else "\n   (shows no film)"))
     send("\n".join(lines)[:3900])
     try:
         rows = "\n".join(f"{i + 1}. {t} | {dk[:200]}" for i, (_, t, dk, _) in enumerate(need[:12]))
