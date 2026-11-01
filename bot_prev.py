@@ -87,7 +87,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.160"
+BOT_VERSION = "v10.161"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -4105,7 +4105,7 @@ def cmd_audit(st, raw="/audit"):
 
 def run_audit(claim, st, video=False, pov=False):
     send(f"🔎 Auditing: {claim}\n(about a minute: evidence first)")
-    text, sources = gemini_text(AUDIT_PROMPT.format(claim=claim), search=True)
+    text, sources = gemini_text(AUDIT_PROMPT.format(claim=claim), search=True, topic=claim[:120])
     a = parse_obj(text)
     if not a.get("verdict"):
         return send("I could not finish that audit. Try rewording the claim, or try again in a minute.")
@@ -4181,7 +4181,8 @@ def factcheck_job(job, gate=False):
     send("🔎 Checking the claims, title and description against sources before upload (about a minute)..."
          if gate else "🔎 Checking every claim in your video against sources (about a minute)...")
     try:
-        text, sources = gemini_text(FACT_PROMPT.format(claims=json.dumps(claims[:9])), search=True)
+        text, sources = gemini_text(FACT_PROMPT.format(claims=json.dumps(claims[:9])), search=True,
+                                    topic="; ".join(re.sub(r"^(Title|Description): ", "", c)[:70] for c in claims[:2]))
     except Exception as e:
         print("factcheck failed:", clean(e)[:120])
         send("Google's AI is overloaded or at its free limit right now, so the fact-check could not run. Nothing was uploaded.")
