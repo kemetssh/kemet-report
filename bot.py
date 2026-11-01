@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.170"
+BOT_VERSION = "v10.171"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -7225,6 +7225,13 @@ def cmd_fbviews(st):
         score = lambda y: title_overlap(ref, y["snippet"]["title"] + " " + (y["snippet"].get("description") or "")[:200])
         best = max(yt, key=score, default=None)
         rows.append((v, text, int(best["statistics"].get("viewCount", 0)) if best and score(best) >= 0.3 else None))
+    rows = [(v, re.sub(r"\s+", " ", re.sub(r"#\w+", "", t)).strip() or "your Facebook post", y) for v, t, y in rows]
+    uniq = []
+    for r in rows:                                     # the same reel is listed twice (as a post and as a video): count it once
+        if any(r[1][:60] == u[1][:60] and abs(r[0] - u[0]) <= max(5, 0.05 * max(r[0], u[0])) for u in uniq):
+            continue
+        uniq.append(r)
+    rows = uniq
     mem()["fbviews"] = {"ts": time.time(), "rows": [[v, t[:60], y] for v, t, y in rows]}
     if not rows:
         hint = fb_error_hint(errs + list(reasons))
