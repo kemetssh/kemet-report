@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.174"
+BOT_VERSION = "v10.175"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -5624,6 +5624,15 @@ def nb():
     for k, v in (("obs", {}), ("facts", []), ("asks", []), ("muted", []), ("last", 0), ("off", False), ("last_comments", 0),
                  ("library", {"patterns": {}, "world": {}}), ("thumbs", {}), ("tests", []), ("demand", {}), ("news", {}), ("comp", {}), ("preds", {}), ("acc", {}), ("score", [0, 0]), ("last_report", ""), ("rep_keys", [])):
         n.setdefault(k, v)
+    if not n.get("mig_age"):                      # v10.175, once: forget scores made with the age-biased method, drop the self-made rules the data did not support
+        n["mig_age"] = True
+        n["score"], n["acc"] = [0, 0], {}
+        for p_ in n.get("preds", {}).values():
+            p_["scored"] = True if p_.get("scored") else p_.get("scored")
+        m_ = mem()
+        before = len(m_["lessons"])
+        m_["lessons"] = good_lessons(m_["lessons"])
+        n["mig_dropped"] = before - len(m_["lessons"])
     return n
 
 
