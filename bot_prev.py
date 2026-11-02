@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.172"
+BOT_VERSION = "v10.173"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -6158,6 +6158,35 @@ def nb_section(st, name):
     send("\n".join(lines), rows or None)
 
 
+_EXPORT_SECRET = re.compile(r"(tvly-[\w-]{8,}|AIza[\w-]{20,}|EAA\w{20,}|(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,})")
+
+
+def learning_export():
+    """Everything the bot has learned, as plain data the owner can hand over so the bot's own code can be improved from it. No keys, tokens or logins."""
+    m, n = mem(), nb()
+    obs = [{k: o.get(k) for k in ("title", "secs", "hour", "tags", "wn", "tfrac", "views", "age", "pct", "subs")} for o in n["obs"].values()]
+    soc = [{k: e.get(k) for k in ("title", "tags", "rated", "fb_eng", "fb_plays", "ts")} for e in (m.get("social") or [])][-60:]
+    data = {"bot_version": BOT_VERSION, "exported": time.strftime("%Y-%m-%d %H:%M", time.gmtime()) + " UTC",
+            "facts": n.get("facts"), "library": n.get("library"), "videos_studied": obs, "viewer_requests": (n.get("asks") or [])[:60],
+            "title_tests": n.get("tests"), "demand": n.get("demand"), "competitors": n.get("comp"), "news": n.get("news"),
+            "prediction_score_right_total": n.get("score"), "prediction_accuracy_by_pattern": n.get("acc"),
+            "lessons": (m.get("lessons") or [])[-150:], "picked_titles": (m.get("picks") or [])[-60:], "skipped_titles": (m.get("skips") or [])[-60:],
+            "title_experiments": [{k: e.get(k) for k in ("old", "new", "done", "result", "views_before", "views_after") if k in e} for e in (m.get("exps") or [])][-30:],
+            "social_posts": soc, "facebook_views": m.get("fbviews"), "website_stats": m.get("webstats"),
+            "audits": [a.get("claim") for a in (m.get("audits") or [])][-30:]}
+    txt = json.dumps(data, ensure_ascii=False, indent=1, default=str)
+    return _EXPORT_SECRET.sub("[removed]", txt)
+
+
+def cmd_learnexport(st):
+    txt = learning_export()
+    name = "kemet-learning-" + time.strftime("%Y%m%d", time.gmtime()) + ".json"
+    r = S.post(f"{TGAPI}/sendDocument", data={"chat_id": CHAT, "caption": "🧠 Everything I have learned (no keys or logins inside). Send this file to Claude to improve the bot from it."},
+               files={"document": (name, txt.encode("utf-8"), "application/json")}, timeout=120).json()
+    if not r.get("ok"):
+        send("Telegram refused the file: " + str(r.get("description", ""))[:120])
+
+
 def cmd_learned(st, arg=""):
     n = nb()
     arg = (arg or "").strip().lower()
@@ -9562,22 +9591,22 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/crosspost - captions for TikTok, Reels, Facebook\n"
         "/series - add your latest video to a playlist\n"
         "/progress - how close you are to earning on YouTube\n"
-        "/retention - where viewers leave your latest video\n"
-        "/scout - what works on other Egypt channels\n"
+        "/retention - where viewers leave\n"
+        "/scout - what works on other channels\n"
         "/bigsetup - videos over 20 MB (I shrink)\n"
         "/ytauth - new YouTube login (comments, captions)\n"
         "/asked - viewer questions into videos\n"
         "/review - weekly self-review now\n"
         "/funnel - point your Shorts viewers to a long video\n"
         "/besttime - when to post, from your own data\n"
-        "/watchnext - 'Watch next' links in old descriptions\n"
-        "/hashtags - refresh old hashtags (trending now)\n"
+        "/watchnext - 'Watch next' links in old videos\n"
+        "/hashtags - refresh old hashtags\n"
         "/learned - what I learned (forget or pause any time)\n"
         "/fullrefresh - refresh everything I know\n"
         "/script - fact-checked script on your topic\n"
-        "/affiliate - affiliate programs and sponsors\n"
+        "/affiliate - affiliate programs, sponsors\n"
         "/translate - ES, PT, HI subtitles for my latest video\n"
-        "/shortcuts - best moments for Shorts\n"
+        "/shortcuts - moments for Shorts\n"
         "/playlists - build themed playlists (you approve)\n"
         "/uploadrecover ID - check an interrupted upload\n"
         "/failed - show failed updates\n"
@@ -9601,7 +9630,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/articlecheck - deepen articles\n"
         "/visuals - real, mix or AI pics\n"
         "/trends - what is hot now (tags, topics)\n"
-        "/thumbtest - 3 thumbnail options to test\n"
+        "/thumbtest - 3 thumbnail options\n"
         "/post - 3 Community posts to paste into YouTube\n"
         "/fbsetup - link your Facebook Page\n"
         "/news - fresh Egypt news to turn into videos\n"
@@ -9614,7 +9643,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/community - posts to share your newest video\n"
         "/starter - a comment-getting question\n"
         "/sublines - rotate the subscribe line\n"
-        "/chapters - add timestamps to long videos\n/fbcomments - reply to Facebook comments\n/fbviews - Facebook vs YouTube views\n"
+        "/chapters - add timestamps to long videos\n/learnexport - my learning notes as a file\n/fbcomments - reply to Facebook comments\n/fbviews - Facebook vs YouTube views\n"
         "/flow - Google Flow prompts for a Short\n"
         "/hook - 3 opening lines for your next Short\n"
         "/goal 100 - set a subscriber goal and track it\n"
@@ -10149,6 +10178,8 @@ def on_message(msg, st):
         cmd_demand(st, text)
     elif text.startswith("/goal"):
         cmd_goal(st, text)
+    elif text == "/learnexport":
+        cmd_learnexport(st)
     elif text == "/chapters":
         cmd_chapters(st)
     elif text == "/fbviews":
@@ -13773,6 +13804,7 @@ def main():
             {"command": "community", "description": "Share video in Reddit/Facebook groups"},
             {"command": "starter", "description": "Comment question for latest video"},
             {"command": "sublines", "description": "Test subscribe wording"},
+            {"command": "learnexport", "description": "Send what I learned as a file"},
             {"command": "chapters", "description": "Add timestamps to long videos"},
             {"command": "fbviews", "description": "Facebook views vs YouTube"},
             {"command": "fbcomments", "description": "Reply to Facebook comments"},
