@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.173"
+BOT_VERSION = "v10.174"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -489,11 +489,25 @@ def cmd_made(st, raw=""):
          "\n\nSomething not on YouTube yet? Send /made add your topic")
 
 
+# Rules the bot wrote for itself that the age-corrected numbers did not support (v10.174): never feed them back into prompts.
+_BAD_LESSON = re.compile(r"(x or y|binary|45\+? ?char|exceed 45|first 20%|opening 20%|before 4 ?pm|no-repeat|never repeat)", re.I)
+
+CHANNEL_PRIORS = ("Measured on this channel after correcting for video age (small sample, so hints): "
+                  "topics about named kings and queens (Tutankhamun, Ramesses, Nefertiti), animals, and the slave-or-labour myths about the pyramids did best; "
+                  "Shorts of 30 seconds or less held viewers longest and loops (video ends where it starts) are the real breakouts; "
+                  "'X or Y' titles, 'Fact Check:' titles and science-worded titles did NOT do better, so vary title shapes.")
+
+
+def good_lessons(lst):
+    return [x for x in lst if not _BAD_LESSON.search(x)]
+
+
 def learned():
     m = mem()
-    parts = []
-    if m["lessons"]:
-        parts.append("Lessons learned about this channel:\n" + "\n".join("- " + x for x in m["lessons"][-12:]))
+    parts = [CHANNEL_PRIORS]
+    gl = good_lessons(m["lessons"])
+    if gl:
+        parts.append("Lessons learned about this channel:\n" + "\n".join("- " + x for x in gl[-12:]))
     if m["picks"]:
         parts.append("Titles the owner CHOSE (his taste):\n" + "\n".join("- " + x for x in m["picks"][-8:]))
     if m["skips"]:
@@ -5002,7 +5016,7 @@ def video_results(vid, rec, tok, vids):
     if an:
         lines.append(f"Average watched: {an['avg_view_percent']}%   New subscribers: {an['subs_gained']}")
     lines += ["", out.get("verdict", ""), "", f"Repeat: {out.get('repeat', '')}", f"Avoid: {out.get('avoid', '')}"]
-    new = [x for x in out.get("lessons", []) if x][:2]
+    new = [x for x in out.get("lessons", []) if x and not _BAD_LESSON.search(str(x))][:2]
     for x in new:
         remember("lessons", x[:200])
     if new:
@@ -5190,8 +5204,8 @@ def weekly_review(st):
     exps = [{"new": e["new"], "old": e["old"], "done": e["done"]} for e in m["exps"][-5:]]
     out = gemini([{"text": WEEKLY_PROMPT.format(an=json.dumps(an), videos=json.dumps(rows[:10]), exps=json.dumps(exps),
                                                comments=json.dumps(recent_comments(tok, vids, 15)),
-                                               known=json.dumps(m["lessons"][-10:]))}])
-    lessons = [str(x).strip()[:160] for x in out.get("lessons", []) if str(x).strip()][:3]
+                                               known=json.dumps(good_lessons(m["lessons"])[-10:]))}])
+    lessons = [str(x).strip()[:160] for x in out.get("lessons", []) if str(x).strip() and not _BAD_LESSON.search(str(x))][:3]
     if not out.get("summary") or not lessons:
         return send("I could not finish the weekly review. Try /review again later.")
     for l in lessons:
@@ -5625,13 +5639,28 @@ def nb_features(o):
     return f
 
 
+def nb_adjust(rows):
+    """Views per day divided by what videos of a similar AGE and the same kind (Short / long) get: young videos always look better per day.
+    Sets o['adj'] (1.0 = typical for its age)."""
+    for o in rows:
+        o["vpd"] = o["views"] / max(o["age"], 1)
+    for o in rows:
+        kind = 0 < o.get("secs", 0) <= 60
+        peers = [p for p in rows if p is not o and (0 < p.get("secs", 0) <= 60) == kind]
+        peers.sort(key=lambda p: abs(p["age"] - o["age"]))
+        near = sorted(p["vpd"] for p in peers[:15])
+        med = near[len(near) // 2] if near else 0
+        o["adj"] = o["vpd"] / med if med > 0 else None
+    return rows
+
+
 def nb_lessons(obs):
     """Plain-language findings from the channel's own numbers. Honest about small samples: needs 8+ videos and 3+ on each side."""
     rows = [o for o in obs.values() if o.get("age", 0) >= 3 and o.get("views") is not None]
     if len(rows) < 8:
         return []
+    nb_adjust(rows)
     for o in rows:
-        o["vpd"] = o["views"] / max(o["age"], 1)
         o["f"] = nb_features(o)
     out = []
     for name in sorted({k for o in rows for k in o["f"]}):
@@ -5639,13 +5668,16 @@ def nb_lessons(obs):
         b = [o for o in rows if name in o["f"] and not o["f"][name]]
         if min(len(a), len(b)) < 3:
             continue
-        conf = "repeating pattern" if min(len(a), len(b)) >= 5 else "early hint"
-        ma, mb = sum(o["vpd"] for o in a) / len(a), sum(o["vpd"] for o in b) / len(b)
+        conf = "repeating pattern" if min(len(a), len(b)) >= 8 else "early hint"
+        aa, bb = [o["adj"] for o in a if o.get("adj") is not None], [o["adj"] for o in b if o.get("adj") is not None]
+        if min(len(aa), len(bb)) < 3:
+            continue
+        ma, mb = sum(aa) / len(aa), sum(bb) / len(bb)     # age-corrected: 1.0 = typical for its age
         if mb > 0:
             ratio = ma / mb
             if ratio >= 1.5 or ratio <= 0.67:
                 out.append({"key": "v|" + name, "conf": conf, "n": len(rows), "dir": 1 if ratio >= 1.5 else -1,
-                            "text": f"Videos with {name} get about {ratio:.1f}x the daily views of the others ({len(a)} vs {len(b)} videos)"})
+                            "text": f"Videos with {name} get about {ratio:.1f}x the views of the others at the same age ({len(a)} vs {len(b)} videos)"})
         pa = [o["pct"] for o in a if o.get("pct")]
         pb = [o["pct"] for o in b if o.get("pct")]
         if min(len(pa), len(pb)) >= 3:
@@ -5774,18 +5806,13 @@ def nb_score(n):
     rows = [o for o in n["obs"].values() if o.get("views") is not None and o.get("age", 0) >= 3]
     if len(rows) < 4:
         return
-    vpd = {k: o["views"] / max(o["age"], 1) for k, o in n["obs"].items() if o.get("views") is not None and o.get("age", 0) >= 3}
+    nb_adjust(rows)
+    vpd = {k: o["adj"] for k, o in n["obs"].items() if o.get("views") is not None and o.get("age", 0) >= 3 and o.get("adj") is not None}
     for vid, p in n["preds"].items():
         o = n["obs"].get(vid)
         if p.get("scored") or not o or o.get("age", 0) < 7 or vid not in vpd:
             continue
-        others = sorted(v for k, v in vpd.items() if k != vid)
-        if not others:
-            continue
-        med = others[len(others) // 2]
-        if med <= 0:
-            continue
-        r = vpd[vid] / med
+        r = vpd[vid]                      # already relative to videos of the same age and kind
         actual = "above" if r > 1.25 else ("below" if r < 0.8 else "typical")
         hit = actual == p["guess"]
         p["scored"], p["actual"], p["hit"] = True, actual, hit
@@ -7706,7 +7733,7 @@ def cmd_retention(st, video_id=None):
         for m_ in analysis.get("moments", [])[:3]:
             lines.append(f"• {m_.get('at', '')} - {m_.get('what', '')}\n  Fix: {m_.get('fix', '')}")
         lines += ["", analysis.get("verdict", "")]
-        new = [x for x in analysis.get("lessons", []) if x][:2]
+        new = [x for x in analysis.get("lessons", []) if x and not _BAD_LESSON.search(str(x))][:2]
         for x in new:
             remember("lessons", x[:200])
         if new:
