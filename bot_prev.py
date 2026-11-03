@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.175"
+BOT_VERSION = "v10.176"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -5689,11 +5689,17 @@ def nb_lessons(obs):
                             "text": f"Videos with {name} get about {ratio:.1f}x the views of the others at the same age ({len(a)} vs {len(b)} videos)"})
         pa = [o["pct"] for o in a if o.get("pct")]
         pb = [o["pct"] for o in b if o.get("pct")]
+        where = ""
+        if not name.startswith("a Short"):         # long videos always keep fewer viewers: compare among Shorts only when there are enough of them
+            sa = [o["pct"] for o in a if o.get("pct") and 0 < o.get("secs", 0) <= 60]
+            sb = [o["pct"] for o in b if o.get("pct") and 0 < o.get("secs", 0) <= 60]
+            if min(len(sa), len(sb)) >= 3:
+                pa, pb, where = sa, sb, " (among Shorts)"
         if min(len(pa), len(pb)) >= 3:
             d = sum(pa) / len(pa) - sum(pb) / len(pb)
             if abs(d) >= 8:
-                out.append({"key": "p|" + name, "conf": "repeating pattern" if min(len(pa), len(pb)) >= 5 else "early hint", "n": len(pa) + len(pb), "dir": 1 if d > 0 else -1,
-                            "text": f"Videos with {name} are watched {abs(d):.0f} points {'more' if d > 0 else 'less'} of the way through"})
+                out.append({"key": "p|" + name, "conf": "repeating pattern" if min(len(pa), len(pb)) >= 8 else "early hint", "n": len(pa) + len(pb), "dir": 1 if d > 0 else -1,
+                            "text": f"Videos with {name} are watched {abs(d):.0f} points {'more' if d > 0 else 'less'} of the way through{where} ({len(pa)} vs {len(pb)} videos)"})
     return out[:8]
 
 
