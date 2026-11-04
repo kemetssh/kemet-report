@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.180"
+BOT_VERSION = "v10.181"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -10009,7 +10009,7 @@ def cmd_failed(st):
     more = f"\n…and {len(rows) - len(shown)} more unresolved update(s)." if len(rows) > len(shown) else ""
     send("⚠️ Unresolved Telegram updates (retained, not auto-replayed):\n" + "\n".join(shown) + more +
          "\n\nVerify Telegram/YouTube/external results first, then use /retry UPDATE_ID confirm. "
-         "A retry can duplicate an indeterminate side effect.")
+         "A retry can duplicate an indeterminate side effect. To drop one without running it: /discard UPDATE_ID confirm (or /discard all confirm).")
 
 
 def cmd_retry(st, raw):
@@ -10050,6 +10050,35 @@ def cmd_retry(st, raw):
     send(f"✅ Update {uid} completed and was durably recorded. It will not be replayed automatically.")
 
 
+def cmd_discard(st, raw):
+    """Drop one retained failed update WITHOUT running it again (v10.181). Use when you already checked the result or do not want it any more."""
+    parts = raw.split()
+    if len(parts) >= 2 and parts[1].lower() == "all":
+        ids = [u for u in _update_journal(st)["order"] if (_update_journal(st)["records"].get(str(u)) or {}).get("status") not in _UPDATE_TERMINAL]
+        if len(parts) < 3 or parts[2].lower() != "confirm":
+            return send(f"This would drop {len(ids)} failed update(s) without running them. Send /discard all confirm to do it.")
+    elif len(parts) >= 2 and re.fullmatch(r"\d+", parts[1]):
+        ids = [int(parts[1])]
+        if len(parts) < 3 or parts[2].lower() != "confirm":
+            return send(f"This drops update {ids[0]} without running it. Send /discard {ids[0]} confirm to do it.")
+    else:
+        return send("Usage: /discard UPDATE_ID confirm (or /discard all confirm). It removes the failed update from /failed without running it.")
+    j = _update_journal(st)
+    n = 0
+    for uid in ids:
+        rec = j["records"].get(str(uid))
+        if not rec or rec.get("status") in _UPDATE_TERMINAL:
+            continue
+        rec["status"] = "skipped"
+        rec["discarded"] = True
+        rec["updated"] = time.time()
+        n += 1
+    _update_journal_advance(st)
+    if not _update_journal_save(st):
+        return send("I could not save that change, so nothing was dropped. Try again.")
+    send(f"✅ Dropped {n} failed update(s). They will not run and /failed no longer lists them.")
+
+
 def on_message(msg, st):
     if str(msg.get("chat", {}).get("id")) != CHAT or not sender_ok(msg):
         return
@@ -10074,6 +10103,8 @@ def on_message(msg, st):
         cmd_failed(st)
     elif re.match(r"^/retry(?:@[A-Za-z0-9_]+)?(?:\s|$)", raw, re.I):
         cmd_retry(st, re.sub(r"^/retry(?:@[A-Za-z0-9_]+)?", "/retry", raw, flags=re.I))
+    elif re.match(r"^/discard(?:@[A-Za-z0-9_]+)?(?:\s|$)", raw, re.I):
+        cmd_discard(st, re.sub(r"^/discard(?:@[A-Za-z0-9_]+)?", "/discard", raw, flags=re.I))
     elif re.match(r"^/uploadrecover(?:@[A-Za-z0-9_]+)?(?:\s|$)", raw, re.I):
         cmd_uploadrecover(st, re.sub(r"^/uploadrecover(?:@[A-Za-z0-9_]+)?", "/uploadrecover", raw, flags=re.I))
     elif re.match(r"^/(?:summarize|summary)(?:@[A-Za-z0-9_]+)?(?:\s|$)", raw, re.I):
