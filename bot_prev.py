@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.176"
+BOT_VERSION = "v10.177"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -685,6 +685,7 @@ def _gpost(body, rounds=3):
                          + ". Nothing was lost: send it again later (about " + str(max(1, int((blk["until"] - time.time()) / 60))) + " min).")
     last = "no model answered"
     busy = False
+    globals()["_G_REASONS"] = []
     for rnd in range(rounds):
         for m in MODELS:
             r = S.post(f"{GBASE}/v1beta/models/{m}:generateContent",
@@ -693,6 +694,10 @@ def _gpost(body, rounds=3):
                 last = f"{m} HTTP {r.status_code}"
                 busy = True
                 _guse("busy", caller)
+                _why = f"{m} answered HTTP {r.status_code}" + (" (rate or minute limit)" if r.status_code == 429 else " (Google overloaded)")
+                _g_reasons = globals().setdefault("_G_REASONS", [])
+                _g_reasons.append(_why)
+                del _g_reasons[:-6]
                 try:
                     txt = r.text or ""
                 except Exception:
@@ -714,7 +719,9 @@ def _gpost(body, rounds=3):
             return r
     if busy:
         mem().setdefault("g_block", {})[kind] = {"until": time.time() + 90, "why": "minute"}      # everything refused: give Google 90 s before asking again
-        raise GeminiBusy("Google's AI is busy or at its free limit right now. Nothing was lost: send it again in a few minutes.")
+        _rs = list(dict.fromkeys(globals().get("_G_REASONS", [])))[-2:]
+        raise GeminiBusy("Google's AI is busy or at its free limit right now. Nothing was lost: send it again in a few minutes."
+                         + ("\nGoogle said: " + "; ".join(_rs) if _rs else ""))
     raise RuntimeError(f"Gemini failed: {last}")
 
 
