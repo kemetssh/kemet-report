@@ -86,11 +86,15 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.177"
+BOT_VERSION = "v10.179"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
 WORKER_SECRET = os.getenv("WORKER_SECRET", "")
+try:
+    WORKER_POLL = max(3.0, float(os.getenv("WORKER_POLL_SECS", "12")))
+except ValueError:
+    WORKER_POLL = 12.0
 YTA = os.getenv("YTA_BASE", "https://youtubeanalytics.googleapis.com")
 CAPTION_LANGS = [("en", "English"), ("ar", "العربية"), ("es", "Español"), ("pt", "Português"), ("hi", "हिन्दी")]
 TRANSLATE_LANGS = [("es", "Spanish"), ("pt", "Portuguese"), ("hi", "Hindi")]
@@ -277,7 +281,7 @@ def remember(kind, item):
 
 
 HOUSE_STYLE = """The owner's standing style rules (always follow them):
-- Whenever you suggest titles or ideas, include at least one "X or Y" title (a clear either/or choice, e.g. "Slaves or Paid Workers? The Evidence"). Prefer it over "Fact Check:" headers.
+- Vary the title shapes. Do not force an "X or Y" either/or title: on this channel they got fewer views than other titles of the same age. Prefer a named king, queen, animal or site and one clear promise, e.g. "What Tutankhamun's Dagger Was Really Made Of".
 - Frame scripts as an investigation into ONE specific mystery, not a general summary.
 - Every script opens with a concrete visual, archaeological hook (a site, relief, object or discovery), then the evidence.
 - Use a currently trending Egypt topic (a dig, museum news) only when you can verify it; never present an unverified trend as fact.
@@ -346,7 +350,7 @@ About: {about}
 Views: {views} ({ratio:.1f}x the daily views of his usual video). Likes: {likes}. Comments: {comments}.
 What viewers wrote under it (their questions and reactions): {viewer}
 Give EXACTLY 3 follow-up EPISODES that continue this video for the same audience (Part 2, the next question, the opposite side, the deeper evidence). Each must be a different angle, honest, and not a copy of a title he already made: {made}
-Each title under 70 characters, ideally with a clear either/or or question; say in "why" what viewers asked for or what loop it opens.
+Each title under 70 characters, ideally a named king, queen, animal or site plus one clear promise (avoid forcing an either/or or a question); say in "why" what viewers asked for or what loop it opens.
 Return JSON only: {{"ideas": [{{"title": "", "hook": "first spoken sentence", "why": "one sentence"}}]}}"""
 
 
@@ -10459,7 +10463,7 @@ def fetch_updates(st, wait):
         if raw and not ups:
             worker_ack(st["offset"] - 1)      # already handled earlier
         if not ups and wait > 0:
-            time.sleep(min(wait, 3))
+            time.sleep(min(wait, WORKER_POLL))      # every poll costs the relay several Cloudflare KV reads: the free plan allows 100,000 a day
         return ups
     return S.get(f"{TGAPI}/getUpdates", params={
         "offset": st["offset"], "timeout": wait,
@@ -13905,7 +13909,7 @@ def main():
             updates = fetch_updates(st, wait)
         except Exception as e:
             print("poll error:", clean(e))
-            time.sleep(3)
+            time.sleep(WORKER_POLL if WORKER else 3)
             continue
         old_offset = int(st.get("offset", 0) or 0)
         for u in sorted(updates, key=lambda x: int(x.get("update_id", 0))):
