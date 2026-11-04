@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.181"
+BOT_VERSION = "v10.182"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -10484,9 +10484,34 @@ def on_callback(cb, st):
     send("That button is out of date.")
 
 
+def _relay_count():
+    """Count today's relay requests. The free Cloudflare plan allows 100,000 a day per account: warn at 30,000 and slow down automatically (v10.182)."""
+    r = mem().setdefault("relay", {})
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    if r.get("day") != day:
+        r.clear()
+        r["day"] = day
+        r["polls"] = 0
+    r["polls"] = int(r.get("polls", 0)) + 1
+    if r["polls"] == 30000 and not r.get("warned"):
+        r["warned"] = True
+        try:
+            send("⚠️ The bot has asked the Cloudflare relay 30,000 times today (the free plan allows 100,000 requests a day for the whole account). "
+                 "I am slowing down to protect it. Send /failed: failed updates left in the list can cause this.")
+        except Exception:
+            pass
+
+
+def _relay_pause():
+    """How long to wait between relay polls: normal 12 s, slower as the day's count grows."""
+    n = int((mem().get("relay") or {}).get("polls", 0))
+    return WORKER_POLL if n < 30000 else (60 if n < 60000 else 180)
+
+
 def fetch_updates(st, wait):
     """New Telegram updates: from the relay Worker if configured, else straight from Telegram."""
     if WORKER:
+        _relay_count()
         r = S.get(WORKER + "/pending", headers={"Authorization": "Bearer " + WORKER_SECRET}, timeout=30)
         r.raise_for_status()
         raw = r.json()
@@ -10494,7 +10519,7 @@ def fetch_updates(st, wait):
         if raw and not ups:
             worker_ack(st["offset"] - 1)      # already handled earlier
         if not ups and wait > 0:
-            time.sleep(min(wait, WORKER_POLL))      # every poll costs the relay several Cloudflare KV reads: the free plan allows 100,000 a day
+            time.sleep(_relay_pause())      # every poll costs the relay several Cloudflare KV reads: the free plan allows 100,000 a day
         return ups
     return S.get(f"{TGAPI}/getUpdates", params={
         "offset": st["offset"], "timeout": wait,
@@ -13933,14 +13958,20 @@ def main():
     end = time.time() + RUN_SECONDS
     first = True
     batch_durable = True
+    poll_errors = 0
     while first or time.time() < end:
         wait = 0 if RUN_SECONDS <= 0 else int(min(25, max(end - time.time(), 0)))
         first = False
         try:
             updates = fetch_updates(st, wait)
+            poll_errors = 0
         except Exception as e:
             print("poll error:", clean(e))
-            time.sleep(WORKER_POLL if WORKER else 3)
+            poll_errors += 1
+            if WORKER and poll_errors >= 12:        # the relay keeps refusing (for example Cloudflare's daily limit): stop this run instead of hammering it
+                print("relay refused 12 times in a row: ending this run")
+                break
+            time.sleep(min(300, max(WORKER_POLL, 3) * 2 ** min(poll_errors, 5)) if WORKER else 3)
             continue
         old_offset = int(st.get("offset", 0) or 0)
         dispatched_any = False
@@ -13983,7 +14014,7 @@ def main():
         if updates and RUN_SECONDS > 0 and int(st.get("offset", 0) or 0) == old_offset and not dispatched_any:
             # Only failed (retained) updates are waiting, so the relay keeps returning them: without this pause the loop asks again at once, thousands of times,
             # which used up Cloudflare's free 100,000 requests a day (v10.180).
-            time.sleep(WORKER_POLL)
+            time.sleep(_relay_pause() if WORKER else 3)
         if (mem().get("fixq") or {}).get("items") and RUN_SECONDS > 0 and time.time() - t0 < 700:
             try:
                 fixq_step(st)
