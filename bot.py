@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.179"
+BOT_VERSION = "v10.180"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -13912,6 +13912,7 @@ def main():
             time.sleep(WORKER_POLL if WORKER else 3)
             continue
         old_offset = int(st.get("offset", 0) or 0)
+        dispatched_any = False
         for u in sorted(updates, key=lambda x: int(x.get("update_id", 0))):
             uid = int(u["update_id"])
             j = _update_journal(st)
@@ -13929,6 +13930,7 @@ def main():
                 break
             if not begun:
                 continue
+            dispatched_any = True
             try:
                 _dispatch_update(u, st)
             except Exception as e:
@@ -13947,6 +13949,10 @@ def main():
                 break
         if WORKER and updates and batch_durable and int(st.get("offset", 0) or 0) > old_offset:
             worker_ack(int(st["offset"]) - 1)
+        if updates and RUN_SECONDS > 0 and int(st.get("offset", 0) or 0) == old_offset and not dispatched_any:
+            # Only failed (retained) updates are waiting, so the relay keeps returning them: without this pause the loop asks again at once, thousands of times,
+            # which used up Cloudflare's free 100,000 requests a day (v10.180).
+            time.sleep(WORKER_POLL)
         if (mem().get("fixq") or {}).get("items") and RUN_SECONDS > 0 and time.time() - t0 < 700:
             try:
                 fixq_step(st)
