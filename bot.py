@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.183"
+BOT_VERSION = "v10.185"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1913,10 +1913,16 @@ def pick_hashtags(about, short=False, trend=None, keep=(), n=5):
     except Exception:
         bias = {}
 
+    skipped = []
+    allsc = [v[0] for v in bias.values() if v[1] >= 3]
+    mean_sc = sum(allsc) / len(allsc) if allsc else 0
+
     def add(ht):
         if ht and not has(ht) and len(out) < n:
             b = bias.get(ht.lower())
-            if b and b[1] >= 3 and b[0] <= 0.4 and len(out) >= 2:      # a tag that did nothing on 3+ of his posts is skipped
+            # A tag is skipped only when it did clearly worse than the other tags: if every post got zero (a quiet Page), that says nothing about the tag (v10.185)
+            if b and b[1] >= 3 and b[0] <= 0.4 and mean_sc >= 0.8 and len(out) >= 2:
+                skipped.append(ht)
                 return
             out.append(ht)
     topic = title_words(about)
@@ -1942,6 +1948,9 @@ def pick_hashtags(about, short=False, trend=None, keep=(), n=5):
             add(nice)
     for d in ("#History", "#Egyptology", "#Archaeology", "#Pharaoh", "#Egypt", "#Mystery", "#AncientHistory", "#Museum", "#Archaeologist", "#WorldHistory"):
         add(d)
+    for ht in skipped:                      # always return exactly n tags
+        if len(out) < n and not has(ht):
+            out.append(ht)
     return out[:n]
 
 
@@ -11227,7 +11236,7 @@ def art_fact_check(art, title):
 
 GOOD_SRC = ("britishmuseum.org", "metmuseum.org", "si.edu", "nationalgeographic.com", "ucl.ac.uk", "ox.ac.uk", "cam.ac.uk", ".edu", ".ac.uk", ".gov", "smarthistory.org", "sciencedirect.com",
             "nature.com", "jstor.org", "oup.com", "cambridge.org", "worldhistory.org", "louvre.fr", "brooklynmuseum.org", "penn.museum", "arce.org", "archaeology.org", "science.org",
-            "smithsonianmag.com", "egyptianmuseum.org", "griffith.ox.ac.uk", "pnas.org", "plos.org", "springer.com", "tandfonline.com", "wiley.com", "harvard.edu", "mfa.org", "getty.edu")
+            "smithsonianmag.com", "britannica.com", "arxiv.org", "royalsociety.org", "iop.org", "sagepub.com", "egyptianmuseum.org", "griffith.ox.ac.uk", "pnas.org", "plos.org", "springer.com", "tandfonline.com", "wiley.com", "harvard.edu", "mfa.org", "getty.edu")
 BAD_SRC = ("pinterest.com", "quora.com", "reddit.com", "facebook.com", "youtube.com", "youtube-nocookie.com", "youtu.be", "tiktok.com", "blogspot.com", "wordpress.com", "medium.com", "tripadvisor.com", "instagram.com", "twitter.com", "x.com", "fandom.com")
 
 
@@ -12226,6 +12235,15 @@ def resource_article(item, st):
         except Exception as e:
             print("resource search:", clean(e)[:100])
     found = dedupe_sources(found, 8)
+    if len(found) < 4:                       # a fringe or narrow topic has few museum pages: widen the search before giving up (v10.184)
+        for q in (item["title"] + " critique archaeoastronomy peer reviewed", item["title"] + " Egyptologists encyclopedia", item["title"] + " scientific analysis"):
+            try:
+                found += [(x["title"], x["url"]) for x in web_search(q, 6) if _trusted_source_url(x["url"])]
+            except Exception as e:
+                print("resource search 2:", clean(e)[:100])
+            if len(dedupe_sources(found, 8)) >= 4:
+                break
+        found = dedupe_sources(found, 8)
     if not found:
         return send("I could not find a museum, university or journal page for this topic right now (search may be busy). I left the article as it is. Try again later.")
     with tempfile.TemporaryDirectory() as d:
@@ -12264,6 +12282,9 @@ def resource_article(item, st):
         return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
     good_n = sum(1 for _, u in srcs if _trusted_source_url(u))
     msg = f"✅ {art['title']}: {good_n} museum, university or journal source(s) now listed (the page also shows a Key sources box)."
+    if len(srcs) < 3:
+        msg += (f"\n⚠️ Only {len(srcs)} trusted source(s) exist for this topic, and the weekly check wants 3. This is the most I can find "
+                "automatically.")
     if ran:
         msg += f"\n🔎 Claims checked: ✅ {solid} confirmed" + (f", ⚠️ {softened} softened" if softened else "")
         msg += ("\n" + "\n".join("• " + x[:160] for x in notes[:3])) if notes else ""
