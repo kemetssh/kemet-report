@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.182"
+BOT_VERSION = "v10.183"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2801,12 +2801,21 @@ def cmd_xpost(st, arg=""):
 def do_publish(job, st=None):
     tok = yt_token()
     vid = job["video_id"]
+    status, why = "unknown", ""
     try:
         yt_set_public(vid, tok)
-        status = yt_privacy(vid, tok)
     except Exception as e:
-        status = "private"
+        why = "YouTube refused the publish request: " + clean(e)[:160]
         print("publish error:", clean(e))
+    for i in range(4):                      # the new state can take a few seconds to show up: ask again before giving up (v10.183)
+        try:
+            status = yt_privacy(vid, tok)
+            if status == "public":
+                break
+        except Exception as e:
+            why = why or "I could not read the video's status: " + clean(e)[:160]
+            print("privacy check error:", clean(e))
+        time.sleep(4)
     if status == "public":
         job["stage"] = "done"
         rec_ = mem()["videos"].get(vid)
@@ -2814,9 +2823,13 @@ def do_publish(job, st=None):
             rec_["public_at"] = rec_.get("public_at") or time.time()           # so the automatic public-detector does not repeat this
         first_hour(vid, rec_ or {"title": job["title"], "summary": (job.get("review") or {}).get("summary", "")}, job, st)
     else:
-        send("YouTube kept it PRIVATE. New API projects are locked to private until Google "
-             "audits them, so this is expected.\n\nTo publish: YouTube app → Profile → Your "
-             "videos → open it → Edit → Visibility → Public.\n" + f"https://youtu.be/{vid}")
+        if status in ("private", "unlisted"):
+            send(f"YouTube still shows this video as {status.upper()} after the publish request." + (f"\n{why}" if why else "") +
+                 "\n\nIf your project is new, Google keeps API uploads private until it audits the project. To publish by hand: "
+                 "YouTube app → Profile → Your videos → open it → Edit → Visibility → Public.\n" + f"https://youtu.be/{vid}")
+        else:
+            send("I sent the publish request but could not confirm the result." + (f"\n{why}" if why else "") +
+                 "\n\nOpen the link: if it is already public, nothing more is needed. I check for new public videos myself and will then offer the posts and the pinned comment.\n" + f"https://youtu.be/{vid}")
 
 
 def trigger_report():
