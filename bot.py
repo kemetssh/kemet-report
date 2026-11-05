@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.187"
+BOT_VERSION = "v10.188"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -494,7 +494,7 @@ def cmd_made(st, raw=""):
 
 
 # Rules the bot wrote for itself that the age-corrected numbers did not support (v10.174): never feed them back into prompts.
-_BAD_LESSON = re.compile(r"(x or y|binary|45\+? ?char|exceed 45|first 20%|opening 20%|before 4 ?pm|no-repeat|never repeat)", re.I)
+_BAD_LESSON = re.compile(r"(indifferent to the volume|1\.5x higher|x or y|binary|45\+? ?char|exceed 45|first 20%|opening 20%|before 4 ?pm|no-repeat|never repeat)", re.I)
 
 CHANNEL_PRIORS = ("Measured on this channel after correcting for video age (small sample, so hints): "
                   "topics about named kings and queens (Tutankhamun, Ramesses, Nefertiti), animals, and the slave-or-labour myths about the pyramids did best; "
@@ -503,7 +503,15 @@ CHANNEL_PRIORS = ("Measured on this channel after correcting for video age (smal
 
 
 def good_lessons(lst):
-    return [x for x in lst if not _BAD_LESSON.search(x)]
+    """Lessons worth showing the writer: no old bad rules, no one-off fact-check notes, no near-copies (the newest copy wins)."""
+    out, seen = [], []
+    for x in reversed([x for x in lst if not _BAD_LESSON.search(x) and not str(x).startswith("Double-check this kind of claim")]):
+        w = set(re.findall(r"[a-z0-9]{4,}", x.lower()))
+        if w and any(len(w & o) / max(1, len(w | o)) >= 0.45 for o in seen):
+            continue
+        seen.append(w)
+        out.append(x)
+    return list(reversed(out))
 
 
 def learned():
