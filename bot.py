@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.189"
+BOT_VERSION = "v10.191"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -10133,6 +10133,10 @@ def on_message(msg, st):
         return
     if text == "/askform":
         return cmd_askform(st)
+    rp_ = (msg.get("reply_to_message") or {}).get("text") or ""
+    if raw and not raw.startswith("/") and rp_.startswith("\U0001F4AC Reader question"):
+        ask_callback({"message": {"text": rp_, "message_id": 0}}, "qa", st)      # replying straight to the question also works
+        return ask_take_answer(st, raw) and None
     if re.fullmatch(r"/failed(?:@[A-Za-z0-9_]+)?", raw, re.I):
         cmd_failed(st)
     elif re.match(r"^/retry(?:@[A-Za-z0-9_]+)?(?:\s|$)", raw, re.I):
@@ -11998,7 +12002,7 @@ async function handle(request, env, url) {
   if (n >= 3) return reply({ ok: false, error: "slow" }, 429);
   await caches.default.put(key, new Response(String(n + 1), { headers: { "cache-control": "max-age=3600" } }));
   const title = String(d.title || slug).slice(0, 120);
-  const text = "\u{1F4AC} Reader question\nArticle: " + title + "\n" + url.origin + "/articles/" + slug + "/\n\n" + q + "\n\nName: " + (name || "anonymous");
+  const text = "\u{1F4AC} Reader question\nArticle: " + title + "\n" + (env.SITE_URL || url.origin) + "/articles/" + slug + "/\n\n" + q + "\n\nName: " + (name || "anonymous");
   const r = await fetch("https://api.telegram.org/bot" + env.TG_TOKEN + "/sendMessage", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: env.TG_CHAT, text, disable_web_page_preview: true,
@@ -12086,7 +12090,8 @@ def ask_env_set():
         return False, "Cloudflare is not connected. Send /cfsetup."
     body = {"deployment_configs": {"production": {"env_vars": {
         "TG_TOKEN": {"type": "secret_text", "value": TG_TOKEN},
-        "TG_CHAT": {"type": "plain_text", "value": str(CHAT)}}}}}
+        "TG_CHAT": {"type": "plain_text", "value": str(CHAT)},
+        "SITE_URL": {"type": "plain_text", "value": SITE_BASE}}}}}
     try:
         r = S.patch(f"{CF_API}/accounts/{cfg['account']}/pages/projects/{cfg['project']}", headers={"Authorization": "Bearer " + cfg["token"]}, json=body, timeout=40)
         j = r.json()
@@ -12397,7 +12402,8 @@ def site_check(root):
             art = page_article(t)
             if article_words(art[0]) < ART_MIN_WORDS:
                 thin.append(art[0]["title"])
-            if len(art[3]) < 3:
+            lim_ = (mem().get("src_limit") or {}).get(rel.split("/")[1])
+            if len(art[3]) < 3 and not (lim_ is not None and len(art[3]) >= lim_):     # the bot already searched and found all it can (v10.191)
                 fewsrc.append(art[0]["title"])
             if not any(_trusted_source_url(u) for _, u in art[3]):
                 weak.append(art[0]["title"])
@@ -12492,8 +12498,9 @@ def resource_article(item, st):
     good_n = sum(1 for _, u in srcs if _trusted_source_url(u))
     msg = f"✅ {art['title']}: {good_n} museum, university or journal source(s) now listed (the page also shows a Key sources box)."
     if len(srcs) < 3:
-        msg += (f"\n⚠️ Only {len(srcs)} trusted source(s) exist for this topic, and the weekly check wants 3. This is the most I can find "
-                "automatically.")
+        mem().setdefault("src_limit", {})[item["slug"]] = len(srcs)
+        msg += (f"\n⚠️ Only {len(srcs)} trusted source(s) exist for this topic. This is the most I can find automatically, "
+                "so the weekly check will not flag this article again unless its sources shrink.")
     if ran:
         msg += f"\n🔎 Claims checked: ✅ {solid} confirmed" + (f", ⚠️ {softened} softened" if softened else "")
         msg += ("\n" + "\n".join("• " + x[:160] for x in notes[:3])) if notes else ""
