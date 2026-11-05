@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.188"
+BOT_VERSION = "v10.189"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -10129,6 +10129,10 @@ def on_message(msg, st):
         return handle_voice(msg, st)
     raw = (msg.get("text") or "").strip()
     text = raw.lower()
+    if st.get("ask_answer") and raw and (not raw.startswith("/") or text.startswith("/cancel")) and ask_take_answer(st, raw):
+        return
+    if text == "/askform":
+        return cmd_askform(st)
     if re.fullmatch(r"/failed(?:@[A-Za-z0-9_]+)?", raw, re.I):
         cmd_failed(st)
     elif re.match(r"^/retry(?:@[A-Za-z0-9_]+)?(?:\s|$)", raw, re.I):
@@ -10411,6 +10415,8 @@ def on_callback(cb, st):
     except Exception:
         pass
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
+    if jid == "q" and act in ("qa", "qi"):
+        return ask_callback(cb, act, st)
     if act in ("ta", "ts", "tu", "ca", "cs", "fbr", "fbn", "chp", "chs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
@@ -11962,6 +11968,193 @@ def cmd_publish(st):
     offer_publish(st)
 
 
+# ---------- reader questions: a form on every article that sends the question to Telegram ----------
+ASK_WORKER_JS = r"""// Kemet reader questions: receives POST /api/ask and forwards it to the owner's Telegram. Everything else is the static site.
+const enc = new TextEncoder();
+async function sha256hex(s) {
+  const b = await crypto.subtle.digest("SHA-256", enc.encode(s));
+  return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, "0")).join("");
+}
+function reply(obj, status) {
+  return new Response(JSON.stringify(obj), { status: status || 200, headers: { "content-type": "application/json", "cache-control": "no-store" } });
+}
+async function handle(request, env, url) {
+  const origin = request.headers.get("origin");
+  if (origin && origin !== url.origin) return reply({ ok: false, error: "origin" }, 403);
+  let d;
+  try { d = await request.json(); } catch (e) { return reply({ ok: false, error: "bad" }, 400); }
+  const slug = String(d.slug || ""), q = String(d.q || "").trim(), name = String(d.name || "").trim().slice(0, 40);
+  const ts = Number(d.ts || 0), nonce = String(d.nonce || "");
+  if (d.hp) return reply({ ok: true });                                   // honeypot: pretend it worked
+  if (!/^[a-z0-9-]{3,120}$/.test(slug) || q.length < 10 || q.length > 1000) return reply({ ok: false, error: "length" }, 400);
+  if ((q.match(/https?:\/\//gi) || []).length > 1) return reply({ ok: false, error: "links" }, 400);
+  const now = Date.now();
+  if (!(ts > now - 3600e3 && ts < now + 60e3)) return reply({ ok: false, error: "expired" }, 400);
+  if (!(await sha256hex(ts + "|" + slug + "|" + q + "|" + nonce)).startsWith("000")) return reply({ ok: false, error: "proof" }, 400);
+  const ip = request.headers.get("cf-connecting-ip") || "x";
+  const key = new Request("https://rate.invalid/" + encodeURIComponent(ip));
+  const hit = await caches.default.match(key);
+  const n = hit ? Number(await hit.text()) : 0;
+  if (n >= 3) return reply({ ok: false, error: "slow" }, 429);
+  await caches.default.put(key, new Response(String(n + 1), { headers: { "cache-control": "max-age=3600" } }));
+  const title = String(d.title || slug).slice(0, 120);
+  const text = "\u{1F4AC} Reader question\nArticle: " + title + "\n" + url.origin + "/articles/" + slug + "/\n\n" + q + "\n\nName: " + (name || "anonymous");
+  const r = await fetch("https://api.telegram.org/bot" + env.TG_TOKEN + "/sendMessage", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chat_id: env.TG_CHAT, text, disable_web_page_preview: true,
+      reply_markup: { inline_keyboard: [[{ text: "✍️ Answer on the site", callback_data: "q|qa|x" }, { text: "\u{1F5D1} Ignore", callback_data: "q|qi|x" }]] } })
+  });
+  return reply({ ok: r.ok }, r.ok ? 200 : 502);
+}
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    if (url.pathname === "/api/ask" && request.method === "POST") return handle(request, env, url);
+    return env.ASSETS.fetch(request);
+  }
+};
+"""
+
+ASK_ROUTES = '{"version":1,"include":["/api/ask"],"exclude":[]}\n'
+
+ASK_CSS = """
+/* kemet-ask-1 */
+.ask-box { margin: 46px auto 10px; max-width: 760px; padding: 0 20px; }
+.ask-box h2 { font-size: 1.25rem; margin: 0 0 14px; }
+.ask-qa { margin: 0 0 22px; padding: 14px 16px; border: 1px solid var(--line-gold); border-radius: 12px; }
+.ask-qa .ask-q { font-weight: 600; margin: 0 0 8px; }
+.ask-qa .ask-a { margin: 0; color: var(--sand-muted); line-height: 1.7; }
+.ask-form textarea, .ask-form input[type=text] { width: 100%; box-sizing: border-box; padding: 12px; margin: 0 0 10px; border: 1px solid var(--line-gold); border-radius: 10px; background: transparent; color: inherit; font: inherit; }
+.ask-form textarea { min-height: 110px; resize: vertical; }
+.ask-form button { padding: 11px 20px; border: 1px solid var(--gold); border-radius: 999px; background: transparent; color: var(--gold); font: inherit; cursor: pointer; }
+.ask-form button[disabled] { opacity: .5; cursor: default; }
+.ask-form .ask-note { font-size: .8rem; color: var(--sand-muted); margin: 8px 0 0; }
+.ask-form .ask-msg { margin: 10px 0 0; }
+.ask-hp { position: absolute; left: -9999px; height: 0; overflow: hidden; }
+"""
+
+ASK_FORM_JS = """<script data-kemet-ask>(function(){var f=document.getElementById('kemet-ask-form');if(!f)return;var m=f.querySelector('.ask-msg'),b=f.querySelector('button');
+async function sha(s){var x=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s));return Array.from(new Uint8Array(x)).map(function(v){return v.toString(16).padStart(2,'0')}).join('');}
+f.addEventListener('submit',async function(e){e.preventDefault();var q=f.q.value.trim();if(q.length<10){m.textContent='Please write a little more (at least 10 characters).';return;}
+b.disabled=true;m.textContent='Sending...';try{var ts=Date.now(),slug=f.dataset.slug,n=0;while(!(await sha(ts+'|'+slug+'|'+q+'|'+n)).startsWith('000')){n++;if(n>2000000)throw 0;}
+var r=await fetch('/api/ask',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({slug:slug,title:f.dataset.title,q:q,name:f.name.value,hp:f.hp.value,ts:ts,nonce:String(n)})});
+if(r.ok){f.reset();m.textContent='Thank you. Your question reached us. If we can answer it well, the answer will appear on this page.';}else if(r.status===429){m.textContent='Please wait a little before sending another question.';b.disabled=false;}else{m.textContent='Sorry, it did not go through. Please try again later.';b.disabled=false;}}catch(x){m.textContent='Sorry, it did not go through. Please try again later.';b.disabled=false;}});})();</script>"""
+
+
+def ask_box_html(slug, title, qas):
+    qa = "".join(f'<div class="ask-qa"><p class="ask-q">{esc(x["q"])}</p><p class="ask-a">{esc(x["a"])}</p></div>' for x in qas)
+    head = "<h2>Reader questions</h2>" + qa if qa else ""
+    return ('<!--kemet-ask--><section class="ask-box" id="ask">' + head +
+            f'<h2>Spot a mistake? Have a question?</h2><form class="ask-form" id="kemet-ask-form" data-slug="{esc(slug)}" data-title="{esc(title[:100])}">'
+            '<textarea name="q" maxlength="1000" placeholder="Write your question or the correction you suggest (10 to 1000 characters)" required></textarea>'
+            '<input type="text" name="name" maxlength="40" placeholder="Your first name (optional)">'
+            '<input class="ask-hp" type="text" name="hp" tabindex="-1" autocomplete="off" aria-hidden="true">'
+            '<button type="submit">Send</button><p class="ask-note">We read every message. We never publish your name or anything you send unless it is a question we answer, and then only the question and our answer.</p><p class="ask-msg" role="status"></p></form></section>'
+            + ASK_FORM_JS + '<!--/kemet-ask-->\n')
+
+
+def apply_ask(root):
+    """Put the question box (and any answered reader questions) on every article; add the form handler. Safe to run again."""
+    root = Path(root)
+    qa_all = mem().get("qa") or {}
+    n = 0
+    for pth in (root / "articles").glob("*/index.html"):
+        t = pth.read_text(encoding="utf-8")
+        if "</main>" not in t or '<article class="article-body">' not in t:
+            continue
+        slug = pth.parent.name
+        tt = re.search(r"<title>(.*?)</title>", t, re.S)
+        title = html.unescape(re.sub(r"\s*\|\s*Kemet\s*$", "", tt.group(1))) if tt else slug
+        t = re.sub(r"<!--kemet-ask-->.*?<!--/kemet-ask-->\n?", "", t, flags=re.S)
+        t2 = t.replace("</main>", ask_box_html(slug, title, qa_all.get(slug, [])) + "</main>", 1)
+        pth.write_text(t2, encoding="utf-8")
+        n += 1
+    css = root / "styles.css"
+    if css.exists():
+        c = css.read_text(encoding="utf-8")
+        if "kemet-ask-1" not in c:
+            css.write_text(c.rstrip() + "\n" + ASK_CSS, encoding="utf-8")
+    (root / "_worker.js").write_text(ASK_WORKER_JS, encoding="utf-8")
+    (root / "_routes.json").write_text(ASK_ROUTES, encoding="utf-8")
+    return n
+
+
+def ask_env_set():
+    """Give the Cloudflare Pages project the two settings the form handler needs. Returns (ok, text)."""
+    cfg = cf_cfg()
+    if not cfg:
+        return False, "Cloudflare is not connected. Send /cfsetup."
+    body = {"deployment_configs": {"production": {"env_vars": {
+        "TG_TOKEN": {"type": "secret_text", "value": TG_TOKEN},
+        "TG_CHAT": {"type": "plain_text", "value": str(CHAT)}}}}}
+    try:
+        r = S.patch(f"{CF_API}/accounts/{cfg['account']}/pages/projects/{cfg['project']}", headers={"Authorization": "Bearer " + cfg["token"]}, json=body, timeout=40)
+        j = r.json()
+    except Exception as e:
+        return False, "Could not reach Cloudflare: " + clean(e)[:160]
+    if not j.get("success"):
+        return False, "Cloudflare refused the settings: " + ("; ".join(str(e.get("message", ""))[:100] for e in (j.get("errors") or [])[:2]) or f"HTTP {r.status_code}")
+    return True, ""
+
+
+def ask_rebuild(st, note):
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("First send me your current site as a .zip file, then try again.")
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        n = apply_ask(root)
+        r = pack_site(root, d, f"💬 {note} ({n} articles). Tap 🚀 Publish below to put it live.")
+    if not r.get("ok"):
+        return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
+    offer_publish(st)
+
+
+def cmd_askform(st):
+    if not cf_cfg():
+        return send("Cloudflare is not connected yet. Send /cfsetup first (3 minutes, free).")
+    ok, why = ask_env_set()
+    if not ok:
+        return send("I could not set up the question box: " + why + "\nIf it says permission, the Cloudflare key needs 'Cloudflare Pages: Edit'. Send /cfsetup to make a new key.")
+    mem()["ask_on"] = True
+    send("💬 Adding a question box to every article. The settings are saved in Cloudflare. Building the new site...")
+    ask_rebuild(st, "Site updated: a question box on every article")
+
+
+def ask_callback(cb, act, st):
+    msg = cb["message"]
+    text = msg.get("text") or ""
+    if act == "qi":
+        try:
+            tg("deleteMessage", chat_id=CHAT, message_id=msg["message_id"])
+        except Exception:
+            pass
+        return
+    m = re.search(r"/articles/([a-z0-9-]+)/", text)
+    body = re.search(r"\n\n(.*)\n\nName:", text, re.S)
+    if not m or not body:
+        return send("I could not read that question. Ask the reader to send it again.")
+    st["ask_answer"] = {"slug": m.group(1), "q": body.group(1).strip()[:1000], "ts": time.time()}
+    send("✍️ Send me your answer now, as one message (plain text, a few sentences). Send /cancel to skip.\n\nQuestion: " + body.group(1).strip()[:500])
+
+
+def ask_take_answer(st, raw):
+    pend = st.pop("ask_answer", None)
+    if not pend:
+        return False
+    if time.time() - pend.get("ts", 0) > 12 * 3600:
+        return False
+    if raw.lower().startswith("/cancel"):
+        send("Skipped. Nothing was added to the site.")
+        return True
+    qa = mem().setdefault("qa", {})
+    qa.setdefault(pend["slug"], []).append({"q": pend["q"], "a": raw[:1500], "ts": time.time()})
+    send("Saved. Building the page with your answer...")
+    ask_rebuild(st, "Site updated: your answer is added to a reader question")
+    return True
+
+
+
 def reading_ref(slug):
     return "KMT-" + hashlib.sha1(("kemet:" + slug).encode()).hexdigest()[:6].upper()
 
@@ -12724,6 +12917,11 @@ def rebuild_site_hubs(root, tok):
 
 
 def pack_site(root, d, caption):
+    if mem().get("ask_on"):
+        try:
+            apply_ask(root)       # keeps the question box on new articles too
+        except Exception as e:
+            print("ask box:", clean(e)[:120])
     if cf_cfg():
         caption = re.sub(r"Unzip and upload the CONTENTS to Cloudflare Pages( as Production)?\.", "Tap 🚀 Publish below to put it live.", caption)
     import zipfile
@@ -13674,6 +13872,11 @@ def write_article(c, st):
                 sm_.write_text(s_.replace("</urlset>", "".join(f"  <url><loc>{SITE_BASE}{u}</loc>\n    <lastmod>{today_}</lastmod></url>\n" for u in ["/playlists/"] + bu) + "</urlset>"), encoding="utf-8")
         except Exception as e:
             print("hubs:", clean(e)[:120])
+        if mem().get("ask_on"):
+            try:
+                apply_ask(root)
+            except Exception as e:
+                print("ask box:", clean(e)[:120])
         zp = Path(d) / f"kemet-site-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
         import zipfile
         with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -13978,6 +14181,7 @@ def main():
             {"command": "voice", "description": "Pacing coach"},
             {"command": "poll", "description": "Poll: what to film next"},
             {"command": "links", "description": "Links added to descriptions"},
+            {"command": "askform", "description": "Question box on articles"},
             {"command": "health", "description": "Check everything works"},
             {"command": "pause", "description": "Pause my own messages"},
             {"command": "results", "description": "How your latest video did"},
