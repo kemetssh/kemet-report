@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.186"
+BOT_VERSION = "v10.187"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -8334,7 +8334,7 @@ def selftest_checks(deep=True):
         fq = (mem().get("fixq") or {}).get("items") or []
         n_props = len(ST.get("props") or {})
         note = (f"; cleaned {len(healed)} abandoned upload(s)" if healed else "") + (f"; removed {len(old_props)} old buttons" if old_props else "")
-        add(kb < 3000 and not jobs and n_props < 400, "Bot memory", f"{kb:.0f} KB, {n_props} open buttons, {len(jobs)} stuck upload(s), fix-all queue {len(fq)}{note}")
+        add(kb < 3000 and n_props < 400, "Bot memory", f"{kb:.0f} KB, {n_props} open buttons, {len(jobs)} upload(s) waiting for a tap (cancelled automatically after 2 days), fix-all queue {len(fq)}{note}")
     except Exception as e:
         add(False, "Bot memory", clean(e)[:90])
     lg_all = [x for x in (mem().get("errlog") or []) if time.time() - x["ts"] < 86400]
