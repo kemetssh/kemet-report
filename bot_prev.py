@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.185"
+BOT_VERSION = "v10.186"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -11579,6 +11579,14 @@ def build_listing(root, cat):
         print("home reads:", clean(e)[:120])
     today = datetime.date.today().isoformat()
     urls = ["/", "/about/", "/articles/"] + [f"/articles/{c['slug']}/" for c in order]
+    try:
+        _old_sm = (root / "sitemap.xml").read_text(encoding="utf-8") if (root / "sitemap.xml").exists() else ""
+        _keep = re.findall(r"<loc>" + re.escape(SITE_BASE) + r"(/playlists/[^<]*)</loc>", _old_sm)
+        if not _keep and (root / "playlists").is_dir():
+            _keep = ["/playlists/"] + [f"/playlists/{d.name}/" for d in sorted((root / "playlists").iterdir()) if d.is_dir() and (d / "index.html").exists()]
+        urls += [u for u in dict.fromkeys(_keep) if u not in urls]
+    except Exception as e:
+        print("sitemap keep:", clean(e)[:120])
     sm = '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' + "".join(
         f"  <url><loc>{SITE_BASE}{u}</loc>\n    <lastmod>{today}</lastmod></url>\n" for u in urls) + "</urlset>\n"
     (root / "sitemap.xml").write_text(sm, encoding="utf-8")
