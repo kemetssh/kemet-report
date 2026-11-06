@@ -86,7 +86,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.193"
+BOT_VERSION = "v10.194"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -315,6 +315,9 @@ def made_titles():
     out = list(cache.get("titles", []))
     out += [r.get("title", "") for r in m["videos"].values()]
     out += m.get("made_manual", [])
+    out += [x.get("claim", "") for x in (m.get("audits") or []) if isinstance(x, dict)]          # every audited claim
+    out += [x.get("title", "") for x in (m.get("scripted") or []) if isinstance(x, dict)]        # every script already written
+    out += [x.get("title", "") for x in (m.get("offered") or []) if isinstance(x, dict) and time.time() - x.get("ts", 0) < 45 * 86400]
     seen, res = set(), []
     for t in out:
         if t and t.lower() not in seen:
@@ -330,11 +333,25 @@ def is_made(title, made=None):
         if not a or not b:
             continue
         common = len(a & b)
-        if common >= 2 and common / min(len(a), len(b)) >= 0.6:
+        if common >= 2 and common / min(len(a), len(b)) >= 0.5:
             return True
         if str(title).strip().lower() == str(t).strip().lower():
             return True
     return False
+
+
+def note_offered(titles):
+    """Remember ideas that were shown, so the next /idea, /news or /audit does not offer the same ones again for 45 days."""
+    lst = [x for x in (mem().get("offered") or []) if isinstance(x, dict) and time.time() - x.get("ts", 0) < 45 * 86400]
+    have = {x.get("title", "").lower() for x in lst}
+    lst += [{"title": str(t)[:140], "ts": time.time()} for t in titles if t and str(t).lower() not in have]
+    mem()["offered"] = lst[-150:]
+
+
+def note_scripted(title):
+    lst = [x for x in (mem().get("scripted") or []) if isinstance(x, dict) and x.get("title") != title]
+    lst.append({"title": str(title)[:140], "ts": time.time()})
+    mem()["scripted"] = lst[-300:]
 
 
 def drop_made(items, key="title"):
@@ -4450,6 +4467,7 @@ def cmd_idea(st):
     ideas = get_ideas()
     if not ideas:
         return send("I could not come up with ideas right now. Try again later.")
+    note_offered([i["title"] for i in ideas])
     pid = new_pid(st)
     st["props"][pid] = {"type": "ideas", "ideas": ideas, "created": time.time()}
     body = "Video ideas:\n\n" + "\n\n".join(
@@ -4528,6 +4546,7 @@ def cmd_scout(st):
     out = gemini([{"text": SCOUT_PROMPT.format(memory=learned(), rows=json.dumps(
         [{k: r[k] for k in ("title", "channel", "views", "subs", "age_days", "minutes", "views_per_sub")} for r in rows]))}])
     ideas = drop_made([i for i in out.get("ideas", []) if i.get("title")])[:5]
+    note_offered([i["title"] for i in ideas])
     pats = [str(p) for p in out.get("patterns", [])][:4]
     gaps = [str(g) for g in out.get("gaps", [])][:3]
     if not ideas:
@@ -4704,6 +4723,7 @@ def write_script(idea):
     msg = f"🎬 {idea['title']}\n\n{text}"
     if summary:
         msg += "\n\n" + summary
+    note_scripted(idea["title"])
     mem()["cleared"] = {"title": idea["title"], "script": text[:6000], "sources": sources, "ts": time.time(),
                         "verified": "NOT fully verified" not in summary}
     msg += ("\n\n✅ CLEARED BEFORE FILMING: facts, wording and sources are checked, so the upload review will not raise them again. "
@@ -4723,7 +4743,7 @@ def write_script(idea):
 # ---------------- Kemet Audited ----------------
 AUDIT_CLAIMS_PROMPT = """You host "Kemet Audited", a YouTube series that audits popular claims about Ancient Egypt like a quality auditor: evidence first.
 List 6 widely repeated claims, myths or viral theories about Ancient Egypt that people argue about (pyramid building, curses, lost technology, who built what, famous rulers). Mix true, false and disputed ones.
-Already audited, avoid: {done}
+Already audited or already made as videos (avoid these AND anything on the same topic, even if worded differently): {done}
 Return JSON only: {{"claims": ["one claim as a short plain sentence, max 90 characters"]}}"""
 
 AUDIT_PROMPT = """You host "Kemet Audited", a YouTube series that audits claims about Ancient Egypt like a quality auditor. Use web search.
@@ -4824,9 +4844,11 @@ def cmd_audit(st, raw="/audit"):
     if len(parts) > 1 and parts[1].strip():
         return run_audit(parts[1].strip()[:300], st)
     send("Finding popular Ancient Egypt claims worth auditing...")
-    done = [a["claim"] for a in mem().get("audits", [])][-15:]
+    done = [a["claim"] for a in mem().get("audits", [])][-60:] + made_titles()[:40]
     out = gemini([{"text": AUDIT_CLAIMS_PROMPT.format(done=json.dumps(done))}])
-    claims = [c for c in out.get("claims", []) if isinstance(c, str) and c.strip()][:6]
+    claims = [c for c in out.get("claims", []) if isinstance(c, str) and c.strip()]
+    claims = [c["claim"] for c in drop_made([{"claim": x} for x in claims], "claim")][:6]
+    note_offered(claims)
     if not claims:
         return send("I could not find claims right now. Type /audit and then your own claim, for example: /audit aliens built the pyramids")
     pid = new_pid(st)
@@ -4870,7 +4892,7 @@ def run_audit(claim, st, video=False, pov=False):
     msg += "\n\nAI can still be wrong: open the sources before you film."
     au = mem().setdefault("audits", [])
     au.append({"claim": claim, "verdict": verdict, "score": a.get("score"), "ts": time.time()})
-    mem()["audits"] = au[-30:]
+    mem()["audits"] = au[-200:]
     pid = new_pid(st)
     st["props"][pid] = {"type": "audit", "claim": claim, "verdict": verdict, "sources": srcs, "created": time.time(),
                         "a": {k: a.get(k) for k in ("script", "score", "bottom_line", "evidence_for", "evidence_against", "unsure", "card", "findings", "not_established")}}
@@ -7870,6 +7892,7 @@ def cmd_news(st):
     except Exception:
         pass
     items = drop_made([i for i in items if i.get("idea")], "idea")[:5]
+    note_offered([i["idea"] for i in items])
     if not items:
         return send("I did not find solid fresh Egypt news right now. Try again in a few days.")
     pid = new_pid(st)
@@ -7932,6 +7955,7 @@ def write_long(c):
     msg = f"🎞 {c['title']}\n\n{text}"
     if summary:
         msg += "\n\n" + summary
+    note_scripted(c["title"])
     mem()["cleared"] = {"title": c["title"], "script": text[:6000], "sources": sources, "ts": time.time(),
                         "verified": "NOT fully verified" not in summary}
     if sources:
