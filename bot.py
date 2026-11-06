@@ -35,6 +35,8 @@ def ensure_ffmpeg():
     """The video tools (ffmpeg) are sometimes missing on the free server. If so, fetch a ready-made copy once (a few seconds) and put it on the path."""
     global _FF_TRIED
     if shutil.which("ffmpeg") or _FF_TRIED:
+        if shutil.which("ffmpeg") and not shutil.which("ffprobe"):
+            ensure_ffprobe()
         return bool(shutil.which("ffmpeg"))
     _FF_TRIED = True
     try:
@@ -58,7 +60,53 @@ def ensure_ffmpeg():
         print("ffmpeg fetched:", exe)
     except Exception as e:
         print("ffmpeg fetch failed:", str(e)[:150])
+    ensure_ffprobe()
     return bool(shutil.which("ffmpeg"))
+
+
+FFPROBE_SHIM = r"""#!__PY__
+import json, re, subprocess, sys
+args = sys.argv[1:]
+path = args[-1] if args else ""
+try:
+    err = subprocess.run(["ffmpeg", "-hide_banner", "-i", path], capture_output=True, text=True).stderr
+except Exception as e:
+    sys.stderr.write(str(e)); sys.exit(1)
+m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", err)
+dur = (int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))) if m else None
+streams = []
+for ln in err.splitlines():
+    v = re.search(r"Stream #\d+:\d+.*?: Video: (\w+).*?,\s*(\d{2,5})x(\d{2,5})", ln)
+    if v:
+        fr = re.search(r"([\d.]+) fps", ln)
+        fps = float(fr.group(1)) if fr else 0.0
+        streams.append({"index": len(streams), "codec_type": "video", "codec_name": v.group(1), "width": int(v.group(2)), "height": int(v.group(3)),
+                        "avg_frame_rate": f"{int(round(fps * 1000))}/1000" if fps else "0/0"})
+        continue
+    au = re.search(r"Stream #\d+:\d+.*?: Audio: (\w+)", ln)
+    if au:
+        streams.append({"index": len(streams), "codec_type": "audio", "codec_name": au.group(1)})
+if dur is None:
+    sys.stderr.write("Invalid data found when processing input\n"); sys.exit(1)
+print(json.dumps({"streams": streams, "format": {"duration": f"{dur:.6f}"}}))
+"""
+
+
+def ensure_ffprobe():
+    """Some servers have ffmpeg but no ffprobe (the downloaded ffmpeg copy has none). Make a small stand-in that reads the same facts from ffmpeg."""
+    if shutil.which("ffprobe") or not shutil.which("ffmpeg"):
+        return bool(shutil.which("ffprobe"))
+    try:
+        d = Path(tempfile.gettempdir()) / "kemet_ffbin"
+        d.mkdir(exist_ok=True)
+        f = d / "ffprobe"
+        f.write_text(FFPROBE_SHIM.replace("__PY__", sys.executable), encoding="utf-8")
+        f.chmod(0o755)
+        if str(d) not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = str(d) + os.pathsep + os.environ.get("PATH", "")
+    except Exception as e:
+        print("ffprobe stand-in failed:", str(e)[:120])
+    return bool(shutil.which("ffprobe"))
 
 
 _real_run = subprocess.run
@@ -86,7 +134,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.194"
+BOT_VERSION = "v10.195"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -14096,6 +14144,8 @@ def make_audited_video(prop, st, pov=False, style=None, backup_voice=False):
         pwdir = Path(os.getenv("PLAYWRIGHT_BROWSERS_PATH") or "~/.cache/ms-playwright").expanduser()
         if not any(shutil.which(b) for b in ("chromium", "chromium-browser", "google-chrome")) and not list(pwdir.glob("chromium*")):
             subprocess.run([sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"], check=True, timeout=600)
+        ensure_ffmpeg()
+        ensure_ffprobe()
         rp = av_renderer()
         for extra in (["--validate-only"], []):
             r = subprocess.run([sys.executable, str(rp), str(base / "manifest.json"), *extra], capture_output=True, text=True, timeout=900)
