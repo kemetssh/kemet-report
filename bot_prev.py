@@ -134,7 +134,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.197"
+BOT_VERSION = "v10.198"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -11433,11 +11433,19 @@ def _blocked_source_url(url):
     return bool(host) and any(_host_matches(host, p) for p in BAD_SRC)
 
 
+_JUNK_SRC_PATH = ("/learn/schools/", "/ages-7-11", "/ages-5-7", "/ages-11-14", "/for-kids", "/kids/", "/teachers/")
+
+
+def _junk_source(url):
+    """Children's and classroom hub pages: not evidence for a specific claim, so they must not pad the source count (v10.198)."""
+    return any(j in str(url).lower() for j in _JUNK_SRC_PATH)
+
+
 def rank_sources(srcs):
-    """Keep only allowlisted museum, university and journal hosts; reject look-alikes."""
+    """Keep only allowlisted museum, university and journal hosts; reject look-alikes and children's hub pages."""
     good, seen = [], set()
     for x in srcs:
-        if not isinstance(x, (tuple, list)) or len(x) < 2 or not _trusted_source_url(x[1]) or _blocked_source_url(x[1]):
+        if not isinstance(x, (tuple, list)) or len(x) < 2 or not _trusted_source_url(x[1]) or _blocked_source_url(x[1]) or _junk_source(x[1]):
             continue
         key = (str(x[0]), str(x[1]))
         if key not in seen:
@@ -12546,7 +12554,8 @@ def site_check(root):
             if article_words(art[0]) < ART_MIN_WORDS:
                 thin.append(art[0]["title"])
             lim_ = (mem().get("src_limit") or {}).get(rel.split("/")[1])
-            if len(art[3]) < 3 and not (lim_ is not None and len(art[3]) >= lim_):     # the bot already searched and found all it can (v10.191)
+            real_n = len([x for x in art[3] if not _junk_source(x[1])])
+            if real_n < 3 and not (lim_ is not None and real_n >= lim_):     # the bot already searched and found all it can (v10.191)
                 fewsrc.append(art[0]["title"])
             if not any(_trusted_source_url(u) for _, u in art[3]):
                 weak.append(art[0]["title"])
