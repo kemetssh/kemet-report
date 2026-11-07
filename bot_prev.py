@@ -134,7 +134,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.195"
+BOT_VERSION = "v10.196"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2793,7 +2793,7 @@ Rules for all: honest, no clickbait or claim the film does not make, a curious f
 No hashtags at all (I add checked ones myself).
 - x: at most 160 characters, at most 1 emoji.
 - facebook: 2 to 3 short sentences for a Page post, a question at the end to invite comments.
-- instagram: a caption of 3 to 5 short lines. End with: Link in bio.
+- instagram: a caption of 3 to 5 short lines. Do not mention a link or the bio (I add the link).
 - tiktok: one punchy line under 120 characters.
 Return JSON only: {{"x": "...", "facebook": "...", "instagram": "...", "tiktok": "..."}}"""
 
@@ -2816,7 +2816,7 @@ def share_pack(title, blurb):
     for k, cap in (("x", 170), ("facebook", 600), ("instagram", 800), ("tiktok", 150)):
         t = re.sub(r"https?://\S+", "", str(d.get(k, ""))).strip()
         t = re.sub(r"(?:(?<=\s)|^)#\w+", "", t).strip()                  # the model must not add its own hashtags: only checked ones go in
-        out[k] = t[:cap] or (title[:200] if k != "instagram" else title[:200] + "\n\nLink in bio.")
+        out[k] = t[:cap] or title[:200]
     try:
         tags = pick_hashtags(title + " " + (blurb or ""), n=5)         # trending niche tags first, only those that are TRUE for this story
     except Exception as e:
@@ -2831,7 +2831,7 @@ def share_pack(title, blurb):
     out["facebook"] = (out["facebook"] + "\n\n" + " ".join(tags[:5])).strip()
     ig = out["instagram"]
     ig = re.sub(r"\s*Link in bio\.?\s*$", "", ig, flags=re.I).strip()
-    out["instagram"] = ig + "\n\n" + " ".join(tags[:5]) + "\n\nLink in bio."        # Instagram allows 5 hashtags per post since December 2025
+    out["instagram"] = ig + "\n\n" + " ".join(tags[:5])          # Instagram allows 5 hashtags per post since December 2025; the article link is added when sending (v10.196)
     out["tiktok"] = (out["tiktok"] + " " + " ".join(tags[:5])).strip()
     return out
 
@@ -2855,9 +2855,9 @@ def send_share(title, blurb, link, st=None):
     else:
         send(f"📘 Facebook Page:\n{p['facebook']}\n{link}\n\n(Send /fbsetup to link your Page and post with one tap.)",
              [[{"text": "📘 Share on Facebook", "url": fb_share(link)}]])
-    send(f"📸 Instagram caption (press and hold to copy):\n{p['instagram']}\n\n🔗 Put this link in your Instagram bio: {link}",
+    send(f"📸 Instagram caption (press and hold to copy):\n{p['instagram']}\n\n📖 Read the full article: {link}\n\n(Instagram does not make caption links clickable. Readers can copy the address, and you can also put it in your bio.)",
          [[{"text": "📸 Open Instagram", "url": "https://www.instagram.com/"}]])
-    send(f"🎵 TikTok caption (press and hold to copy):\n{p['tiktok']}\n\n🔗 Put this link in your TikTok bio: {link}",
+    send(f"🎵 TikTok caption (press and hold to copy):\n{p['tiktok']}\n\n📖 Read the full article: {link}",
          [[{"text": "🎵 Open TikTok", "url": "https://www.tiktok.com/"}]])
     send("Facebook cannot pre-fill the text, so paste the Facebook post above after it opens. Instagram and TikTok need your vertical video from your phone: pick the Short, paste the caption, post. Nothing goes out unless you tap Post in each app.")
 
