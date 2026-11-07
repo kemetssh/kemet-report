@@ -134,7 +134,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.198"
+BOT_VERSION = "v10.199"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -5813,7 +5813,7 @@ def nb_lessons(obs):
     for name in sorted({k for o in rows for k in o["f"]}):
         a = [o for o in rows if o["f"].get(name)]
         b = [o for o in rows if name in o["f"] and not o["f"][name]]
-        if min(len(a), len(b)) < 3:
+        if min(len(a), len(b)) < 5:          # 3 or 4 videos on one side is noise (v10.199)
             continue
         conf = "repeating pattern" if min(len(a), len(b)) >= 8 else "early hint"
         aa, bb = [o["adj"] for o in a if o.get("adj") is not None], [o["adj"] for o in b if o.get("adj") is not None]
@@ -5824,20 +5824,23 @@ def nb_lessons(obs):
             ratio = ma / mb
             if ratio >= 1.5 or ratio <= 0.67:
                 out.append({"key": "v|" + name, "conf": conf, "n": len(rows), "dir": 1 if ratio >= 1.5 else -1,
-                            "text": f"Videos with {name} get about {ratio:.1f}x the views of the others at the same age ({len(a)} vs {len(b)} videos)"})
+                            "text": f"Videos {name if name.startswith('posted') else 'with ' + name} get about {ratio:.1f}x the views of the others at the same age ({len(a)} vs {len(b)} videos)"})
         pa = [o["pct"] for o in a if o.get("pct")]
         pb = [o["pct"] for o in b if o.get("pct")]
         where = ""
-        if not name.startswith("a Short"):         # long videos always keep fewer viewers: compare among Shorts only when there are enough of them
+        no_ret = name.startswith("a Short") or name.startswith("a thumbnail")     # length decides how much of a video is watched, and a thumbnail cannot change what happens after the click (v10.199)
+        if no_ret:
+            pa, pb = [], []
+        if not name.startswith("a Short") and not no_ret:         # long videos always keep fewer viewers: compare among Shorts only when there are enough of them
             sa = [o["pct"] for o in a if o.get("pct") and 0 < o.get("secs", 0) <= 60]
             sb = [o["pct"] for o in b if o.get("pct") and 0 < o.get("secs", 0) <= 60]
-            if min(len(sa), len(sb)) >= 3:
+            if min(len(sa), len(sb)) >= 5:
                 pa, pb, where = sa, sb, " (among Shorts)"
-        if min(len(pa), len(pb)) >= 3:
+        if min(len(pa), len(pb)) >= 5:
             d = sum(pa) / len(pa) - sum(pb) / len(pb)
             if abs(d) >= 8:
                 out.append({"key": "p|" + name, "conf": "repeating pattern" if min(len(pa), len(pb)) >= 8 else "early hint", "n": len(pa) + len(pb), "dir": 1 if d > 0 else -1,
-                            "text": f"Videos with {name} are watched {abs(d):.0f} points {'more' if d > 0 else 'less'} of the way through{where} ({len(pa)} vs {len(pb)} videos)"})
+                            "text": f"Videos {name if name.startswith('posted') else 'with ' + name} are watched {abs(d):.0f} points {'more' if d > 0 else 'less'} of the way through{where} ({len(pa)} vs {len(pb)} videos)"})
     return out[:8]
 
 
@@ -6214,6 +6217,7 @@ def nb_fix(st, key):
     if not f:
         return send("That pattern is no longer in my notebook. Send /learned to see the current ones.")
     kind, name = key.split("|", 1)
+    n.setdefault("handled", {})[key] = time.time()        # acted on: it leaves the list (v10.199)
     d = f.get("dir") or 0
     good = d > 0
     if kind == "p":
@@ -6251,6 +6255,8 @@ def nb_fix_all(st, keys):
     """Fix every pattern at once: all title habits in ONE pass (one new title that follows them all), plus the other fixes."""
     n = nb()
     facts = [x for x in n["facts"] if x["key"] in keys]
+    for x in facts:
+        n.setdefault("handled", {})[x["key"]] = time.time()      # acted on: they leave the list (v10.199)
     rules, others, seen = [], [], set()
     for f in sorted(facts, key=lambda x: 0 if x["key"].startswith("v|") else 1):
         kind, name = f["key"].split("|", 1)
@@ -6277,13 +6283,19 @@ def nb_section(st, name):
     if name == "patterns":
         lines = ["🔎 Patterns in your numbers"]
         keys = []
-        if n["facts"]:
-            for i, f in enumerate(n["facts"][:6]):
+        hd = {k: t for k, t in (n.get("handled") or {}).items() if time.time() - t < 45 * 86400}
+        shown = [f for f in n["facts"] if f["key"] not in hd]
+        if n["facts"] and not shown:
+            lines.append(f"Nothing open: I already acted on all {len(hd)} patterns. I keep watching and will bring one back if the numbers change.")
+        elif hd:
+            lines.append(f"({len(hd)} already acted on are not repeated here.)")
+        if shown:
+            for i, f in enumerate(shown[:6]):
                 lines.append(f"{i + 1}. {f['text']} [{f['conf']}" + (f"; my guesses from it: {f['hit']} right" if f.get("hit") else "") + "]")
                 keys.append(f["key"])
                 rows.append([btn(f"🛠 Fix #{i + 1}", pid, "nf", str(i)), btn(f"🗑 Forget #{i + 1}", pid, "nd", str(i))])
-        else:
-            lines.append("Nothing solid yet. I need at least 8 videos older than 3 days, and 3 on each side of a comparison. I would rather say 'too early' than guess.")
+        elif not n["facts"]:
+            lines.append("Nothing solid yet. I need at least 8 videos older than 3 days, and 5 on each side of a comparison. I would rather say 'too early' than guess.")
         lines.append(nb_accuracy_line(n))
         if keys:
             rows.insert(0, [btn("🛠 Fix ALL patterns", pid, "nfa")])
