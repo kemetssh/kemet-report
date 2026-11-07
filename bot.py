@@ -134,7 +134,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.196"
+BOT_VERSION = "v10.197"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -4868,22 +4868,49 @@ def real_url(u):
     return out
 
 
+def _src_keys(t, u):
+    """Several fingerprints of one source, so the same paper listed twice (http and https, a journal page and its ADS record) counts once."""
+    keys = set()
+    try:
+        sp_ = urllib.parse.urlsplit(str(u).strip())
+        host = sp_.netloc.lower().removeprefix("www.")
+        keys.add("u:" + host + sp_.path.rstrip("/").lower())
+    except Exception:
+        keys.add("u:" + str(u))
+    m = re.search(r"(\d{4}\.\d{4,5}|[a-z\-]+/\d{7})", str(u).replace("arXiv", "/"))
+    if m and ("arxiv" in str(u).lower() or "adsabs" in str(u).lower()):
+        keys.add("a:" + m.group(1))
+    nt = re.sub(r"\s*[-–|]\s*(ads|arxiv|pubmed|semantic scholar|researchgate|academia\.edu)\s*$", "", str(t or ""), flags=re.I)
+    nt = re.sub(r"[^a-z0-9]+", "", nt.lower())
+    if len(nt) >= 25:
+        keys.add("t:" + nt)
+    return keys
+
+
 def dedupe_sources(sources, n=10):
     seen, out = set(), []
     for t, u in sources:
         u = real_url(u) if u else u
-        if u and u not in seen:
-            seen.add(u)
-            out.append([t or u, u])
+        if not u:
+            continue
+        ks = _src_keys(t, u)
+        if ks & seen:
+            continue
+        seen |= ks
+        out.append([t or u, u])
     return out[:n]
 
 
 def merge_sources(a, b, n=12):
     out, seen = [], set()
     for t, u in list(a or []) + list(b or []):
-        if u and u not in seen:
-            seen.add(u)
-            out.append([t, u])
+        if not u:
+            continue
+        ks = _src_keys(t, u)
+        if ks & seen:
+            continue
+        seen |= ks
+        out.append([t, u])
     return out[:n]
 
 
@@ -13033,7 +13060,7 @@ def rebuild_site_hubs(root, tok):
     if sm.exists():
         s = sm.read_text(encoding="utf-8")
         today = datetime.date.today().isoformat()
-        s = re.sub(r"  <url><loc>[^<]*/playlists/[^<]+</loc>\n    <lastmod>[^<]*</lastmod></url>\n", "", s)
+        s = re.sub(r"  <url><loc>[^<]*/playlists/[^<]*</loc>\n    <lastmod>[^<]*</lastmod></url>\n", "", s)         # also the /playlists/ page itself (v10.197)
         add = "".join(f"  <url><loc>{SITE_BASE}{u}</loc>\n    <lastmod>{today}</lastmod></url>\n" for u in ["/playlists/"] + urls)
         sm.write_text(s.replace("</urlset>", add + "</urlset>"), encoding="utf-8")
     return len(pls)
@@ -13262,6 +13289,7 @@ def page_article(htm):
     aside = g(r'<aside class="article-sources">(.*?)</aside>')
     srcs = [(html.unescape(re.sub(r"\s*↗\s*$", "", re.sub(r"<[^>]+>", "", t_))).strip(), html.unescape(u)) for u, t_ in re.findall(r'<a href="([^"]+)"[^>]*>(.*?)</a>', aside, re.S)
             if "youtube.com" not in u]
+    srcs = [tuple(x) for x in merge_sources(srcs, [], 40)]         # the same paper listed twice counts once (v10.197)
     return art, vid, g(r'<meta content="([^"]*)" property="article:published_time"'), srcs
 
 
