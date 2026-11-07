@@ -10,6 +10,7 @@ import copy
 import datetime
 import hashlib
 import html
+import math
 import random
 import urllib.parse
 import json
@@ -134,7 +135,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.202"
+BOT_VERSION = "v10.203"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -5858,6 +5859,7 @@ def nb_features(o):
     if o.get("tfrac") is not None:
         f["a thumbnail taken from the opening 20% of the video"] = o["tfrac"] <= 0.2
     f["3 or more hashtags"] = o.get("tags", 0) >= 3
+    f.update(type_tags(o.get("title", "")))
     f["a Watch-next link in the description"] = bool(o.get("wn"))
     return f
 
@@ -5899,8 +5901,11 @@ def nb_lessons(obs):
         if mb > 0:
             ratio = ma / mb
             if ratio >= 1.5 or ratio <= 0.67:
-                out.append({"key": "v|" + name, "conf": conf, "n": len(rows), "dir": 1 if ratio >= 1.5 else -1,
-                            "text": f"Videos {name if name.startswith('posted') else 'with ' + name} get about {ratio:.1f}x the views of the others at the same age ({len(a)} vs {len(b)} videos)"})
+                p_ = perm_p(aa, bb, log=True)
+                if p_ <= 0.15:                       # v10.203: a difference that chance alone often produces is not a pattern
+                    conf2 = "repeating pattern" if (conf == "repeating pattern" and p_ <= 0.05) else "early hint"
+                    out.append({"key": "v|" + name, "conf": conf2, "n": len(rows), "dir": 1 if ratio >= 1.5 else -1, "ratio": round(ratio, 2), "p": round(p_, 3),
+                                "text": f"Videos {name if name.startswith('posted') else 'with ' + name} get about {ratio:.1f}x the views of the others at the same age ({len(a)} vs {len(b)} videos, about {p_ * 100:.0f}% chance it is luck)"})
         pa = [o["pct"] for o in a if o.get("pct")]
         pb = [o["pct"] for o in b if o.get("pct")]
         where = ""
@@ -5914,10 +5919,12 @@ def nb_lessons(obs):
                 pa, pb, where = sa, sb, " (among Shorts)"
         if min(len(pa), len(pb)) >= 5:
             d = sum(pa) / len(pa) - sum(pb) / len(pb)
-            if abs(d) >= 8:
-                out.append({"key": "p|" + name, "conf": "repeating pattern" if min(len(pa), len(pb)) >= 8 else "early hint", "n": len(pa) + len(pb), "dir": 1 if d > 0 else -1,
+            p2_ = perm_p(pa, pb) if abs(d) >= 8 else 1
+            if abs(d) >= 8 and p2_ <= 0.15:
+                out.append({"key": "p|" + name, "conf": "repeating pattern" if (min(len(pa), len(pb)) >= 8 and p2_ <= 0.05) else "early hint", "n": len(pa) + len(pb), "dir": 1 if d > 0 else -1, "p": round(p2_, 3),
                             "text": f"Videos {name if name.startswith('posted') else 'with ' + name} are watched {abs(d):.0f} points {'more' if d > 0 else 'less'} of the way through{where} ({len(pa)} vs {len(pb)} videos)"})
-    return out[:8]
+    out.sort(key=lambda f: f.get("p", 1))
+    return out[:10]
 
 
 def nb_observe(n, vids, tok=None, now=None, max_calls=12):
@@ -5966,6 +5973,10 @@ def nb_scan(st, force=False):
         _v50, chid = latest_vids(tok, 1)
         vids = all_videos(tok)
         nb_observe(n, vids, tok, now, 12)
+        try:
+            nb_auto_predict(n, vids, now)
+        except Exception as e:
+            print("auto predict:", clean(e)[:80])
         old = {f["key"] for f in n["facts"]}
         nb_score(n)
         n["facts"] = [f for f in nb_lessons(n["obs"]) if f["key"] not in n["muted"]]
@@ -5975,6 +5986,10 @@ def nb_scan(st, force=False):
                 f["hit"] = f"{a[0]}/{a[1]}"
                 if a[0] / a[1] < 0.4:
                     f["conf"] = "unreliable"
+        try:
+            n["backtest"] = nb_backtest(n) or n.get("backtest")
+        except Exception as e:
+            print("backtest:", clean(e)[:80])
         nb_lib_patterns(n, now)
         fresh = [f for f in n["facts"] if f["key"] not in old]
         if fresh and not first:
@@ -6016,21 +6031,48 @@ def nb_scan(st, force=False):
 
 
 
-def nb_predict(title, secs=0):
+def nb_predict(title, secs=0, hour=None):
     """Before an upload: write down a guess from the patterns learned so far. Scored a week later."""
     n = nb()
     if n["off"]:
         return None
-    f = nb_features({"title": title, "secs": secs, "hour": None, "tags": 0})
-    keys, score = [], 0
+    f = nb_features({"title": title, "secs": secs, "hour": hour, "tags": 0})
+    keys, score, logs = [], 0, []
     for fa in n["facts"]:
         if fa["key"].startswith("v|") and fa.get("conf") != "unreliable" and f.get(fa["key"][2:]) and fa.get("dir"):
             keys.append(fa["key"])
             score += fa["dir"]
+            if fa.get("ratio"):
+                logs.append(math.log(max(fa["ratio"], 0.05)))
     if not keys:
         return None
     guess = "above" if score > 0 else ("below" if score < 0 else "typical")
-    return {"guess": guess, "keys": keys, "ts": time.time()}
+    return {"guess": guess, "keys": keys, "ts": time.time(), "mult": round(math.exp(sum(logs) / len(logs)), 2) if logs else None}
+
+
+def nb_auto_predict(n, vids, now=None):
+    """v10.203: a guess for every video the day it appears (also the ones uploaded by hand), written before its numbers exist."""
+    now, made = now or time.time(), 0
+    for v in vids:
+        try:
+            sn = v["snippet"]
+            pub = iso_ts(sn.get("publishedAt", ""))
+            vid = v["id"]
+            if not pub or vid in n["preds"] or (now - pub) / 86400 > 3 or pub > now + 3600:
+                continue
+            try:
+                hour = datetime.datetime.fromtimestamp(pub, us_zone()).hour
+            except Exception:
+                hour = None
+            secs = iso_seconds((v.get("contentDetails") or {}).get("duration")) or 0
+            pr = nb_predict(sn.get("title", ""), secs, hour)
+            if pr:
+                pr["auto"] = True
+                n["preds"][vid] = pr
+                made += 1
+        except Exception as e:
+            print("auto predict:", clean(e)[:80])
+    return made
 
 
 def nb_score(n):
@@ -6047,7 +6089,7 @@ def nb_score(n):
         r = vpd[vid]                      # already relative to videos of the same age and kind
         actual = "above" if r > 1.25 else ("below" if r < 0.8 else "typical")
         hit = actual == p["guess"]
-        p["scored"], p["actual"], p["hit"] = True, actual, hit
+        p["scored"], p["actual"], p["hit"], p["adj"] = True, actual, hit, round(r, 2)
         n["score"][1] += 1
         n["score"][0] += 1 if hit else 0
         for k in p["keys"]:
@@ -6058,7 +6100,14 @@ def nb_score(n):
 
 def nb_accuracy_line(n):
     h, t = n["score"]
-    return f"My guesses before upload: {h} of {t} were right." if t else "My guesses before upload: none scored yet (I score each one a week after the video goes up)."
+    line = f"My guesses before upload: {h} of {t} were right." if t else "My guesses before upload: none scored yet (I score each one a week after the video goes up)."
+    bt = n.get("backtest")
+    if bt:
+        line += f"\nBacktest: patterns learned from your older videos called the newest {bt['n']} correctly {bt['hit']} times ({bt['hit'] * 100 // max(bt['n'], 1)}%); always guessing the most common outcome would be right {bt['base']}% of the time."
+    pend = len([p for p in n["preds"].values() if not p.get("scored")])
+    if pend:
+        line += f"\n{pend} guess(es) are waiting for their week to pass."
+    return line
 
 
 def nb_report(st, force=False):
@@ -6087,11 +6136,275 @@ def nb_report(st, force=False):
         lines.append(f"{len(unrel)} pattern(s) are marked unreliable because my guesses from them were often wrong. I no longer use them.")
     if n["asks"]:
         lines.append("Viewers ask most: " + "; ".join(a["ask"] for a in n["asks"][:3]))
+    pl = mem().get("plat") or []
+    if not pl or time.time() - max(e["ts"] for e in pl) > 10 * 86400:
+        lines.append("Send /log with this week's TikTok, X or Facebook numbers so I can learn what works on each platform.")
     reasons = mem().get("reasons") or []
     if reasons:
         lines.append(f"Your reasons for rejecting titles ({len(reasons)} so far) are shaping my next suggestions.")
     lines.append("Send /learned to correct anything. I only learn: every change still needs your tap.")
     send("\n".join(lines))
+
+
+# ---------------- v10.203: the learning machine (type tags, honest statistics, backtest, other platforms, money) ----------------
+TYPE_TAGS = {
+    "a pyramid or Giza topic": r"pyramid|giza|khufu|sphinx|khafre|menkaure",
+    "a tomb or treasure topic": r"tomb|tut\b|tutankhamun|treasure|valley of the kings|curse|kv\d",
+    "a gods or afterlife topic": r"\bgods?\b|goddess|horus|osiris|isis|anubis|\bra\b|amun|afterlife|book of the dead|ma['’]?at|hathor|sekhmet|thoth",
+    "a mummy or burial topic": r"mumm|embalm|funer|burial|canopic",
+    "a queen or women topic": r"queen|cleopatra|hatshepsut|nefertiti|\bwomen\b|\bwoman\b|female",
+    "a daily life topic": r"daily life|food|beer|bread|medicine|kohl|makeup|beauty|perfume|school|family|\bpets?\b|\bcats?\b|doctor|toys?|games?",
+    "a writing or language topic": r"hieroglyph|rosetta|papyrus|writing|language|scribe",
+    "a war or army topic": r"\bwar\b|army|soldier|battle|military|navy|weapon|chariot",
+    "a discovery or news topic": r"discover|new study|unearth|museum|excavat|\bfound\b|scan",
+    "Fact Check or myth wording": r"fact.?check|audit|myth|really|\btrue\b|debunk",
+    "a named king or queen in the title": r"khufu|tut\b|tutankhamun|ramesses|ramses|akhenaten|hatshepsut|cleopatra|nefertiti|thutmose|djoser|narmer|menkaure|khafre|senusret|pepi|seti\b|amenhotep|merenptah|ptolemy|imhotep|merer",
+    "a how/why/what/who opener": r"^\s*(how|why|what|who|where|when|did|was|were|is|are|can|could)\b",
+}
+
+
+def type_tags(title):
+    t = str(title).lower()
+    return {k: bool(re.search(v, t)) for k, v in TYPE_TAGS.items()}
+
+
+def perm_p(a, b, log=False, rounds=1500):
+    """Chance that a difference this big between two groups appears by luck alone (permutation test, fixed seed so it is repeatable)."""
+    import random
+    a, b = [float(x) for x in a if x is not None], [float(x) for x in b if x is not None]
+    if len(a) < 3 or len(b) < 3:
+        return 1.0
+    if log:
+        a, b = [math.log(max(x, 0.05)) for x in a], [math.log(max(x, 0.05)) for x in b]
+    obs = abs(sum(a) / len(a) - sum(b) / len(b))
+    pool, na, rng, hits = a + b, len(a), random.Random(7), 0
+    for _ in range(rounds):
+        rng.shuffle(pool)
+        d = abs(sum(pool[:na]) / na - sum(pool[na:]) / (len(pool) - na))
+        if d >= obs - 1e-12:
+            hits += 1
+    return (hits + 1) / (rounds + 1)
+
+
+def nb_backtest(n):
+    """Learn from the older 60% of videos, then guess the newest 40% and compare with what happened (an honest score from day one)."""
+    rows = [(k, o) for k, o in n["obs"].items() if o.get("age", 0) >= 3 and o.get("views") is not None]
+    if len(rows) < 30:
+        return None
+    rows.sort(key=lambda x: -x[1]["age"])
+    cut = int(len(rows) * 0.6)
+    allr = [dict(o) for _, o in rows]
+    nb_adjust(allr)
+    adj = {k: r.get("adj") for (k, _), r in zip(rows, allr)}
+    facts = nb_lessons({k: dict(o) for k, o in rows[:cut]})
+    hit = tot = 0
+    counts = {"above": 0, "below": 0, "typical": 0}
+    for k, o in rows[cut:]:
+        a = adj.get(k)
+        if a is None:
+            continue
+        f = nb_features(o)
+        sc = sum(fa["dir"] for fa in facts if fa["key"].startswith("v|") and f.get(fa["key"][2:]))
+        guess = "above" if sc > 0 else ("below" if sc < 0 else "typical")
+        actual = "above" if a > 1.25 else ("below" if a < 0.8 else "typical")
+        counts[actual] += 1
+        tot += 1
+        hit += 1 if guess == actual else 0
+    if tot < 8:
+        return None
+    return {"n": tot, "hit": hit, "base": round(100 * max(counts.values()) / tot), "ts": time.time()}
+
+
+def cmd_whatworks(st):
+    n = nb()
+    rows = [o for o in n["obs"].values() if o.get("age", 0) >= 3 and o.get("views") is not None]
+    if len(rows) < 8:
+        return send("I need at least 8 videos older than 3 days to compare. I have %d." % len(rows))
+    nb_adjust(rows)
+    for o in rows:
+        o["f"] = nb_features(o)
+    def med(x):
+        x = sorted(x)
+        return x[len(x) // 2] if x else None
+    res = []
+    for name in sorted({k for o in rows for k in o["f"]}):
+        a = [o["adj"] for o in rows if o["f"].get(name) and o.get("adj") is not None]
+        b = [o["adj"] for o in rows if not o["f"].get(name) and o.get("adj") is not None]
+        if len(a) >= 3 and len(b) >= 3 and med(b):
+            res.append((med(a) / med(b), name, len(a), len(b), perm_p(a, b, log=True)))
+    res.sort(reverse=True)
+    def line(r):
+        flag = "" if r[2] >= 5 and r[4] <= 0.15 else " (few videos, weak)"
+        return "%.1fx  %s  [%d vs %d videos]%s" % (r[0], r[1], r[2], r[3], flag)
+    out = ["📊 What works on the channel (views compared with other videos of the same age; 1.0x = typical)", ""]
+    out += ["Best:"] + [line(r) for r in res[:6]]
+    out += ["", "Worst:"] + [line(r) for r in res[-5:][::-1]]
+    rk = sorted((o for o in rows if o.get("adj") is not None), key=lambda o: -o["adj"])
+    out += ["", "Top 5 videos for their age:"] + ["%.1fx  %s" % (o["adj"], o.get("title", "")[:58]) for o in rk[:5]]
+    out += ["", "Weakest 3:"] + ["%.1fx  %s" % (o["adj"], o.get("title", "")[:58]) for o in rk[-3:]]
+    bt = n.get("backtest")
+    if bt:
+        out.append("\nHonesty check: patterns from your older videos predicted the newest %d correctly %d times (%d%%). Always guessing the most common outcome: %d%%." % (bt["n"], bt["hit"], bt["hit"] * 100 // bt["n"], bt["base"]))
+    out.append("\nWith ~%d videos, treat anything marked weak as a hint, not a rule." % len(rows))
+    send("\n".join(out)[:3900])
+
+
+PLATFORM_ALIASES = {"tiktok": "tiktok", "tt": "tiktok", "x": "x", "twitter": "x", "facebook": "facebook", "fb": "facebook",
+                    "instagram": "instagram", "ig": "instagram", "youtube": "youtube", "yt": "youtube", "threads": "threads"}
+PLATFORM_NAMES = {"tiktok": "TikTok", "x": "X", "facebook": "Facebook", "instagram": "Instagram", "youtube": "YouTube", "threads": "Threads"}
+METRIC_ALIASES = {"view": "views", "views": "views", "play": "views", "plays": "views", "impression": "views", "impressions": "views",
+                  "like": "likes", "likes": "likes", "comment": "comments", "comments": "comments", "share": "shares", "shares": "shares",
+                  "repost": "shares", "reposts": "shares", "save": "shares", "saves": "shares", "follower": "followers", "followers": "followers"}
+
+
+def _num(sv):
+    sv = sv.lower().replace(",", "")
+    mult = 1
+    if sv.endswith("k"):
+        mult, sv = 1000, sv[:-1]
+    elif sv.endswith("m"):
+        mult, sv = 1_000_000, sv[:-1]
+    return int(float(sv) * mult)
+
+
+def cmd_log(st, arg):
+    """/log tiktok 1200 views 80 likes 5 comments 12 shares 340 followers for pyramid builders"""
+    arg = (arg or "").strip()
+    usage = ("Tell me what a post did, from the app on your phone:\n"
+             "/log tiktok 1200 views 80 likes 5 comments 12 shares for pyramid builders\n"
+             "/log x 5k views 40 likes\n"
+             "/log facebook 900 views 30 likes 2 comments\n"
+             "Or only your follower count: /log tiktok 340 followers\n"
+             "After \"for\" write a few words of the video's title so I can match it. I use this to learn what works on each platform.")
+    toks = arg.split(None, 1)
+    if not toks or toks[0].lower() not in PLATFORM_ALIASES:
+        return send(usage)
+    plat = PLATFORM_ALIASES[toks[0].lower()]
+    rest = toks[1] if len(toks) > 1 else ""
+    topic = ""
+    mt = re.search(r"\bfor\b\s+(.+)$", rest, re.I)
+    if mt:
+        topic, rest = mt.group(1).strip(), rest[:mt.start()]
+    vals = {}
+    for num, name in re.findall(r"(\d[\d,\.]*\s?[kKmM]?)\s*([a-zA-Z]+)", rest):
+        key = METRIC_ALIASES.get(name.lower())
+        if key:
+            try:
+                vals[key] = _num(num.replace(" ", ""))
+            except Exception:
+                pass
+    if not vals:
+        return send(usage)
+    m = mem()
+    if set(vals) == {"followers"}:
+        m.setdefault("plat_followers", {}).setdefault(plat, []).append([time.time(), vals["followers"]])
+        return send("Saved: %s has %s followers today. Send this again every week or so and I will show your growth in /platforms and /money." % (PLATFORM_NAMES[plat], f"{vals['followers']:,}"))
+    title = ""
+    if topic:
+        w = title_words(topic)
+        best = (0, "")
+        for t in made_titles():
+            c = len(w & title_words(t))
+            if c > best[0]:
+                best = (c, t)
+        title = best[1] if best[0] >= 1 else ""
+    if vals.get("followers"):
+        m.setdefault("plat_followers", {}).setdefault(plat, []).append([time.time(), vals["followers"]])
+    e = {"ts": time.time(), "p": plat, "title": title, "topic": topic, **{k: v for k, v in vals.items() if k != "followers"}}
+    m.setdefault("plat", []).append(e)
+    m["plat"] = m["plat"][-3000:]
+    n_p = len([x for x in m["plat"] if x["p"] == plat])
+    send("Saved for %s: %s%s.\n%s" % (PLATFORM_NAMES[plat], ", ".join("%s %s" % (f"{v:,}", k) for k, v in vals.items()),
+         (" (matched to: " + title[:60] + ")") if title else (" (no title matched: add a few title words after 'for')" if topic else ""),
+         "I now have %d posts logged for %s. Send /platforms for what is working." % (n_p, PLATFORM_NAMES[plat])))
+
+
+def _med(x):
+    x = sorted(x)
+    return x[len(x) // 2] if x else 0
+
+
+def cmd_platforms(st):
+    m, n = mem(), nb()
+    out = ["🌍 Platforms: what is working where", ""]
+    rows = [o for o in n["obs"].values() if o.get("views") is not None and o.get("age", 0) >= 3]
+    if rows:
+        nb_adjust(rows)
+        adjs = [o["adj"] for o in rows if o.get("adj") is not None]
+        top = sorted(rows, key=lambda o: -(o.get("adj") or 0))[:3]
+        out.append("YouTube: %d videos, %s total views, typical video %s views." % (len(rows), f"{sum(o['views'] for o in rows):,}", f"{int(_med([o['views'] for o in rows])):,}"))
+        out.append("  Best for their age: " + "; ".join("%.1fx %s" % (o.get("adj") or 0, o.get("title", "")[:36]) for o in top))
+    soc = [e for e in (m.get("social") or []) if e.get("fb_plays") is not None or e.get("fb_eng") is not None]
+    if soc:
+        pl = [e.get("fb_plays") for e in soc if e.get("fb_plays") is not None]
+        best = sorted(soc, key=lambda e: -(e.get("fb_plays") or 0))[:2]
+        out.append("Facebook (automatic): %d posts measured, typical %s plays." % (len(soc), f"{int(_med(pl)):,}" if pl else "?"))
+        out.append("  Best: " + "; ".join("%s plays: %s" % (f"{e.get('fb_plays') or 0:,}", (e.get("title") or "")[:36]) for e in best))
+    plat = m.get("plat") or []
+    for p in ("tiktok", "x", "facebook", "instagram"):
+        ps = [e for e in plat if e["p"] == p]
+        fol = (m.get("plat_followers") or {}).get(p) or []
+        if not ps and not fol:
+            continue
+        line = "%s: " % PLATFORM_NAMES[p]
+        if ps:
+            views = [e.get("views", 0) for e in ps if e.get("views")]
+            eng = sum(e.get("likes", 0) + e.get("comments", 0) + e.get("shares", 0) for e in ps)
+            tv = sum(views)
+            line += "%d posts logged, typical %s views" % (len(ps), f"{int(_med(views)):,}" if views else "?")
+            if tv:
+                line += ", engagement %.1f%% (likes+comments+shares per view)" % (100 * eng / tv)
+        if fol:
+            now_f = fol[-1][1]
+            old = [x for x in fol if x[0] <= fol[-1][0] - 20 * 86400]
+            line += ("; " if ps else "") + "%s followers" % f"{now_f:,}" + (" (%+d in %d days)" % (now_f - old[-1][1], int((fol[-1][0] - old[-1][0]) / 86400)) if old else "")
+        out.append(line)
+        if len(ps) >= 3:
+            best = sorted(ps, key=lambda e: -e.get("views", 0))[:2]
+            out.append("  Best: " + "; ".join("%s: %s" % (f"{e.get('views', 0):,}", (e.get("title") or e.get("topic") or "?")[:36]) for e in best))
+        tagged = [(e, nb_features({"title": e["title"], "secs": 0, "hour": None, "tags": 0})) for e in ps if e.get("title") and e.get("views")]
+        if len(tagged) >= 6:
+            found = []
+            for name in tagged[0][1]:
+                if name.startswith(("posted", "a Short", "a thumbnail", "3 or more", "a Watch")):
+                    continue
+                a = [e["views"] for e, f in tagged if f.get(name)]
+                b = [e["views"] for e, f in tagged if not f.get(name)]
+                if len(a) >= 3 and len(b) >= 3 and _med(b) and (_med(a) / _med(b) >= 1.6 or _med(a) / _med(b) <= 0.6):
+                    found.append((_med(a) / _med(b), name, len(a), len(b)))
+            for r in sorted(found, reverse=True)[:3]:
+                out.append("  On %s, posts with %s get about %.1fx the views (%d vs %d posts)" % (PLATFORM_NAMES[p], r[1], r[0], r[2], r[3]))
+    if not plat and not (m.get("plat_followers") or {}):
+        out += ["", "TikTok, X and Instagram do not let a free bot read your numbers, so you tell me:", "/log tiktok 1200 views 80 likes 5 comments for pyramid builders", "Two minutes a week is enough. After about 6 posts per platform I can show what works on each."]
+    else:
+        old = [e["ts"] for e in plat]
+        if old and time.time() - max(old) > 10 * 86400:
+            out.append("\nYour last /log was %d days ago. Send fresh numbers so I keep learning." % int((time.time() - max(old)) / 86400))
+    send("\n".join(out)[:3900])
+
+
+MONEY_RULES = [
+    ("tiktok", "TikTok Creator Rewards", "10,000 followers and 100,000 views in 30 days, videos longer than 1 minute, 18+. Check in the TikTok app that your country is supported."),
+    ("facebook", "Facebook content monetization", "reported: 10,000 followers and 600,000 minutes viewed in 60 days, 5 videos, 18+. Check in Meta that your country is eligible."),
+    ("x", "X creator payouts", "needs X Premium and a minimum of verified followers and impressions. X changes it often: open Settings, then Monetization in X for your own numbers."),
+]
+
+
+def cmd_money(st):
+    try:
+        cmd_progress(st)
+    except Exception as e:
+        send("YouTube numbers are not available right now: " + clean(e)[:100])
+    m = mem()
+    out = ["💰 Other platforms: how close are you?", ""]
+    fol = m.get("plat_followers") or {}
+    for p, name, rule in MONEY_RULES:
+        f = (fol.get(p) or [[0, 0]])[-1][1]
+        out.append("%s%s" % (name, (": %s followers logged" % f"{f:,}") if f else ": no follower count logged (send /log %s 340 followers)" % p))
+        out.append("  " + rule)
+    out += ["", "Sources: public guides, not the platforms' own pages, so confirm in each app before you plan around a number. I could not confirm that Egypt is on the TikTok or Facebook lists.",
+            "Money without any threshold: /affiliate (affiliate programs and sponsors) and the Kemet website."]
+    send("\n".join(out)[:3900])
 
 
 # ---------------- learning feeds: what people search for, the news, and big channels (read-only, public data) ----------------
@@ -6263,6 +6576,13 @@ def nb_block():
     tl = nb_tests_line(n)
     if tl:
         parts.append(tl)
+    try:
+        plat = mem().get("plat") or []
+        best = sorted([e for e in plat if e.get("title") and e.get("views")], key=lambda e: -e["views"])[:4]
+        if best:
+            parts.append("Posts that did best on TikTok, X and Facebook (owner's own logs; same topics may work as new videos):\n" + "\n".join(f"- {PLATFORM_NAMES.get(e['p'], e['p'])}: {e['title'][:70]} ({e['views']:,} views)" for e in best))
+    except Exception:
+        pass
     d = n.get("demand") or {}
     if d.get("rows"):
         parts.append("What people type into YouTube search about Ancient Egypt, weakest competition first (median views of the top 5 results):\n" +
@@ -7035,6 +7355,7 @@ def cmd_progress(st):
         for target in (500, 1000):
             if subs < target:
                 lines.append(f"At your current pace: {target} subscribers in about {int((target - subs) / per_day)} days.")
+    lines.append("\n⚠️ From 1 Feb 2027 YouTube raises the bar for NEW applicants to 8,000 watch hours or 20 million Shorts views (subscribers stay 1,000), as reported by industry press from YouTube's announcement. If you can reach the current level before then, apply before 1 Feb 2027.")
     lines.append("\nThese are the thresholds as I know them. Check YouTube Studio → Earn for the official numbers.")
     send("\n".join(lines))
 
@@ -9875,6 +10196,11 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/watchnext - 'Watch next' links in old videos\n"
         "/hashtags - refresh old hashtags\n"
         "/learned - what I learned (forget or pause any time)\n"
+        "/whatworks - which video types win and lose\n"
+        "/log - tell me a TikTok, X or Facebook post's numbers\n"
+        "/platforms - what works on each platform\n"
+        "/money - how close you are to earning on each platform\n"
+        "/covered - topics already made\n"
         "/fullrefresh - refresh everything I know\n"
         "/script - fact-checked script on your topic\n"
         "/affiliate - affiliate programs, sponsors\n"
@@ -10354,6 +10680,14 @@ def on_message(msg, st):
         cmd_idea(st)
     elif text == "/covered":
         cmd_covered(st)
+    elif text == "/whatworks":
+        cmd_whatworks(st)
+    elif text == "/platforms":
+        cmd_platforms(st)
+    elif text == "/money":
+        cmd_money(st)
+    elif text == "/log" or text.startswith("/log "):
+        cmd_log(st, text[4:])
     elif text == "/plan":
         do_plan(st)
     elif text == "/results":
