@@ -134,7 +134,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.199"
+BOT_VERSION = "v10.200"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -5757,6 +5757,17 @@ Comments:
 {comments}"""
 
 
+def _fact_ok(f):
+    """Saved patterns made by the old rules are dropped at once: length-driven or thumbnail watch-through, and fewer than 5 videos on a side (v10.199)."""
+    k = f.get("key", "")
+    if k.startswith("p|") and (k[2:].startswith("a Short") or k[2:].startswith("a thumbnail")):
+        return False
+    m = re.search(r"\((\d+) vs (\d+) videos\)\s*$", str(f.get("text", "")))
+    if m and min(int(m.group(1)), int(m.group(2))) < 5:
+        return False
+    return True
+
+
 def nb():
     n = mem().setdefault("notebook", {})
     for k, v in (("obs", {}), ("facts", []), ("asks", []), ("muted", []), ("last", 0), ("off", False), ("last_comments", 0),
@@ -5771,6 +5782,7 @@ def nb():
         before = len(m_["lessons"])
         m_["lessons"] = good_lessons(m_["lessons"])
         n["mig_dropped"] = before - len(m_["lessons"])
+    n["facts"] = [dict(f, text=str(f.get("text", "")).replace("Videos with posted", "Videos posted")) for f in n.get("facts", []) if _fact_ok(f)]
     return n
 
 
