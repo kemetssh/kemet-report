@@ -134,7 +134,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.200"
+BOT_VERSION = "v10.201"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -6295,7 +6295,8 @@ def nb_section(st, name):
     if name == "patterns":
         lines = ["🔎 Patterns in your numbers"]
         keys = []
-        hd = {k: t for k, t in (n.get("handled") or {}).items() if time.time() - t < 45 * 86400}
+        live_ = {f["key"] for f in n["facts"]}
+        hd = {k: t for k, t in (n.get("handled") or {}).items() if time.time() - t < 45 * 86400 and k in live_}
         shown = [f for f in n["facts"] if f["key"] not in hd]
         if n["facts"] and not shown:
             lines.append(f"Nothing open: I already acted on all {len(hd)} patterns. I keep watching and will bring one back if the numbers change.")
@@ -6411,11 +6412,13 @@ def cmd_learned(st, arg=""):
         except Exception as e:
             send("I could not study the channel just now: " + clean(e)[:120])
     m = mem()
+    hd_ = {k for k, t in (n.get("handled") or {}).items() if time.time() - t < 45 * 86400}
     solid = [f for f in n["facts"] if f["conf"] != "unreliable"]
     weak = [f for f in solid if f["conf"] != "repeating pattern"]
+    n_done = len([f for f in solid if f["key"] in hd_])
     d, nw, cp = n.get("demand") or {}, n.get("news") or {}, n.get("comp") or {}
     lines = ["🧠 What I have learned" + (" (paused)" if n["off"] else "") + f" - {len(n['obs'])} videos studied", ""]
-    lines.append(f"• Patterns in your numbers: {len(solid)}" + (f" ({len(weak)} still weak)" if weak else "") if solid
+    lines.append(f"• Patterns in your numbers: {len(solid)}" + (f" ({n_done} already acted on)" if n_done else "") + (f" ({len(weak)} still weak)" if weak else "") if solid
                  else "• Patterns in your numbers: none solid yet (too early, I need 8+ videos older than 3 days)")
     lines.append(f"• Viewer requests: {len(n['asks'])}")
     lines.append(f"• Search topics with weak competition: {len(d.get('rows', []))}; news hooks: {len(nw.get('items', []))}; big-channel patterns: {len(cp.get('patterns', []))}")
