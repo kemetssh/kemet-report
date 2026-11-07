@@ -134,7 +134,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.201"
+BOT_VERSION = "v10.202"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -388,6 +388,70 @@ def is_made(title, made=None):
     return False
 
 
+FRAME_WORDS = {"fact", "check", "evidence", "ritual", "rituals", "divine", "royal", "great", "modern", "truth", "myth", "science", "scientific",
+               "mystery", "secret", "secrets", "beyond", "inside", "actually", "viral", "claims", "claim", "linguistic", "historical", "reality",
+               "practice", "universal", "complex", "sacred", "power", "journey", "daily", "true", "mortal", "ruler", "being", "unveiled", "lost"}
+
+
+def subject_words(t):
+    return {w for w in title_words(t) if w not in FRAME_WORDS}
+
+
+def _topic_match(a, b):
+    if not a or not b:
+        return False
+    c = len(a & b)
+    return c >= 2 or (c >= 1 and min(len(a), len(b)) <= 2)
+
+
+def topic_clusters(titles=None, only_real=True):
+    """Group made videos by topic. Returns [(label words, [titles])] biggest first."""
+    titles = list(titles if titles is not None else made_titles())
+    items = [(t, subject_words(t)) for t in titles if t]
+    groups = []
+    for t, w in items:
+        for g in groups:
+            if _topic_match(w, g["w"]):
+                g["t"].append(t)
+                g["w"] = g["w"] | w if len(g["w"] | w) <= 6 else g["w"]
+                break
+        else:
+            groups.append({"w": set(w), "t": [t]})
+    groups.sort(key=lambda g: -len(g["t"]))
+    out = []
+    for g in groups:
+        cnt = {}
+        for t in g["t"]:
+            for w in subject_words(t):
+                cnt[w] = cnt.get(w, 0) + 1
+        out.append(([w for w, _ in sorted(cnt.items(), key=lambda x: (-x[1], x[0]))[:3]], g["t"]))
+    return out
+
+
+def topic_saturated(title, made=None, limit=2):
+    """True when this idea's topic already has `limit` or more videos, even if worded differently."""
+    w = subject_words(title)
+    if not w:
+        return False
+    n = sum(1 for t in (made if made is not None else made_titles()) if _topic_match(w, subject_words(t)))
+    return n >= limit
+
+
+def cmd_covered(st):
+    ms = made_titles()
+    groups = topic_clusters(ms)
+    multi = [g for g in groups if len(g[1]) >= 2]
+    lines = ["Covered topics: %d videos and ideas on record, %d topics." % (len(ms), len(groups))]
+    if multi:
+        lines.append("\nTopics made more than once (the bot will not offer these again):")
+        for lab, ts in multi[:12]:
+            lines.append("- %s: %d videos, e.g. %s" % (" / ".join(lab) or "?", len(ts), ts[0][:60]))
+    one = len([g for g in groups if len(g[1]) == 1])
+    lines.append("\n%d more topics made once: the bot skips exact repeats and any idea whose topic already has 2 videos." % one)
+    lines.append("To mark something as made, send: /made <title>")
+    send("\n".join(lines)[:3900])
+
+
 def note_offered(titles):
     """Remember ideas that were shown, so the next /idea, /news or /audit does not offer the same ones again for 45 days."""
     lst = [x for x in (mem().get("offered") or []) if isinstance(x, dict) and time.time() - x.get("ts", 0) < 45 * 86400]
@@ -404,7 +468,7 @@ def note_scripted(title):
 
 def drop_made(items, key="title"):
     made = made_titles()
-    return [i for i in items if isinstance(i, dict) and not is_made(i.get(key, ""), made)]
+    return [i for i in items if isinstance(i, dict) and not is_made(i.get(key, ""), made) and not topic_saturated(i.get(key, ""), made)]
 
 
 SEQUEL_PROMPT = """You advise the owner of the YouTube channel "Kemet | Ancient Egypt": short, calm, evidence-first videos; he records his own voice and never fakes facts.
@@ -10288,6 +10352,8 @@ def on_message(msg, st):
         cmd_comments(st, full=True)
     elif text == "/idea":
         cmd_idea(st)
+    elif text == "/covered":
+        cmd_covered(st)
     elif text == "/plan":
         do_plan(st)
     elif text == "/results":
