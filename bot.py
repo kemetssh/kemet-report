@@ -135,7 +135,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.207"
+BOT_VERSION = "v10.208"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -625,6 +625,8 @@ def cmd_made(st, raw=""):
 
 # Rules the bot wrote for itself that the age-corrected numbers did not support (v10.174): never feed them back into prompts.
 _BAD_LESSON = re.compile(r"(indifferent to the volume|1\.5x higher|x or y|binary|45\+? ?char|exceed 45|first 20%|opening 20%|before 4 ?pm|no-repeat|never repeat)", re.I)
+
+_OVERCLAIM = re.compile(r"(abandon|stop (making|using|posting)|never (make|use|post)|outperform\w* all|by over \d+%|only (works|format))", re.I)
 
 CHANNEL_PRIORS = ("Measured on this channel after correcting for video age (small sample, so hints): "
                   "topics about named kings and queens (Tutankhamun, Ramesses, Nefertiti), animals, and the slave-or-labour myths about the pyramids did best; "
@@ -5384,6 +5386,8 @@ Videos (title, views, age in days, views per day): {videos}
 Title tests: {exps}
 Recent viewer comments: {comments}
 Lessons already known: {known}
+MEASURED ON ALL VIDEOS (views corrected for video age, with a luck check; these beat anything you infer from the 10 recent videos above): {measured}
+Rules for your answer: a recent video always shows more views per day than an old one, so never say a title format or topic "wins" from the list above alone. Only call a format or topic a winner if it appears in the MEASURED list; if the MEASURED list says it did not do better, do not recommend it. Never tell the owner to abandon a topic or stop a format from a few videos. An average view duration of 40 to 60 seconds is normal for a Shorts channel: compare it with the length of the videos, do not call it a failure by itself. Say "hint" for anything under 8 videos.
 Return JSON only:
 {{"summary": "3 short sentences: what happened this week, honestly",
  "lessons": ["2 or 3 NEW short rules for future videos, each tied to something in the data above; no repeats of known lessons"],
@@ -5412,8 +5416,9 @@ def weekly_review(st):
     exps = [{"new": e["new"], "old": e["old"], "done": e["done"]} for e in m["exps"][-5:]]
     out = gemini([{"text": WEEKLY_PROMPT.format(an=json.dumps(an), videos=json.dumps(rows[:10]), exps=json.dumps(exps),
                                                comments=json.dumps(recent_comments(tok, vids, 15)),
-                                               known=json.dumps(good_lessons(m["lessons"])[-10:]))}])
-    lessons = [str(x).strip()[:160] for x in out.get("lessons", []) if str(x).strip() and not _BAD_LESSON.search(str(x))][:3]
+                                               known=json.dumps(good_lessons(m["lessons"])[-10:]),
+                                               measured=json.dumps([f["text"] for f in nb()["facts"] if f["key"].startswith("v|")][:6] + [CHANNEL_PRIORS]))}])
+    lessons = [str(x).strip()[:160] for x in out.get("lessons", []) if str(x).strip() and not _BAD_LESSON.search(str(x)) and not _OVERCLAIM.search(str(x))][:3]
     if not out.get("summary") or not lessons:
         return send("I could not finish the weekly review. Try /review again later.")
     for l in lessons:
