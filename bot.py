@@ -135,7 +135,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.211"
+BOT_VERSION = "v10.212"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -8661,15 +8661,17 @@ After the script add a line "CHECK:" listing claims you could not confirm, or "C
 LONG_AUDIT_PROMPT = """Write an 8-10 minute YouTube voice-over script for the channel "Kemet | Ancient Egypt" that AUDITS one claim, step by step.
 Claim to audit: {claim}
 Use web search to check every fact (names, dates, places, museum numbers, publications). Rules:
-- 1,200-1,450 spoken words, calm cinematic voice, English. Evidence first, no hype, never the word "mystery".
+- 1,300-1,500 spoken words, calm cinematic voice, English. This is a hard minimum: the film must run 9 minutes, so every evidence rung needs at least 120 words. Evidence first, no hype, never the word "mystery".
+- SOURCES: build the ladder on primary evidence named exactly: a museum object with its catalogue number or collection, an inscription or spell by its name, an excavation, or a peer-reviewed study with author and year. Use at least ONE physical object and at least TWO primary items. A general encyclopedia may support background but never counts as a rung. Do not write "research confirms" without naming the study.
+- NEVER state a place, object, date or number in the hook or anywhere unless the research confirms it exactly. If unsure, leave it out or say "most likely".
 - Use exactly these parts, each with a timestamp:
   HOOK (0:00-0:30): the strongest true fact, and the question the film answers.
   THE CLAIM (0:30-1:00): the claim in one plain sentence, and who makes it.
   HOW THIS AUDIT WORKS (10 seconds): every piece of evidence is scored by what it is, not by how exciting it sounds.
   THE EVIDENCE LADDER: 4 to 6 rungs, strongest first. For each rung say what it is (an object, an inscription, a scientific study, a later writer), what it shows, the source by name, its strength (strong, medium or weak) and its limit.
   WHERE THE EVIDENCE IS WEAK OR DISPUTED: the best counter-argument and where scholars disagree, fairly.
-  THE VERDICT: a score out of 100 for how strongly the evidence supports the claim AS WORDED. 100 only for direct physical or written evidence with no scholarly dispute; most claims land between 60 and 95. Say what would change the score.
-  WHAT WE STILL DO NOT KNOW (20 seconds).
+  THE VERDICT: a score out of 100 for how strongly the evidence supports the claim AS WORDED (if the claim is about what Egyptians believed, score the evidence for the belief, not whether the afterlife exists). 100 only for direct physical or written evidence with no scholarly dispute; most claims land between 60 and 95. Give two sentences of reasoning that match the evidence you showed, and say what real, existing kind of new evidence would change the score. Never set a standard for 100 that no source could ever meet.
+  WHAT WE STILL DO NOT KNOW (20 seconds): only questions that are really open. Never list as unknown something your own evidence ladder already answered.
   CLOSE: one comment question, then one line sending viewers to the article with the sources on the website.
 - A small reveal every 45-60 seconds so viewers keep watching. State uncertainty plainly: say "according to" or "most likely" for single-source or disputed facts, and leave out anything you cannot confirm.
 After the script add:
@@ -8686,7 +8688,10 @@ def cmd_longaudit(st, raw):
                     "You record it in your own voice.")
     send(f"Writing and fact-checking a long audit (2-3 minutes): {claim}")
     text, sources, summary = verified_script(claim, lambda: LONG_AUDIT_PROMPT.format(claim=claim))
+    words = len(re.findall(r"\w+", text.split("TITLE OPTIONS")[0]))
     msg = f"🔬 Long audit: {claim}\n\n{text}"
+    if words < 1150:
+        msg += f"\n\n⚠️ This script is about {words} words, roughly {words * 60 // 150 // 60} minutes at a calm pace. For 8+ minutes it needs about 1,300. Send /longaudit with the same claim again, or add detail to each evidence rung while recording."
     if summary:
         msg += "\n\n" + summary
     note_scripted(claim)
