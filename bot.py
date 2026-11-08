@@ -135,7 +135,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.208"
+BOT_VERSION = "v10.209"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -9092,7 +9092,12 @@ def selftest_checks(deep=True):
         fq = (mem().get("fixq") or {}).get("items") or []
         n_props = len(ST.get("props") or {})
         note = (f"; cleaned {len(healed)} abandoned upload(s)" if healed else "") + (f"; removed {len(old_props)} old buttons" if old_props else "")
-        add(kb < 3000 and n_props < 400, "Bot memory", f"{kb:.0f} KB, {n_props} open buttons, {len(jobs)} upload(s) waiting for a tap (cancelled automatically after 2 days), fix-all queue {len(fq)}{note}")
+        try:
+            big = sorted(((k, len(json.dumps(v, default=str))) for k, v in {**ST, **mem()}.items()), key=lambda x: -x[1])[:4]
+            bigs = "; biggest parts: " + ", ".join(f"{k} {v // 1024} KB" for k, v in big) if kb >= 3000 else ""
+        except Exception:
+            bigs = ""
+        add(kb < 3000 and n_props < 400, "Bot memory", f"{kb:.0f} KB, {n_props} open buttons, {len(jobs)} upload(s) waiting for a tap (cancelled automatically after 2 days), fix-all queue {len(fq)}{note}{bigs}")
     except Exception as e:
         add(False, "Bot memory", clean(e)[:90])
     lg_all = [x for x in (mem().get("errlog") or []) if time.time() - x["ts"] < 86400]
@@ -10415,38 +10420,38 @@ def help_text():
 
 HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "I will check it and give you choices to tap. Nothing goes on YouTube without your tap.\n\n"
-        "/idea - fresh video ideas, then a fact-checked script\n"
+        "/idea - fresh ideas, then a script\n"
         "/titles - better titles for old videos (you approve)\n"
         "/comments - draft replies to comments (you approve)\n"
-        "/comments redo - bring back skipped comments\n"
+        "/comments redo - skipped comments\n"
         "/subtitles - English + Arabic subtitles\n"
         "/summarize LINK - summary of a video's transcript\n"
-        "/crosspost - captions for TikTok, Reels, Facebook\n"
+        "/crosspost - captions for TikTok, Reels, FB\n"
         "/series - add your latest video to a playlist\n"
-        "/progress - how close you are to earning on YouTube\n"
+        "/progress - how close to earning on YouTube\n"
         "/retention - where viewers leave\n"
         "/scout - what works on other channels\n"
         "/bigsetup - videos over 20 MB (I shrink)\n"
         "/ytauth - new YouTube login (comments, captions)\n"
         "/asked - viewer questions into videos\n"
         "/review - weekly self-review now\n"
-        "/funnel - point your Shorts viewers to a long video\n"
-        "/besttime - when to post, from your own data\n"
+        "/funnel - Shorts viewers to a long video\n"
+        "/besttime - when to post\n"
         "/watchnext - 'Watch next' links in old videos\n"
         "/hashtags - refresh old hashtags\n"
-        "/learned - what I learned (forget or pause any time)\n"
-        "/whatworks - which video types win and lose\n"
-        "/log - tell me a TikTok, X or Facebook post's numbers\n"
-        "/platforms - what works on each platform\n"
-        "/money - how close you are to earning on each platform\n"
+        "/learned - what I learned\n"
+        "/whatworks - which video types win\n"
+        "/log - send TikTok or X numbers\n"
+        "/platforms - what works where\n"
+        "/money - how close to earning\n"
         "/covered - topics already made\n"
-        "/instagram - read my Instagram numbers now\n"
+        "/instagram - read Instagram now\n"
         "/fullrefresh - refresh everything I know\n"
-        "/script - fact-checked script on your topic\n"
+        "/script - script on your topic\n"
         "/affiliate - affiliate programs, sponsors\n"
-        "/translate - ES, PT, HI subtitles for my latest video\n"
+        "/translate - ES, PT, HI subtitles\n"
         "/shortcuts - moments for Shorts\n"
-        "/playlists - build themed playlists (you approve)\n"
+        "/playlists - themed playlists\n"
         "/uploadrecover ID - check an interrupted upload\n"
         "/failed - show failed updates\n"
         "/retry ID confirm - replay one failed update\n"
@@ -10474,12 +10479,12 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/fbsetup - link your Facebook Page\n"
         "/news - fresh Egypt news to turn into videos\n"
         "/pins - fix weak pinned comments (you tap)\n"
-        "/audit - Kemet Audited: test a myth (or /audit your claim)\n"
+        "/audit - test a myth or your claim\n"
         "/audited - /audit + video; \"pov\" first = POV\n"
         "/longform - plan long videos (they earn more)\n"
         "/batch - 5 scripts to film in one sitting\n"
-        "/collab - draft messages to similar channels\n"
-        "/community - posts to share your newest video\n"
+        "/collab - messages to similar channels\n"
+        "/community - posts for your newest video\n"
         "/starter - a comment-getting question\n"
         "/sublines - rotate the subscribe line\n"
         "/chapters - add timestamps to long videos\n/learnexport - my learning notes as a file\n/fbcomments - reply to Facebook comments\n/fbviews - Facebook vs YouTube views\n"
@@ -10488,14 +10493,14 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/goal 100 - set a subscriber goal and track it\n"
         "/demand - what people search for\n/count - exact number of videos\n"
         "/refresh - fresh description lines for old videos\n"
-        "/calendar - ideas timed to real Egypt events\n"
+        "/calendar - ideas for Egypt events\n"
         "/subs - where subscribers come from\n"
         "/praise - save your best comments\n"
         "/voice - pacing coach from your own numbers\n"
         "/poll - feedback poll: what to film next\n"
         "/cadence 3 - how often to post\n"
         "/links /addlink /removelink - description links\n"
-        "/health - check that everything works\n/selftest - the bot tests itself\n/viral - growth lab: what is taking off, what to do\n/pause /resume - stop or restart my own messages\n"
+        "/health - check that everything works\n/selftest - the bot tests itself\n/viral - what is taking off\n/pause /resume - stop or restart my own messages\n"
         "Or just write or speak to me normally: I work out what you want.\n"
         "/results - how your latest video is doing\n/plan - this week's plan\n"
         "/lessons - what I have learned about your channel\n"
@@ -13498,9 +13503,15 @@ def site_playlists(tok, merge=True):
         items, page = [], None
         for _ in range(4):
             kw = {"pageToken": page} if page else {}
-            try:
-                d = yt_get("playlistItems", tok, part="snippet,contentDetails", playlistId=p["id"], maxResults=50, **kw)
-            except Exception:
+            d = None
+            for _try in range(2):
+                try:
+                    d = yt_get("playlistItems", tok, part="snippet,contentDetails", playlistId=p["id"], maxResults=50, **kw)
+                    break
+                except Exception as e:
+                    print("playlist items:", p.get("id"), clean(e)[:80])
+                    time.sleep(1)
+            if d is None:
                 break
             for i in d.get("items", []):
                 t = i["snippet"].get("title", "")
@@ -13715,6 +13726,42 @@ def relink_series(root, pls):
     return n
 
 
+
+def prune_dead_series(root):
+    """v10.209: an article that links to a series page that does not exist gets a broken link. Remove that link and its breadcrumb step. Returns how many pages changed and which series are missing."""
+    root = Path(root)
+    n, dead = 0, set()
+    for p in (root / "articles").glob("*/index.html"):
+        t = p.read_text(encoding="utf-8")
+        t2 = t
+        for slug in set(re.findall(r'/playlists/([a-z0-9-]+)/"', t)):
+            if (root / "playlists" / slug / "index.html").exists():
+                continue
+            dead.add(slug)
+            t2 = re.sub(r'<a href="/playlists/' + re.escape(slug) + r'/">Part of the series:[^<]*</a>(?:<br\s*/?>)?', "", t2)
+            def fix_ld(mm):
+                try:
+                    d = json.loads(mm.group(2))
+                except Exception:
+                    return mm.group(0)
+                changed = False
+                for node in (d.get("@graph") if isinstance(d, dict) and "@graph" in d else [d]):
+                    if isinstance(node, dict) and node.get("@type") == "BreadcrumbList":
+                        its = node.get("itemListElement", [])
+                        keep = [i for i in its if f"/playlists/{slug}/" not in str(i.get("item", ""))]
+                        if len(keep) != len(its):
+                            for k, i in enumerate(keep, 1):
+                                i["position"] = k
+                            node["itemListElement"] = keep
+                            changed = True
+                return (mm.group(1) + json.dumps(d, ensure_ascii=False) + mm.group(3)) if changed else mm.group(0)
+            t2 = re.sub(r'(<script type="application/ld\+json">)(.*?)(</script>)', fix_ld, t2, flags=re.S)
+        if t2 != t:
+            p.write_text(t2, encoding="utf-8")
+            n += 1
+    return n, sorted(dead)
+
+
 def rebuild_site_hubs(root, tok):
     pls = site_playlists(tok)
     if not pls:
@@ -13729,6 +13776,13 @@ def rebuild_site_hubs(root, tok):
         relink_series(root, pls)
     except Exception as e:
         print("relink:", clean(e)[:120])
+    try:
+        pn, pdead = prune_dead_series(root)
+        if pn:
+            mem()["dead_series"] = {"slugs": pdead, "pages": pn, "ts": time.time()}
+            print("removed links to missing series:", pdead, pn)
+    except Exception as e:
+        print("prune series:", clean(e)[:120])
     add_series_nav(root)
     try:
         hieroglyph_numbers(root)
@@ -13781,7 +13835,9 @@ def cmd_hubs(st):
         r = pack_site(root, d, f"🗂 Site updated: {n} series pages (one per YouTube playlist) and a /playlists/ index. Unzip and upload the CONTENTS to Cloudflare Pages.")
     if not r.get("ok"):
         return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
-    send(f"✅ {n} series pages built from your playlists. Each lists its films; a film shows \"Read the article\" once it has one, otherwise it links to YouTube. /articles writes the articles.")
+    ds = mem().get("dead_series") or {}
+    send(f"✅ {n} series pages built from your playlists. Each lists its films; a film shows \"Read the article\" once it has one, otherwise it links to YouTube. /articles writes the articles."
+         + (f"\n\nℹ️ {ds['pages']} articles linked to a series page that no longer exists ({', '.join(ds['slugs'])}: the playlist is gone from your channel or has no public videos). I removed those links. If the playlist should exist, recreate it in YouTube Studio and send /hubs again." if ds.get("pages") and time.time() - ds.get("ts", 0) < 600 else ""))
     ap = mem().get("after_pub") or {}
     if ap.get("chain") and time.time() - ap.get("ts", 0) < 3 * 86400:
         return offer_article_in_chain(st)
@@ -14693,6 +14749,7 @@ def write_article(c, st):
             if pls:
                 bu = build_hubs(root, pls, vid_slug_map(root))
                 relink_series(root, pls)
+                prune_dead_series(root)
                 hieroglyph_numbers(root)
                 add_series_nav(root)
                 sm_ = root / "sitemap.xml"
