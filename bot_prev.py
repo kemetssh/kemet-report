@@ -135,7 +135,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.210"
+BOT_VERSION = "v10.211"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -4480,7 +4480,7 @@ def _summary_generate(material, instruction):
     # Reuse the bot's model selection, quota accounting, fallback models, and backoff.
     r = _gpost({"systemInstruction": {"parts": [{"text": SUMMARY_RULES + "\n" + instruction}]},
                 "contents": [{"role": "user", "parts": [{"text": material}]}],
-                "generationConfig": {"maxOutputTokens": 3072, "temperature": 0.2}})
+                "generationConfig": {"maxOutputTokens": 6144, "temperature": 0.2}})
     candidates = r.json().get("candidates") or []
     candidate = candidates[0] if candidates else {}
     if candidate.get("finishReason") == "MAX_TOKENS":
@@ -8638,22 +8638,64 @@ def cmd_news(st):
          [[btn(f"Script {n + 1}", pid, "is", n) for n in range(len(items))]])
 
 
-LONG_PROMPT = """You grow the YouTube history channel "Kemet | Ancient Egypt". Its Shorts are its reach; long videos (5-8 minutes) earn far more per view.
+LONG_PROMPT = """You grow the YouTube history channel "Kemet | Ancient Egypt". Its Shorts are its reach; long videos (8-10 minutes) earn far more per view and are what the 4,000 watch hours need.
 What you know about the channel:
 {memory}
 Its videos so far with views: {videos}
 Propose 3 long-form videos that expand the topics that already work (or that the owner chose). Each must be historically solid.
-Return JSON only: {{"concepts": [{{"title": "max 70 chars", "angle": "what makes it worth 6 minutes", "outline": ["5-6 chapter names"], "why": "link to what already works"}}]}}"""
+Return JSON only: {{"concepts": [{{"title": "max 70 chars", "angle": "what makes it worth 9 minutes", "outline": ["5-6 chapter names"], "why": "link to what already works"}}]}}"""
 
-LONG_SCRIPT_PROMPT = """Write a 5-6 minute YouTube voice-over script for the channel "Kemet | Ancient Egypt".
+LONG_SCRIPT_PROMPT = """Write an 8-10 minute YouTube voice-over script for the channel "Kemet | Ancient Egypt".
 Title: {title}. Angle: {angle}. Outline: {outline}
 Use web search to check every fact (names, dates, places). Rules:
-- 700-900 spoken words, calm cinematic voice, English.
+- 1,200-1,400 spoken words (8-10 minutes), calm cinematic voice, English.
+- Never a title of the form "X or Y". Plain statement or a How/Why/What/Who opener, under 60 characters.
 - HOOK in the first 15 seconds that opens a question the video answers later.
 - Chapters with timestamps; a small surprise or reveal every 45-60 seconds so viewers keep watching.
 - Ending: answer the opening question, then ask a comment question, then one line pointing to the next video.
 - Add 2 teaser lines the owner can use at the end of related Shorts to send viewers here.
 After the script add a line "CHECK:" listing claims you could not confirm, or "CHECK: none"."""
+
+
+
+LONG_AUDIT_PROMPT = """Write an 8-10 minute YouTube voice-over script for the channel "Kemet | Ancient Egypt" that AUDITS one claim, step by step.
+Claim to audit: {claim}
+Use web search to check every fact (names, dates, places, museum numbers, publications). Rules:
+- 1,200-1,450 spoken words, calm cinematic voice, English. Evidence first, no hype, never the word "mystery".
+- Use exactly these parts, each with a timestamp:
+  HOOK (0:00-0:30): the strongest true fact, and the question the film answers.
+  THE CLAIM (0:30-1:00): the claim in one plain sentence, and who makes it.
+  HOW THIS AUDIT WORKS (10 seconds): every piece of evidence is scored by what it is, not by how exciting it sounds.
+  THE EVIDENCE LADDER: 4 to 6 rungs, strongest first. For each rung say what it is (an object, an inscription, a scientific study, a later writer), what it shows, the source by name, its strength (strong, medium or weak) and its limit.
+  WHERE THE EVIDENCE IS WEAK OR DISPUTED: the best counter-argument and where scholars disagree, fairly.
+  THE VERDICT: a score out of 100 for how strongly the evidence supports the claim AS WORDED. 100 only for direct physical or written evidence with no scholarly dispute; most claims land between 60 and 95. Say what would change the score.
+  WHAT WE STILL DO NOT KNOW (20 seconds).
+  CLOSE: one comment question, then one line sending viewers to the article with the sources on the website.
+- A small reveal every 45-60 seconds so viewers keep watching. State uncertainty plainly: say "according to" or "most likely" for single-source or disputed facts, and leave out anything you cannot confirm.
+After the script add:
+TITLE OPTIONS: 3 titles, each a plain statement or a How/Why/What/Who opener, under 60 characters, never "X or Y", never clickbait.
+SHORTS TEASERS: 2 lines the owner can use at the end of related Shorts to send viewers here.
+Then a line "CHECK:" listing claims you could not confirm, or "CHECK: none"."""
+
+
+def cmd_longaudit(st, raw):
+    claim = raw.split(None, 1)[1].strip()[:200] if len(raw.split(None, 1)) > 1 else ""
+    if len(claim) < 15:
+        return send("Tell me the claim to audit, for example:\n/longaudit Tutankhamun's dagger blade was made from a meteorite\n"
+                    "I write a fact-checked 8-10 minute script: the claim, a ladder of evidence with each piece rated, the counter-evidence, a score out of 100, and what we still do not know. "
+                    "You record it in your own voice.")
+    send(f"Writing and fact-checking a long audit (2-3 minutes): {claim}")
+    text, sources, summary = verified_script(claim, lambda: LONG_AUDIT_PROMPT.format(claim=claim))
+    msg = f"🔬 Long audit: {claim}\n\n{text}"
+    if summary:
+        msg += "\n\n" + summary
+    note_scripted(claim)
+    mem()["cleared"] = {"title": claim, "script": text[:6000], "sources": sources, "ts": time.time(), "verified": "NOT fully verified" not in summary}
+    if sources:
+        mem()["script_sources"] = {"title": claim, "sources": sources, "ts": time.time()}
+        msg += f"\n\nSources I checked ({len(sources)}):\n" + "\n".join(f"• {t}: {u}" for t, u in sources)
+    msg += "\n\nRecord it in your own voice and send me the video like any other. Then /articles writes the article with these sources."
+    send(msg)
 
 
 def cmd_longform(st):
@@ -8687,7 +8729,7 @@ def write_long(c):
     if sources:
         mem()["script_sources"] = {"title": c["title"], "sources": sources, "ts": time.time()}
         msg += f"\n\nSources I checked ({len(sources)}, they will be added to your video description):\n" + "\n".join(f"• {t}: {u}" for t, u in sources)
-    send((msg + "\n\nRecord it in your own voice and send me the video like any other.")[:4000])
+    send(msg + "\n\nRecord it in your own voice and send me the video like any other.")
 
 
 # ---------------- Community posts (YouTube has no free way to publish them, so the bot writes them for you to paste) ----------------
@@ -10481,7 +10523,8 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/pins - fix weak pinned comments (you tap)\n"
         "/audit - test a myth or your claim\n"
         "/audited - /audit + video; \"pov\" first = POV\n"
-        "/longform - plan long videos (they earn more)\n"
+        "/longaudit - 8-10 min claim audit script\n"
+        "/longform - plan long videos\n"
         "/batch - 5 scripts to film in one sitting\n"
         "/collab - messages to similar channels\n"
         "/community - posts for your newest video\n"
@@ -11043,6 +11086,8 @@ def on_message(msg, st):
         run_audit(claim, st, video=True, pov=pov_) if claim else cmd_audit(st)
     elif text.startswith("/audit"):
         cmd_audit(st, raw)
+    elif text == "/longaudit" or text.startswith("/longaudit "):
+        cmd_longaudit(st, text)
     elif text == "/longform":
         cmd_longform(st)
     elif text == "/batch":
