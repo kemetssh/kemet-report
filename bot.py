@@ -135,7 +135,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.206"
+BOT_VERSION = "v10.207"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -6322,13 +6322,20 @@ def money_refresh(tok, force=False):
         new["subs"] = int(yt_get("channels", tok, part="statistics", mine="true")["items"][0]["statistics"].get("subscriberCount", 0))
     except Exception as e:
         print("money subs:", clean(e)[:80])
-    for key, metric, days, flt in (("hours", "estimatedMinutesWatched", 365, "creatorContentType==VIDEO_ON_DEMAND"),
-                                   ("h28", "estimatedMinutesWatched", 28, "creatorContentType==VIDEO_ON_DEMAND"),
-                                   ("shorts", "views", 90, "creatorContentType==SHORTS"),
-                                   ("gained28", "subscribersGained", 28, None)):
+    for key, metric, days, kind in (("hours", "estimatedMinutesWatched", 365, "VIDEO_ON_DEMAND"),
+                                    ("h28", "estimatedMinutesWatched", 28, "VIDEO_ON_DEMAND"),
+                                    ("shorts", "views", 90, "SHORTS"),
+                                    ("gained28", "subscribersGained", 28, None)):
         try:
-            v = an_query(tok, metric, days, flt)[0]
-            new[key] = v / 60 if "Minutes" in metric else v
+            if kind:
+                try:
+                    v = an_by_type(tok, metric, days).get(kind, 0)
+                except Exception:
+                    v = an_query(tok, metric, days)[0] if kind == "VIDEO_ON_DEMAND" else None   # fall back to the all-content total for watch time
+            else:
+                v = an_query(tok, metric, days)[0]
+            if v is not None:
+                new[key] = v / 60 if "Minutes" in metric else v
         except Exception as e:
             print("money", key, clean(e)[:80])
     for k in ("subs", "hours", "h28", "shorts", "gained28"):
@@ -7525,6 +7532,17 @@ def an_query(tok, metrics, days, filters=None):
     return [v if isinstance(v, (int, float)) else 0 for v in row]  # YouTube can send null for a metric
 
 
+def an_by_type(tok, metric, days):
+    """One metric split by content type (SHORTS, VIDEO_ON_DEMAND, LIVE_STREAM): YouTube only accepts that split as a dimension, not as a filter."""
+    params = {"ids": "channel==MINE", "metrics": metric, "dimensions": "creatorContentType",
+              "startDate": time.strftime("%Y-%m-%d", time.gmtime(time.time() - days * 86400)),
+              "endDate": time.strftime("%Y-%m-%d", time.gmtime())}
+    r = S.get(f"{YTA}/v2/reports", params=params, headers={"Authorization": f"Bearer {tok}"}, timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"Analytics HTTP {r.status_code}")
+    return {row[0]: (row[1] if isinstance(row[1], (int, float)) else 0) for row in (r.json().get("rows") or [])}
+
+
 def bar(x, total, width=10):
     f = int(min(x / total, 1) * width) if total else 0
     return "▓" * f + "░" * (width - f)
@@ -7541,7 +7559,7 @@ def cmd_progress(st):
     except Exception as e:
         lines.append(f"(Watch hours are missing: {clean(e)[:80]})")
     try:
-        shorts = an_query(tok, "views", 90, "creatorContentType==SHORTS")[0]
+        shorts = an_by_type(tok, "views", 90).get("SHORTS", 0)
     except Exception as e:
         lines.append(f"(Shorts views are missing: {clean(e)[:80]})")
     try:
