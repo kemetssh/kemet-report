@@ -135,7 +135,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.209"
+BOT_VERSION = "v10.210"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -10596,7 +10596,7 @@ def sender_ok(obj):
 
 
 _UPDATE_TERMINAL = {"completed", "skipped", "acknowledged"}
-_UPDATE_HISTORY_LIMIT = 2000
+_UPDATE_HISTORY_LIMIT = 500
 
 
 def _update_journal(st):
@@ -10647,12 +10647,12 @@ def _update_journal_compact(st):
     terminal.sort(key=lambda item: item[0])
     for _, uid in terminal[:-_UPDATE_HISTORY_LIMIT]:
         records.pop(str(uid), None)
-        try:
-            j["order"].remove(uid)
-        except ValueError:
-            pass
+    j["order"] = [u for u in j["order"] if str(u) in records]      # v10.210: ids are numbers in the list but text in the records: drop the ones whose record is gone
+    for uid, rec in records.items():                       # v10.210: a finished update is never replayed, so only its id and status need to stay
+        if rec.get("status") in _UPDATE_TERMINAL and isinstance(rec.get("payload"), dict) and len(rec["payload"]) > 1:
+            rec["payload"] = {"update_id": rec.get("update_id", uid)}
     j["dead_letter"] = [uid for uid in j["order"]
-                        if records.get(str(uid), {}).get("status") not in _UPDATE_TERMINAL]
+                        if str(uid) in records and records[str(uid)].get("status") not in _UPDATE_TERMINAL]
 
 
 def _update_journal_advance(st):
