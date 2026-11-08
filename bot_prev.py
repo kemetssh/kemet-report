@@ -135,7 +135,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.203"
+BOT_VERSION = "v10.205"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -647,6 +647,10 @@ def good_lessons(lst):
 def learned():
     m = mem()
     parts = [CHANNEL_PRIORS]
+    try:
+        parts.append(money_goal_text())
+    except Exception:
+        pass
     gl = good_lessons(m["lessons"])
     if gl:
         parts.append("Lessons learned about this channel:\n" + "\n".join("- " + x for x in gl[-12:]))
@@ -2856,6 +2860,7 @@ SHARE_PROMPT = """Write social posts for the history channel "Kemet | Ancient Eg
 What it is about: {blurb}
 Rules for all: honest, no clickbait or claim the film does not make, a curious first line, no links (I add them).
 No hashtags at all (I add checked ones myself).
+The aim is to grow followers and watch time so each account can earn: x invites a reply; facebook ends with a question and keeps people watching; instagram invites a save or share; tiktok promises the next piece of evidence so people follow for Part 2. Never promise what the film does not show.
 - x: at most 160 characters, at most 1 emoji.
 - facebook: 2 to 3 short sentences for a Page post, a question at the end to invite comments.
 - instagram: a caption of 3 to 5 short lines. Do not mention a link or the bio (I add the link).
@@ -5974,6 +5979,14 @@ def nb_scan(st, force=False):
         vids = all_videos(tok)
         nb_observe(n, vids, tok, now, 12)
         try:
+            ig_sync()
+        except Exception as e:
+            print("ig sync:", clean(e)[:80])
+        try:
+            money_refresh(tok)
+        except Exception as e:
+            print("money refresh:", clean(e)[:80])
+        try:
             nb_auto_predict(n, vids, now)
         except Exception as e:
             print("auto predict:", clean(e)[:80])
@@ -6136,6 +6149,21 @@ def nb_report(st, force=False):
         lines.append(f"{len(unrel)} pattern(s) are marked unreliable because my guesses from them were often wrong. I no longer use them.")
     if n["asks"]:
         lines.append("Viewers ask most: " + "; ".join(a["ask"] for a in n["asks"][:3]))
+    try:
+        gr = []
+        for p_, lst in (mem().get("plat_followers") or {}).items():
+            old_ = [x for x in lst if x[0] <= lst[-1][0] - 6 * 86400]
+            if old_ and len(lst) >= 2:
+                gr.append("%s %s (%+d in %d days)" % (PLATFORM_NAMES.get(p_, p_), f"{lst[-1][1]:,}", lst[-1][1] - old_[-1][1], int((lst[-1][0] - old_[-1][0]) / 86400)))
+        if gr:
+            lines.append("👥 Followers: " + "; ".join(gr))
+    except Exception as e:
+        print("follower line:", clean(e)[:80])
+    c_ = mem().get("money") or {}
+    if c_.get("hours") is not None:
+        h28 = c_.get("h28") or 0
+        eta = ("about %d days to 4,000 hours at this pace" % ((4000 - c_["hours"]) / (h28 / 28))) if h28 > 0 and c_["hours"] < 4000 else ("4,000 hours reached" if c_["hours"] >= 4000 else "watch hours are not growing yet")
+        lines.append("💰 Money goal: %d/1,000 subscribers, %.0f/4,000 watch hours (%s). %d days until YouTube raises the bar (1 Feb 2027)." % (c_.get("subs", 0), c_["hours"], eta, max(0, int((YPP_DEADLINE - time.time()) / 86400))))
     pl = mem().get("plat") or []
     if not pl or time.time() - max(e["ts"] for e in pl) > 10 * 86400:
         lines.append("Send /log with this week's TikTok, X or Facebook numbers so I can learn what works on each platform.")
@@ -6144,6 +6172,147 @@ def nb_report(st, force=False):
         lines.append(f"Your reasons for rejecting titles ({len(reasons)} so far) are shaping my next suggestions.")
     lines.append("Send /learned to correct anything. I only learn: every change still needs your tap.")
     send("\n".join(lines))
+
+
+# ---------------- v10.205: Instagram and Facebook numbers read automatically ----------------
+def _snap_followers(plat, n_followers):
+    """Remember a follower count (at most one change-or-daily snapshot)."""
+    lst = mem().setdefault("plat_followers", {}).setdefault(plat, [])
+    if not lst or lst[-1][1] != n_followers or time.time() - lst[-1][0] > 20 * 3600:
+        lst.append([time.time(), int(n_followers)])
+        del lst[:-400]
+
+
+def ig_sync(force=False):
+    """Read the Instagram account linked to the Facebook Page: followers and the latest posts with views, likes, comments, shares/saves.
+    Returns (ok, message). Never raises."""
+    m = mem()
+    cfg = fb_cfg()
+    if not cfg:
+        return False, "Facebook is not connected yet (send /fbsetup): Instagram is read through the Page."
+    last = m.get("ig_last") or {}
+    if not force and time.time() - last.get("ts", 0) < 6 * 3600:
+        return bool(last.get("ok")), last.get("msg", "")
+    tok = cfg["token"]
+    def done(ok, msg):
+        m["ig_last"] = {"ts": time.time(), "ok": ok, "msg": msg}
+        return ok, msg
+    try:
+        pg = fb_call("GET", cfg["page_id"], params={"access_token": tok, "fields": "followers_count,fan_count,instagram_business_account{id,username,followers_count,media_count}"})
+    except Exception as e:
+        return done(False, "Facebook did not answer: " + clean(e)[:140])
+    fbf = pg.get("followers_count") or pg.get("fan_count")
+    if fbf:
+        _snap_followers("facebook", fbf)
+    ig = pg.get("instagram_business_account") or {}
+    if not ig.get("id"):
+        return done(False, "No Instagram account is attached to this Facebook Page, or the key lacks permission to see it (instagram_basic). Check Page settings -> Linked accounts, then send /fbsetup with a fresh key that includes Instagram permissions.")
+    if ig.get("followers_count") is not None:
+        _snap_followers("instagram", ig["followers_count"])
+    try:
+        media = fb_call("GET", f"{ig['id']}/media", params={"access_token": tok, "limit": 30,
+                        "fields": "id,caption,timestamp,like_count,comments_count,media_type,media_product_type,permalink"}).get("data", [])
+    except Exception as e:
+        return done(False, "Instagram posts could not be read: " + clean(e)[:140] + " (the key needs instagram_basic and instagram_manage_insights).")
+    plat = m.setdefault("plat", [])
+    by_id = {e.get("id"): e for e in plat if e.get("id")}
+    made = made_titles()
+    got = noins = 0
+    for md in media:
+        views = shares = None
+        for metrics in ("views,reach,shares,saved", "reach,saved", "reach"):
+            try:
+                j = fb_call("GET", f"{md['id']}/insights", params={"access_token": tok, "metric": metrics})
+                vals = {d["name"]: (d.get("values") or [{}])[0].get("value", (d.get("total_value") or {}).get("value")) for d in j.get("data", [])}
+                views = vals.get("views") if vals.get("views") is not None else vals.get("reach")
+                shares = (vals.get("shares") or 0) + (vals.get("saved") or 0)
+                break
+            except Exception:
+                continue
+        if views is None:
+            noins += 1
+        cap = md.get("caption") or ""
+        w = title_words(cap)
+        best = (0, "")
+        for t in made:
+            c = len(w & title_words(t))
+            if c > best[0]:
+                best = (c, t)
+        e = by_id.get(md["id"])
+        if not e:
+            e = {"p": "instagram", "id": md["id"], "auto": True, "title": best[1] if best[0] >= 2 else "", "topic": cap[:80]}
+            plat.append(e)
+        e.update({"ts": iso_ts(md.get("timestamp", "")) or e.get("ts") or time.time(), "likes": md.get("like_count") or 0, "comments": md.get("comments_count") or 0,
+                  "kind": md.get("media_product_type") or md.get("media_type") or ""})
+        if views is not None:
+            e["views"], e["shares"] = int(views), int(shares or 0)
+            got += 1
+    m["plat"] = plat[-3000:]
+    msg = "Instagram @%s: %s followers, %d posts read, %d with view numbers." % (ig.get("username", "?"), f"{ig.get('followers_count', 0):,}", len(media), got)
+    if media and not got:
+        msg += " Instagram gave no view numbers: the key needs the permission instagram_manage_insights (send /fbsetup with a fresh key)."
+    return done(True, msg)
+
+
+def cmd_instagram(st):
+    send("Reading your Instagram...")
+    ok, msg = ig_sync(force=True)
+    send(("✅ " if ok else "⚠️ ") + msg + ("\nSend /platforms to see what works." if ok else ""))
+
+
+# ---------------- v10.204: the money goal ----------------
+YPP_DEADLINE = time.mktime((2027, 2, 1, 0, 0, 0, 0, 0, 0))
+
+
+def money_refresh(tok, force=False):
+    """Numbers that decide when the channel can earn: subscribers, public long-video watch hours (12 months), Shorts views (90 days), pace. Cached 12 h."""
+    m = mem()
+    c = m.get("money") or {}
+    if not force and time.time() - c.get("ts", 0) < 12 * 3600:
+        return c
+    new = {"ts": time.time()}
+    try:
+        new["subs"] = int(yt_get("channels", tok, part="statistics", mine="true")["items"][0]["statistics"].get("subscriberCount", 0))
+    except Exception as e:
+        print("money subs:", clean(e)[:80])
+    for key, metric, days, flt in (("hours", "estimatedMinutesWatched", 365, "creatorContentType==VIDEO_ON_DEMAND"),
+                                   ("h28", "estimatedMinutesWatched", 28, "creatorContentType==VIDEO_ON_DEMAND"),
+                                   ("shorts", "views", 90, "creatorContentType==SHORTS"),
+                                   ("gained28", "subscribersGained", 28, None)):
+        try:
+            v = an_query(tok, metric, days, flt)[0]
+            new[key] = v / 60 if "Minutes" in metric else v
+        except Exception as e:
+            print("money", key, clean(e)[:80])
+    for k in ("subs", "hours", "h28", "shorts", "gained28"):
+        if k not in new and k in c:
+            new[k] = c[k]
+    m["money"] = new
+    return new
+
+
+def money_goal_text():
+    """The standing goal for every idea prompt, with the current bottleneck (from the cached numbers, no network)."""
+    c = mem().get("money") or {}
+    days_left = int((YPP_DEADLINE - time.time()) / 86400)
+    out = ["THE OWNER'S MAIN GOAL: start earning money from the channel as fast as possible (YouTube Partner Program first, then TikTok and Facebook payouts). "
+           "Every idea should help reach 1,000 subscribers and 4,000 public watch hours (or 10 million Shorts views in 90 days). Never trade accuracy for views."]
+    if c.get("subs") is not None and c.get("hours") is not None:
+        subs, hrs = c["subs"], c["hours"]
+        r_sub, r_perf = subs / 1000, max(hrs / 4000, (c.get("shorts") or 0) / 10_000_000)
+        out.append("Now: %d subscribers, %.0f long-video watch hours (12 months), %s Shorts views (90 days)." % (subs, hrs, f"{int(c.get('shorts') or 0):,}"))
+        if r_perf < r_sub:
+            out.append("The slowest part is WATCH TIME: favour ideas that can become 8+ minute videos or multi-part series on the topics that win here, and Shorts that point to a long video.")
+        else:
+            out.append("The slowest part is SUBSCRIBERS: favour ideas with a strong hook and a clear reason to subscribe (named kings and queens, a story with a Part 2).")
+        h28 = c.get("h28") or 0
+        if hrs < 4000 and days_left > 0:
+            need_d = (4000 - hrs) / (h28 / 28) if h28 > 0 else None
+            if need_d is not None and need_d <= days_left:
+                out.append("At the current pace the watch-hour bar is reached in about %d days, before the 1 Feb 2027 rule change: keep the rhythm." % need_d)
+            else:
+                out.append("At the current pace the watch-hour bar is NOT reached before 1 Feb 2027 (%d days left; the bar then rises to 8,000 hours for new applicants): the pace must roughly double, so prioritise long videos." % days_left)
+    return "\n".join(out)
 
 
 # ---------------- v10.203: the learning machine (type tags, honest statistics, backtest, other platforms, money) ----------------
@@ -6325,6 +6494,10 @@ def _med(x):
 
 
 def cmd_platforms(st):
+    try:
+        ig_sync()
+    except Exception as e:
+        print("ig sync:", clean(e)[:80])
     m, n = mem(), nb()
     out = ["🌍 Platforms: what is working where", ""]
     rows = [o for o in n["obs"].values() if o.get("views") is not None and o.get("age", 0) >= 3]
@@ -6386,6 +6559,7 @@ def cmd_platforms(st):
 MONEY_RULES = [
     ("tiktok", "TikTok Creator Rewards", "10,000 followers and 100,000 views in 30 days, videos longer than 1 minute, 18+. Check in the TikTok app that your country is supported."),
     ("facebook", "Facebook content monetization", "reported: 10,000 followers and 600,000 minutes viewed in 60 days, 5 videos, 18+. Check in Meta that your country is eligible."),
+    ("instagram", "Instagram", "as far as I know, payouts are by invitation (bonuses, gifts), so treat Instagram as traffic to YouTube and the website, and keep growing followers."),
     ("x", "X creator payouts", "needs X Premium and a minimum of verified followers and impressions. X changes it often: open Settings, then Monetization in X for your own numbers."),
 ]
 
@@ -10201,6 +10375,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/platforms - what works on each platform\n"
         "/money - how close you are to earning on each platform\n"
         "/covered - topics already made\n"
+        "/instagram - read my Instagram numbers now\n"
         "/fullrefresh - refresh everything I know\n"
         "/script - fact-checked script on your topic\n"
         "/affiliate - affiliate programs, sponsors\n"
@@ -10680,6 +10855,8 @@ def on_message(msg, st):
         cmd_idea(st)
     elif text == "/covered":
         cmd_covered(st)
+    elif text == "/instagram":
+        cmd_instagram(st)
     elif text == "/whatworks":
         cmd_whatworks(st)
     elif text == "/platforms":
