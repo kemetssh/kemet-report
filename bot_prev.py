@@ -135,7 +135,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.212"
+BOT_VERSION = "v10.213"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -8681,14 +8681,29 @@ Then a line "CHECK:" listing claims you could not confirm, or "CHECK: none"."""
 
 
 def cmd_longaudit(st, raw):
-    claim = raw.split(None, 1)[1].strip()[:200] if len(raw.split(None, 1)) > 1 else ""
+    full = raw.split(None, 1)[1].strip() if len(raw.split(None, 1)) > 1 else ""
+    claim, _, extra = full.partition("|")
+    claim, extra = claim.strip()[:200], extra.strip()[:300]
     if len(claim) < 15:
         return send("Tell me the claim to audit, for example:\n/longaudit Tutankhamun's dagger blade was made from a meteorite\n"
                     "I write a fact-checked 8-10 minute script: the claim, a ladder of evidence with each piece rated, the counter-evidence, a score out of 100, and what we still do not know. "
+                    "To make sure something is covered, add it after a bar:\n/longaudit The Egyptians believed the heart was weighed against a feather | include the heart scarab and Spell 30B\n"
                     "You record it in your own voice.")
     send(f"Writing and fact-checking a long audit (2-3 minutes): {claim}")
-    text, sources, summary = verified_script(claim, lambda: LONG_AUDIT_PROMPT.format(claim=claim))
+    hint = ("\nThe owner asks you to cover these if the research confirms them (name the object or text exactly): " + extra) if extra else ""
+    text, sources, summary = verified_script(claim, lambda: LONG_AUDIT_PROMPT.format(claim=claim) + hint)
     words = len(re.findall(r"\w+", text.split("TITLE OPTIONS")[0]))
+    if words < 1150:                                            # models often stop early: one more pass that deepens each rung
+        send(f"The first draft is only about {words} words (under 8 minutes). Deepening it once more (2-3 minutes)...")
+        draft = text.split("TITLE OPTIONS")[0][:6000]
+        try:
+            t2, s2, sm2 = verified_script(claim, lambda: LONG_AUDIT_PROMPT.format(claim=claim) + hint +
+                "\n\nPREVIOUS DRAFT (too short, about %d words; the new version MUST be at least 1,350 words). Keep its facts, add what each object or text says, where it was found or kept, and why it matters, one full paragraph per rung. Do not invent facts.\n%s" % (words, draft))
+            w2 = len(re.findall(r"\w+", t2.split("TITLE OPTIONS")[0]))
+            if w2 > words:
+                text, sources, summary, words = t2, (sources + [x for x in s2 if x not in sources]), sm2, w2
+        except Exception as e:
+            print("long audit retry:", clean(e)[:120])
     msg = f"🔬 Long audit: {claim}\n\n{text}"
     if words < 1150:
         msg += f"\n\n⚠️ This script is about {words} words, roughly {words * 60 // 150 // 60} minutes at a calm pace. For 8+ minutes it needs about 1,300. Send /longaudit with the same claim again, or add detail to each evidence rung while recording."
