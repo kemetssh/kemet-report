@@ -135,7 +135,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.205"
+BOT_VERSION = "v10.206"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -5980,6 +5980,7 @@ def nb_scan(st, force=False):
         nb_observe(n, vids, tok, now, 12)
         try:
             ig_sync()
+            fb_plays_sync()
         except Exception as e:
             print("ig sync:", clean(e)[:80])
         try:
@@ -6254,6 +6255,52 @@ def ig_sync(force=False):
     return done(True, msg)
 
 
+def fb_plays_sync(force=False):
+    """v10.206: Facebook plays of the latest Page posts into the platform log (same numbers as /fbviews). Cached 6 h. Never raises."""
+    m = mem()
+    cfg = fb_cfg()
+    if not cfg:
+        return 0
+    last = m.get("fbp_last", 0)
+    if not force and time.time() - last < 6 * 3600:
+        return 0
+    m["fbp_last"] = time.time()
+    try:
+        items, _ = fb_items(cfg, 25)
+    except Exception as e:
+        print("fb items:", clean(e)[:80])
+        return 0
+    plat = m.setdefault("plat", [])
+    by_id = {e.get("id"): e for e in plat if e.get("id")}
+    made = made_titles()
+    seen, n_ok = [], 0
+    for pid_, text in items:
+        try:
+            v, _why = fb_views(cfg, pid_)
+        except Exception:
+            continue
+        if v is None:
+            continue
+        clean_t = re.sub(r"\s+", " ", re.sub(r"#\w+", "", text)).strip()
+        if any(clean_t[:60] == u[0][:60] and abs(v - u[1]) <= max(5, 0.05 * max(v, u[1])) for u in seen):
+            continue                                       # the same reel listed as a post and as a video: count once
+        seen.append((clean_t, v))
+        w = title_words(clean_t)
+        best = (0, "")
+        for t in made:
+            c = len(w & title_words(t))
+            if c > best[0]:
+                best = (c, t)
+        e = by_id.get(pid_)
+        if not e:
+            e = {"p": "facebook", "id": pid_, "auto": True, "ts": time.time(), "title": best[1] if best[0] >= 2 else "", "topic": clean_t[:80]}
+            plat.append(e)
+        e["views"] = int(v)
+        n_ok += 1
+    m["plat"] = plat[-3000:]
+    return n_ok
+
+
 def cmd_instagram(st):
     send("Reading your Instagram...")
     ok, msg = ig_sync(force=True)
@@ -6496,6 +6543,7 @@ def _med(x):
 def cmd_platforms(st):
     try:
         ig_sync()
+        fb_plays_sync()
     except Exception as e:
         print("ig sync:", clean(e)[:80])
     m, n = mem(), nb()
@@ -6507,12 +6555,6 @@ def cmd_platforms(st):
         top = sorted(rows, key=lambda o: -(o.get("adj") or 0))[:3]
         out.append("YouTube: %d videos, %s total views, typical video %s views." % (len(rows), f"{sum(o['views'] for o in rows):,}", f"{int(_med([o['views'] for o in rows])):,}"))
         out.append("  Best for their age: " + "; ".join("%.1fx %s" % (o.get("adj") or 0, o.get("title", "")[:36]) for o in top))
-    soc = [e for e in (m.get("social") or []) if e.get("fb_plays") is not None or e.get("fb_eng") is not None]
-    if soc:
-        pl = [e.get("fb_plays") for e in soc if e.get("fb_plays") is not None]
-        best = sorted(soc, key=lambda e: -(e.get("fb_plays") or 0))[:2]
-        out.append("Facebook (automatic): %d posts measured, typical %s plays." % (len(soc), f"{int(_med(pl)):,}" if pl else "?"))
-        out.append("  Best: " + "; ".join("%s plays: %s" % (f"{e.get('fb_plays') or 0:,}", (e.get("title") or "")[:36]) for e in best))
     plat = m.get("plat") or []
     for p in ("tiktok", "x", "facebook", "instagram"):
         ps = [e for e in plat if e["p"] == p]
@@ -6525,7 +6567,7 @@ def cmd_platforms(st):
             eng = sum(e.get("likes", 0) + e.get("comments", 0) + e.get("shares", 0) for e in ps)
             tv = sum(views)
             line += "%d posts logged, typical %s views" % (len(ps), f"{int(_med(views)):,}" if views else "?")
-            if tv:
+            if tv and eng:
                 line += ", engagement %.1f%% (likes+comments+shares per view)" % (100 * eng / tv)
         if fol:
             now_f = fol[-1][1]
