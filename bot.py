@@ -135,7 +135,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.213"
+BOT_VERSION = "v10.214"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2386,7 +2386,7 @@ def cmd_checkvideo(st, vid):
         if not newest:
             return send("I could not find any video on your channel yet.")
         vid = newest[0]["id"]
-    items = yt_get("videos", tok, part="snippet,status", id=vid).get("items", [])
+    items = yt_get("videos", tok, part="snippet,status,contentDetails", id=vid).get("items", [])
     chid = my_videos(tok, 1)[1]
     v = items[0] if items else None
     if not v or v["snippet"].get("channelId") not in (chid, None):
@@ -2394,9 +2394,58 @@ def cmd_checkvideo(st, vid):
     pool, _v = watch_pool(tok)
     names, placed, _vv = playlist_scan(tok)
     rc_card(st, v, pool, placed)
+    try:
+        long_video_steps(st, v)
+    except Exception as e:
+        print("long video steps:", clean(e)[:120])
     tail = "Nothing changes until you tap a button."
     tail += "\nFor its pinned comment send /pins."
     send(tail)
+
+
+def chapters_card(st, v, secs):
+    """Watch one long video, write real timestamps and offer them (nothing changes until the owner taps)."""
+    vid, title = v["id"], v["snippet"]["title"]
+    try:
+        j = gemini([{"file_data": {"file_uri": f"https://www.youtube.com/watch?v={vid}"}},
+                    {"text": CHAPTERS_PROMPT.format(mins=f"{int(secs // 60)}:{int(secs % 60):02d}")}])
+    except GeminiBusy as e:
+        return send("⏳ Chapters: " + str(e) + " Send the link again later.")
+    except Exception as e:
+        return send(f"Chapters: I could not watch this video just now ({clean(e)[:80]}). Send the link again later.")
+    ch = clean_chapters(j.get("chapters"), secs)
+    if not ch:
+        return send("Chapters: I could not find clear chapters. Nothing changed.")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "chapters", "video_id": vid, "chapters": ch, "created": time.time()}
+    send("⏱ Chapters:\n\n" + "\n".join(ch) + "\n\nThey go into the description under the first paragraph.",
+         [[btn("✅ Add to description", pid, "chp"), btn("Skip", pid, "chs")]])
+
+
+def long_video_steps(st, v):
+    """A video uploaded straight to YouTube and pasted here: after the checkup, do what a bot upload gets: chapters (long videos), then the website steps."""
+    sn, vid = v["snippet"], v["id"]
+    secs = iso_seconds((v.get("contentDetails") or {}).get("duration"))
+    public = (v.get("status") or {}).get("privacyStatus") == "public"
+    steps = []
+    if secs > 180:
+        if len(HAS_CHAPTERS.findall(sn.get("description") or "")) >= 3:
+            steps.append("✅ Chapters are already in the description")
+        else:
+            send(f"⏱ Long video ({int(secs // 60)}:{int(secs % 60):02d}): watching it to write chapters (about a minute)...")
+            chapters_card(st, v, secs)
+    if not public:
+        return send("ℹ️ This video is not public yet, so I stopped before the website steps. When you publish it, paste the link again and I continue: playlist, series page, article and posts.")
+    if vid in (mem().get("articles") or {}):
+        steps.append("✅ It already has its article on the website")
+    elif mem().get("site_zip"):
+        offer_site_after_public({"video_id": vid, "title": sn.get("title", ""), "review": {"summary": (sn.get("description") or "")[:300]}}, st)
+    else:
+        steps.append("ℹ️ No website yet: send me your site .zip first if you want the article steps")
+    if secs > 180:
+        steps.append("ℹ️ End screen and cards: YouTube lets only you add those in Studio (Content, your video, Editor). Pick your best Short or the next long video.")
+    if steps:
+        send("\n".join(steps))
 
 
 def rc_batch(st, n=3):
