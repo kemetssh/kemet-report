@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 import traceback
+import uuid
 from pathlib import Path
 
 import requests
@@ -135,7 +136,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.217"
+BOT_VERSION = "v10.218"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -3731,6 +3732,12 @@ def on_prop(jid, act, st):
         remember("skips", prop["new"])
         st["props"].pop(jid, None)
         return send(f"↩️ Reverted to:\n{prop['old']}")
+    if act == "sf" and kind == "seofix":
+        st["props"].pop(jid, None)
+        return do_seofix(prop, st)
+    if act == "sx" and kind == "seofix":
+        st["props"].pop(jid, None)
+        return send("👍 Skipped.")
     if act == "sg" and kind == "subgen":
         return make_subtitles(prop, st)
     if act == "cu" and kind == "caps":
@@ -10720,6 +10727,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/merge - merge playlists\n"
         "/publish - put the site live\n"
         "/siteweek - website check\n"
+        "/seocheck - SEO + AI search check\n"
         "/synctitles - site film titles = YouTube\n"
         "/needvideos - articles without a video\n"
         "/searchdata - search ideas\n"
@@ -11372,6 +11380,8 @@ def on_message(msg, st):
         cmd_sitelogo(st)
     elif text.startswith("/searchdata"):
         cmd_searchdata(st)
+    elif text.startswith("/seocheck"):
+        cmd_seocheck(st)
     elif text.startswith("/siteweek"):
         site_week(st)
     elif text.startswith("/cfconnect"):
@@ -13016,6 +13026,10 @@ def cf_deploy(file_id):
         return False, "Cloudflare is not connected. Send /cfsetup."
     with tempfile.TemporaryDirectory() as d:
         root = site_zip_from(file_id, d)
+        try:
+            indexnow_prepare(root)
+        except Exception as e:
+            print("indexnow prepare:", clean(e)[:100])
         env = dict(os.environ, CLOUDFLARE_API_TOKEN=cfg["token"], CLOUDFLARE_ACCOUNT_ID=cfg["account"], WRANGLER_SEND_METRICS="false", CI="true")
         cmd = ["npx", "--yes", "wrangler@3", "pages", "deploy", str(root), "--project-name", cfg["project"], "--branch", cfg.get("branch", "main"), "--commit-dirty=true"]
         try:
@@ -13459,6 +13473,12 @@ def do_site_publish(prop, st):
         print("proof:", clean(e)[:100])
     send("✅ Published to your website: " + SITE_BASE + "/\n" + (f"This deployment: {info}\n" if info else "") + "The main address can take a few minutes to show the update.")
     try:
+        note = indexnow_flush()
+        if note:
+            send(note)
+    except Exception as e:
+        print("indexnow:", clean(e)[:100])
+    try:
         offer_article_after_site(st)
     except Exception as e:
         print("offer article:", clean(e)[:100])
@@ -13466,6 +13486,201 @@ def do_site_publish(prop, st):
         offer_article_share(st)
     except Exception as e:
         print("offer share:", clean(e)[:100])
+
+
+# ---------------- v10.218: SEO + GEO (AI search) check, FAQ markup, IndexNow ----------------
+def _pg_text(t):
+    return html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", t))).strip()
+
+
+def seo_audit(root):
+    """Look at every page like a search engine would. Returns {"pages": n, "issues": {name: [pages]}, "geo": {name: [pages]}}. Reads only, changes nothing."""
+    root = Path(root)
+    iss = {k: [] for k in ("title_len", "desc_len", "dup_title", "dup_desc", "h1", "noimage", "canon", "few_links")}
+    geo = {k: [] for k in ("no_faq", "no_answer_first", "few_questions", "few_sources", "no_dates")}
+    titles, descs = {}, {}
+    n = 0
+    for p in sorted(root.rglob("index.html")):
+        rel = p.relative_to(root).parent.as_posix()
+        t = p.read_text(encoding="utf-8", errors="ignore")
+        n += 1
+        tt = re.search(r"<title>(.*?)</title>", t, re.S)
+        tt = html.unescape(tt.group(1)).strip() if tt else ""
+        md = re.search(r'<meta content="([^"]*)" name="description"', t)
+        md = html.unescape(md.group(1)).strip() if md else ""
+        if not (25 <= len(tt) <= 65):
+            iss["title_len"].append(rel)
+        if not (70 <= len(md) <= 160):
+            iss["desc_len"].append(rel)
+        titles.setdefault(tt, []).append(rel)
+        descs.setdefault(md, []).append(rel)
+        if t.count("<h1") != 1:
+            iss["h1"].append(rel)
+        if 'property="og:image"' not in t:
+            iss["noimage"].append(rel)
+        if 'rel="canonical"' not in t:
+            iss["canon"].append(rel)
+        if rel.startswith("articles/") and rel.count("/") == 1:
+            body = t[t.find('<article class="article-body">'):] if '<article class="article-body">' in t else t
+            if len(re.findall(r'href="/', body)) < 2:
+                iss["few_links"].append(rel)
+            if '"FAQPage"' not in t:
+                geo["no_faq"].append(rel)
+            deck = re.search(r'class="article-deck">(.*?)</p>', t, re.S)
+            if not deck or not (8 <= len(_pg_text(deck.group(1)).split()) <= 45):
+                geo["no_answer_first"].append(rel)
+            if len(re.findall(r"<h2>[^<]*\?</h2>", t)) < 3:
+                geo["few_questions"].append(rel)
+            ks = re.search(r'class="key-sources">(.*?)</div>', t, re.S)
+            if not ks or len(re.findall(r"<a ", ks.group(1))) < 3:
+                geo["few_sources"].append(rel)
+            if not re.search(r'"dateModified"', t):
+                geo["no_dates"].append(rel)
+    iss["dup_title"] = [r for v in titles.values() if len(v) > 1 for r in v]
+    iss["dup_desc"] = [r for k, v in descs.items() if len(v) > 1 and k for r in v]
+    return {"pages": n, "issues": {k: v for k, v in iss.items() if v}, "geo": {k: v for k, v in geo.items() if v}}
+
+
+_SEO_NAMES = {"title_len": "titles outside 25-65 characters (Google cuts long ones)", "desc_len": "descriptions outside 70-160 characters",
+              "dup_title": "pages sharing the same title", "dup_desc": "pages sharing the same description", "h1": "pages without exactly one main heading",
+              "noimage": "pages without a share image", "canon": "pages without a canonical address", "few_links": "articles with fewer than 2 links to other pages"}
+_GEO_NAMES = {"no_faq": "articles without FAQ markup (AI answers read it)", "no_answer_first": "articles whose opening summary is missing or not 8-45 words",
+              "few_questions": "articles with fewer than 3 question headings", "few_sources": "articles with fewer than 3 key sources up top",
+              "no_dates": "articles without a last-updated date"}
+
+
+def seo_report(a):
+    out = [f"🔎 SEO + AI-search check: {a['pages']} pages read."]
+    if not a["issues"] and not a["geo"]:
+        return out[0] + " Nothing to fix. 🏺"
+    if a["issues"]:
+        out.append("\nSEO (search engines):")
+        for k, v in a["issues"].items():
+            ex = ", ".join(x.split("/")[-1][:30] for x in v[:2])
+            out.append(f"• {len(v)} {_SEO_NAMES[k]} (e.g. {ex})")
+    if a["geo"]:
+        out.append("\nGEO (AI answers such as Bing Copilot and ChatGPT):")
+        for k, v in a["geo"].items():
+            out.append(f"• {len(v)} {_GEO_NAMES[k]}")
+    if not (a["issues"] or a["geo"]):
+        out.append("All good.")
+    return "\n".join(out)
+
+
+def _faq_pairs(t, limit=6):
+    pairs = []
+    for q, ans in re.findall(r"<h2>([^<]*\?)</h2>\s*<p>(.*?)</p>", t, re.S):
+        q, ans = _pg_text(q), _pg_text(ans)
+        if len(ans.split()) < 12:
+            continue
+        if len(ans) > 320:
+            cut = ans[:320]
+            k = max(cut.rfind(". "), cut.rfind("; "))
+            ans = cut[:k + 1] if k > 120 else cut.rsplit(" ", 1)[0] + "…"
+        pairs.append((q, ans))
+        if len(pairs) >= limit:
+            break
+    return pairs
+
+
+def seo_fix(root):
+    """Adds FAQ markup to articles that lack it, built only from each question heading and the first paragraph under it (nothing invented).
+    Returns pages changed."""
+    changed = 0
+    for p in Path(root).glob("articles/*/index.html"):
+        t = p.read_text(encoding="utf-8")
+        if '"FAQPage"' in t or "</head>" not in t:
+            continue
+        pairs = _faq_pairs(t)
+        if len(pairs) < 3:
+            continue
+        ld = {"@context": "https://schema.org", "@type": "FAQPage",
+              "mainEntity": [{"@type": "Question", "name": q, "acceptedAnswer": {"@type": "Answer", "text": a}} for q, a in pairs]}
+        blob = json.dumps(ld, ensure_ascii=False).replace("</", "<\\/")
+        p.write_text(t.replace("</head>", '<script type="application/ld+json">' + blob + "</script></head>", 1), encoding="utf-8")
+        changed += 1
+    return changed
+
+
+def cmd_seocheck(st):
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("First send me your current site as a .zip file, then try again.")
+    send("🔎 Reading every page of your site like Google and Bing do (about a minute)...")
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        a = seo_audit(root)
+    rows = []
+    if a["geo"].get("no_faq"):
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "seofix", "created": time.time()}
+        rows = [[btn(f"➕ Add FAQ markup to up to {len(a['geo']['no_faq'])} articles", pid, "sf"), btn("Skip", pid, "sx")]]
+    send(seo_report(a) + "\n\nThe bot also tells Bing about new and changed pages by itself every time you Publish (IndexNow). Google still needs a manual request in Search Console."
+         + ("\n\nThe FAQ button only copies each question heading and the first paragraph under it into hidden markup. Nothing visible changes, nothing is invented." if rows else ""), rows)
+
+
+def do_seofix(prop, st):
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("Send me your site .zip first.")
+    send("➕ Adding FAQ markup...")
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        n = seo_fix(root)
+        if not n:
+            return send("No article needed it (or none has 3 clear question-and-answer pairs). Nothing changed.")
+        r = pack_site(root, d, f"🔎 Site updated: FAQ markup added to {n} articles. Tap 🚀 Publish below to put it live.")
+    if not r.get("ok"):
+        return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
+    offer_publish(st)
+
+
+def ensure_indexnow_key():
+    k = mem().get("indexnow_key")
+    if not k:
+        k = uuid.uuid4().hex
+        mem()["indexnow_key"] = k
+    return k
+
+
+def indexnow_prepare(root):
+    """Called while deploying: writes the key file into the site and lists pages that are new or changed since the last notice."""
+    root = Path(root)
+    key = ensure_indexnow_key()
+    (root / f"{key}.txt").write_text(key, encoding="utf-8")
+    seen = mem().get("indexnow_seen") or {}
+    urls, hashes = [], {}
+    for p in root.rglob("index.html"):
+        rel = p.relative_to(root).parent.as_posix()
+        u = SITE_BASE + "/" + ("" if rel == "." else rel + "/")
+        h = hashlib.md5(p.read_bytes()).hexdigest()
+        hashes[u] = h
+        if seen.get(u) != h:
+            urls.append(u)
+    mem()["indexnow_pending"] = {"urls": sorted(urls)[:500], "hashes": hashes}
+
+
+def indexnow_flush():
+    """After a successful publish: tell Bing and the other IndexNow engines about new and changed pages. Returns a one-line note ("" if nothing to say)."""
+    pend = mem().pop("indexnow_pending", None)
+    if not pend or not pend.get("urls"):
+        return ""
+    key = ensure_indexnow_key()
+    host = urllib.parse.urlparse(SITE_BASE).netloc
+    time.sleep(12)               # let the new files go live so the key file can be fetched
+    try:
+        r = S.post("https://api.indexnow.org/indexnow", json={"host": host, "key": key, "keyLocation": f"{SITE_BASE}/{key}.txt", "urlList": pend["urls"]},
+                   headers={"Content-Type": "application/json; charset=utf-8"}, timeout=30)
+    except Exception as e:
+        return "ℹ️ I could not reach IndexNow just now (" + clean(e)[:60] + "). It tries again at the next Publish."
+    if r.status_code in (200, 202):
+        mem()["indexnow_seen"] = pend["hashes"]
+        return f"📡 Bing and other search engines were told about {len(pend['urls'])} new or changed pages (IndexNow)."
+    return f"ℹ️ IndexNow answered {r.status_code}, so I will try again at the next Publish."
+
+
+
+
 
 def site_check(root):
     """Look through the stored site for problems a reader or Google would notice. Returns a list of short findings."""
