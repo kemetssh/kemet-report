@@ -135,7 +135,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.215"
+BOT_VERSION = "v10.216"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -6093,6 +6093,7 @@ def nb_scan(st, force=False):
         nb_observe(n, vids, tok, now, 12)
         try:
             ig_sync()
+            ig_insights()
             fb_plays_sync()
         except Exception as e:
             print("ig sync:", clean(e)[:80])
@@ -6414,10 +6415,94 @@ def fb_plays_sync(force=False):
     return n_ok
 
 
+def ig_insights(force=False):
+    """v10.216: Instagram account numbers beyond posts: 28-day reach, profile visits, link taps, interactions, followers gained,
+    and who the followers are (country, age, gender). Each metric is read alone so one refusal never blocks the rest. Cached 12 h. Never raises."""
+    m = mem()
+    c = m.get("ig_ins") or {}
+    if not force and time.time() - c.get("ts", 0) < 12 * 3600:
+        return c
+    cfg = fb_cfg()
+    if not cfg:
+        return c
+    tok = cfg["token"]
+    try:
+        igid = (fb_call("GET", cfg["page_id"], params={"access_token": tok, "fields": "instagram_business_account{id}"}).get("instagram_business_account") or {}).get("id")
+    except Exception as e:
+        print("ig ins id:", clean(e)[:80])
+        return c
+    if not igid:
+        return c
+    now = int(time.time())
+    new = {"ts": time.time(), "tot": {}, "demo": {}, "err": []}
+    def total(metric, since, until):
+        j = fb_call("GET", f"{igid}/insights", params={"access_token": tok, "metric": metric, "period": "day",
+                    "metric_type": "total_value", "since": since, "until": until})
+        d = (j.get("data") or [{}])[0]
+        return (d.get("total_value") or {}).get("value")
+    for key, metric in (("reach", "reach"), ("views", "views"), ("profile", "profile_views"), ("taps", "website_clicks"),
+                        ("interactions", "total_interactions"), ("engaged", "accounts_engaged"),
+                        ("gained", "follows_and_unfollows")):
+        for span, label in ((28, "d28"), (7, "d7")):
+            try:
+                v = total(metric, now - span * 86400, now)
+                if isinstance(v, dict):
+                    v = None
+                if v is not None:
+                    new["tot"].setdefault(key, {})[label] = v
+            except Exception as e:
+                if label == "d28":
+                    new["err"].append(metric + ": " + clean(e)[:60])
+    for br in ("country", "age", "gender"):
+        try:
+            j = fb_call("GET", f"{igid}/insights", params={"access_token": tok, "metric": "follower_demographics", "period": "lifetime",
+                        "metric_type": "total_value", "breakdown": br})
+            res = (((j.get("data") or [{}])[0].get("total_value") or {}).get("breakdowns") or [{}])[0].get("results") or []
+            new["demo"][br] = sorted(((r["dimension_values"][0], r["value"]) for r in res), key=lambda x: -x[1])[:6]
+        except Exception as e:
+            new["err"].append("followers by " + br + ": " + clean(e)[:60])
+    m["ig_ins"] = new
+    return new
+
+
+def ig_insights_text(c):
+    t = c.get("tot") or {}
+    names = (("reach", "Accounts reached"), ("views", "Views"), ("profile", "Profile visits"), ("taps", "Website link taps"),
+             ("interactions", "Interactions (likes, comments, saves, shares)"), ("gained", "Follows minus unfollows"))
+    lines = []
+    for k, nm in names:
+        if k in t:
+            lines.append(f"• {nm}: {t[k].get('d28', '?')} in 28 days, {t[k].get('d7', '?')} in the last 7")
+    out = ""
+    if lines:
+        out += "📊 Last 28 days:\n" + "\n".join(lines)
+        r, pv, tp = (t.get("reach") or {}).get("d28"), (t.get("profile") or {}).get("d28"), (t.get("taps") or {}).get("d28")
+        if r and pv is not None:
+            out += f"\n→ {pv / r * 100:.1f}% of people reached visit the profile" + (f", {tp} tapped the link" if tp is not None else "")
+    d = c.get("demo") or {}
+    parts = []
+    for br, nm in (("country", "Countries"), ("age", "Ages"), ("gender", "Gender (F/M/U)")):
+        if d.get(br):
+            tot = sum(v for _, v in d[br]) or 1
+            parts.append(f"• {nm}: " + ", ".join(f"{k} {v / tot * 100:.0f}%" for k, v in d[br][:5]))
+    if parts:
+        out += "\n\n👥 Who follows you:\n" + "\n".join(parts)
+    if c.get("err") and not lines and not parts:
+        out += "\nInstagram refused the detailed numbers (" + "; ".join(c["err"][:2]) + "). The key needs instagram_manage_insights; follower details need 100+ followers."
+    return out.strip()
+
+
 def cmd_instagram(st):
     send("Reading your Instagram...")
     ok, msg = ig_sync(force=True)
     send(("✅ " if ok else "⚠️ ") + msg + ("\nSend /platforms to see what works." if ok else ""))
+    if ok:
+        try:
+            txt = ig_insights_text(ig_insights(force=True))
+            if txt:
+                send(txt)
+        except Exception as e:
+            print("ig insights:", clean(e)[:100])
 
 
 # ---------------- v10.204: the money goal ----------------
