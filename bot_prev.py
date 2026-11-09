@@ -135,7 +135,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.214"
+BOT_VERSION = "v10.215"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2422,6 +2422,50 @@ def chapters_card(st, v, secs):
          [[btn("✅ Add to description", pid, "chp"), btn("Skip", pid, "chs")]])
 
 
+def _link_kit(st, v, secs, public, steps):
+    """Same extras a Telegram upload gets, for a video already on YouTube: record, prediction, Shorts pairing, buttons, pinned comment."""
+    sn, vid = v["snippet"], v["id"]
+    title, desc = sn.get("title", ""), sn.get("description") or ""
+    kind = "long" if secs > 180 else "short"
+    rec = mem()["videos"].get(vid)
+    if not rec:
+        mem()["videos"][vid] = rec = {"uploaded": time.time(), "title": title, "file_id": "", "summary": desc[:300], "checked": False,
+                                      "next": "", "kind": kind, "secs": secs, "full": "", "sources": [], "from_link": True}
+    try:
+        pr = nb_predict(title, secs)
+        if pr and vid not in nb()["preds"]:
+            nb()["preds"][vid] = pr
+    except Exception as e:
+        print("prediction:", clean(e)[:80])
+    if kind == "long":
+        cand = recent_pair(title + " " + desc[:300], "short", exclude=vid, hours=24 * 14)
+        if cand:
+            pid_k = new_pid(st)
+            st["props"][pid_k] = {"type": "shortlink", "long": vid, "shorts": [c[0] for c in cand[:3]], "created": time.time()}
+            send("🔗 These Shorts look like the same story:\n" + "\n".join("• " + c[1]["title"][:70] for c in cand[:3])
+                 + "\nTap to add \"▶ Full story\" with this video's link to them.",
+                 [[btn("🔗 Link them", pid_k, "sk"), btn("Skip", pid_k, "ck")]])
+    pid, pid_pl, pid_x = new_pid(st), new_pid(st), new_pid(st)
+    st["props"][pid] = {"type": "subgen", "video_id": vid, "created": time.time()}
+    st["props"][pid_pl] = {"type": "plgen", "video_id": vid, "created": time.time()}
+    st["props"][pid_x] = {"type": "xgen", "video_id": vid, "created": time.time()}
+    rows = []
+    note = ""
+    pin = pinned_for(vid, title, desc)
+    if pin:
+        if public:
+            pid_c = new_pid(st)
+            st["props"][pid_c] = {"type": "pin", "video_id": vid, "text": pin, "created": time.time()}
+            rows.append([btn("📌 Post my comment (then pin it)", pid_c, "pc")])
+            note = "\n\n📌 Pinned comment ready: " + pin
+        else:
+            note = "\n\n📌 Pinned comment for later: " + pin + "\n(I offer the post button once it is public: paste the link again.)"
+    rows += [[btn("Add subtitles (English + Arabic)", pid, "sg")], [btn("Add to a playlist", pid_pl, "pg")],
+             [btn("Cross-post kit (TikTok, Reels, Facebook)", pid_x, "xg")]]
+    send("What a Telegram upload gets, for this video:" + note, rows)
+    steps.append("ℹ️ Only a Telegram upload can pick a thumbnail frame. For a link, change it in Studio; /thumbtest can compare options.")
+
+
 def long_video_steps(st, v):
     """A video uploaded straight to YouTube and pasted here: after the checkup, do what a bot upload gets: chapters (long videos), then the website steps."""
     sn, vid = v["snippet"], v["id"]
@@ -2434,6 +2478,10 @@ def long_video_steps(st, v):
         else:
             send(f"⏱ Long video ({int(secs // 60)}:{int(secs % 60):02d}): watching it to write chapters (about a minute)...")
             chapters_card(st, v, secs)
+    try:
+        _link_kit(st, v, secs, public, steps)
+    except Exception as e:
+        print("link kit:", clean(e)[:120])
     if not public:
         return send("ℹ️ This video is not public yet, so I stopped before the website steps. When you publish it, paste the link again and I continue: playlist, series page, article and posts.")
     if vid in (mem().get("articles") or {}):
@@ -4077,6 +4125,13 @@ SRT_CUE = re.compile(r"\d\d:\d\d:\d\d,\d{3} --> \d\d:\d\d:\d\d,\d{3}")
 
 def make_subtitles(prop, st):
     rec = mem()["videos"].get(prop["video_id"])
+    if rec and not rec.get("file_id") and rec.get("from_link"):
+        send("Listening to your video on YouTube and writing subtitles (1-3 minutes)...")
+        try:
+            out = gemini([{"file_data": {"file_uri": f"https://www.youtube.com/watch?v={prop['video_id']}"}}, {"text": SUBS_PROMPT}])
+        except GeminiBusy as e:
+            return send("⏳ " + str(e) + " Tap the button again later.")
+        return _subs_card(out, prop, st)
     if not rec or not rec.get("file_id"):
         return send("I no longer have that video file. Send the video again and I will redo it.")
     send("Listening to your video and writing subtitles (1-3 minutes)...")
@@ -4092,6 +4147,10 @@ def make_subtitles(prop, st):
                 S.delete(f"{GBASE}/v1beta/{info['name']}", headers={"x-goog-api-key": GKEY}, timeout=30)
             except Exception:
                 pass
+    return _subs_card(out, prop, st)
+
+
+def _subs_card(out, prop, st):
     caps = {}
     for c in out.get("captions", []):
         srt = (c.get("srt") or "").strip()
