@@ -136,7 +136,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.218"
+BOT_VERSION = "v10.219"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -3732,7 +3732,7 @@ def on_prop(jid, act, st):
         remember("skips", prop["new"])
         st["props"].pop(jid, None)
         return send(f"↩️ Reverted to:\n{prop['old']}")
-    if act == "sf" and kind == "seofix":
+    if act == "sq" and kind == "seofix":
         st["props"].pop(jid, None)
         return do_seofix(prop, st)
     if act == "sx" and kind == "seofix":
@@ -13614,7 +13614,7 @@ def cmd_seocheck(st):
     if a["geo"].get("no_faq"):
         pid = new_pid(st)
         st["props"][pid] = {"type": "seofix", "created": time.time()}
-        rows = [[btn(f"➕ Add FAQ markup to up to {len(a['geo']['no_faq'])} articles", pid, "sf"), btn("Skip", pid, "sx")]]
+        rows = [[btn(f"➕ Add FAQ markup to up to {len(a['geo']['no_faq'])} articles", pid, "sq"), btn("Skip", pid, "sx")]]
     send(seo_report(a) + "\n\nThe bot also tells Bing about new and changed pages by itself every time you Publish (IndexNow). Google still needs a manual request in Search Console."
          + ("\n\nThe FAQ button only copies each question heading and the first paragraph under it into hidden markup. Nothing visible changes, nothing is invented." if rows else ""), rows)
 
