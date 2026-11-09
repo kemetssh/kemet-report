@@ -135,7 +135,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.216"
+BOT_VERSION = "v10.217"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -12456,7 +12456,7 @@ def art_page(art, v, slug, sources, others, series=None):
 </head>
 <body class="article-page">
 <a class="skip-link" href="#main-content">Skip to content</a>
-<header class="site-header"><a aria-label="Kemet home" class="brand" href="/"><span class="brand-icon"><img alt="" src="/brand-mark.svg"/></span><span class="brand-lockup"><strong>KEMET</strong><small>STORIES FROM THE BLACK LAND</small></span></a><button aria-controls="main-nav" aria-expanded="false" aria-label="Open navigation" class="menu-toggle" id="menu-toggle"><span></span><span></span></button><nav aria-label="Main navigation" class="main-nav" id="main-nav"><a href="/#origin">The origin</a><a href="/articles/">The archive</a><a href="/playlists/">The series</a><a href="/#films">The films</a><a href="/about/">The approach</a><a class="nav-cta" href="https://www.youtube.com/watch?v={esc(v["id"])}" rel="noopener" target="_blank">Watch the film ↗</a></nav></header>
+<header class="site-header"><a aria-label="Kemet home" class="brand" href="/"><span class="brand-icon"><img alt="Kemet logo" src="/brand-mark.svg"/></span><span class="brand-lockup"><strong>KEMET</strong><small>STORIES FROM THE BLACK LAND</small></span></a><button aria-controls="main-nav" aria-expanded="false" aria-label="Open navigation" class="menu-toggle" id="menu-toggle"><span></span><span></span></button><nav aria-label="Main navigation" class="main-nav" id="main-nav"><a href="/#origin">The origin</a><a href="/articles/">The archive</a><a href="/playlists/">The series</a><a href="/#films">The films</a><a href="/about/">The approach</a><a class="nav-cta" href="https://www.youtube.com/watch?v={esc(v["id"])}" rel="noopener" target="_blank">Watch the film ↗</a></nav></header>
 <main id="main-content">
 <header class="article-hero"><div class="section-shell"><div class="article-meta"><span>Kemet / {label}</span><span>Reading note · {mins} min</span></div><h1>{h1}</h1><p class="article-deck">{esc(art["deck"])}</p></div></header>
 <div class="section-shell article-layout"><article class="article-body">
@@ -12672,6 +12672,7 @@ def build_listing(root, cat):
     try:
         add_key_sources(root)
         ensure_site_css(root)
+        fix_img_alts(root)
     except Exception as e:
         print("key sources:", clean(e)[:120])
     try:
@@ -12922,6 +12923,7 @@ def apply_site_logo(root):
     root = Path(root)
     ensure_site_css(root)
     hieroglyph_numbers(root)
+    fix_img_alts(root)
     (root / "brand-mark.svg").write_text(LOGO_MARK_SVG, encoding="utf-8")
     (root / "logo").mkdir(exist_ok=True)
     (root / "logo" / "kemet-logo-lockup.svg").write_text(LOGO_LOCKUP_SVG, encoding="utf-8")
@@ -13862,7 +13864,7 @@ def hub_shell(title, desc, url, ld, meta, h1, deck, body, aside, img=None):
 </head>
 <body class="article-page">
 <a class="skip-link" href="#main-content">Skip to content</a>
-<header class="site-header"><a aria-label="Kemet home" class="brand" href="/"><span class="brand-icon"><img alt="" src="/brand-mark.svg"/></span><span class="brand-lockup"><strong>KEMET</strong><small>STORIES FROM THE BLACK LAND</small></span></a><button aria-controls="main-nav" aria-expanded="false" aria-label="Open navigation" class="menu-toggle" id="menu-toggle"><span></span><span></span></button><nav aria-label="Main navigation" class="main-nav" id="main-nav"><a href="/#origin">The origin</a><a href="/articles/">The archive</a><a href="/playlists/">The series</a><a href="/#films">The films</a><a href="/about/">The approach</a><a class="nav-cta" href="https://www.youtube.com/@Kemet-ssh" rel="noopener" target="_blank">Watch on YouTube ↗</a></nav></header>
+<header class="site-header"><a aria-label="Kemet home" class="brand" href="/"><span class="brand-icon"><img alt="Kemet logo" src="/brand-mark.svg"/></span><span class="brand-lockup"><strong>KEMET</strong><small>STORIES FROM THE BLACK LAND</small></span></a><button aria-controls="main-nav" aria-expanded="false" aria-label="Open navigation" class="menu-toggle" id="menu-toggle"><span></span><span></span></button><nav aria-label="Main navigation" class="main-nav" id="main-nav"><a href="/#origin">The origin</a><a href="/articles/">The archive</a><a href="/playlists/">The series</a><a href="/#films">The films</a><a href="/about/">The approach</a><a class="nav-cta" href="https://www.youtube.com/@Kemet-ssh" rel="noopener" target="_blank">Watch on YouTube ↗</a></nav></header>
 <main id="main-content">
 <header class="article-hero"><div class="section-shell"><div class="article-meta">{meta}</div><h1>{h1}</h1><p class="article-deck">{esc(deck)}</p></div></header>
 <div class="section-shell article-layout"><article class="article-body">
@@ -13893,7 +13895,7 @@ def build_hubs(root, pls, vid_slug):
             sl = vid_slug.get(i["id"])
             href, tag = (f"/articles/{sl}/", "Read the article →") if sl else (f"https://www.youtube.com/watch?v={i['id']}", "Watch on YouTube ↗")
             ext = "" if sl else ' rel="noopener" target="_blank"'
-            lis.append(f'<li><a class="series-item" href="{esc(href)}"{ext}><img loading="lazy" decoding="async" width="128" height="96" src="https://i.ytimg.com/vi/{esc(i["id"])}/hqdefault.jpg" alt=""/><div><strong>{esc(i["title"])}</strong><span>{tag}</span></div></a></li>')
+            lis.append(f'<li><a class="series-item" href="{esc(href)}"{ext}><img loading="lazy" decoding="async" width="128" height="96" src="https://i.ytimg.com/vi/{esc(i["id"])}/hqdefault.jpg" alt="Thumbnail: {esc(i["title"])}"/><div><strong>{esc(i["title"])}</strong><span>{tag}</span></div></a></li>')
         paras = "".join(f"<p>{esc(x.strip())}</p>" for x in re.split(r"\n\s*\n|\n", intro) if x.strip())
         body = paras + f"<h2>The films in this series</h2><ul class=\"series-list\">{''.join(lis)}</ul>"
         aside = f'<a href="https://www.youtube.com/playlist?list={esc(pl["id"])}" rel="noopener" target="_blank">Watch the full playlist on YouTube ↗</a><a href="/playlists/">All series</a><a href="/articles/">The archive</a>'
@@ -13983,6 +13985,20 @@ def relink_series(root, pls):
             n += 1
     return n
 
+
+
+def fix_img_alts(root):
+    """v10.217: every image gets alt text (Bing SEO notice). The header logo says "Kemet logo"; a video thumbnail uses its video title. Returns pages changed."""
+    n = 0
+    for p in Path(root).rglob("*.html"):
+        t = p.read_text(encoding="utf-8")
+        t2 = t.replace('<img alt="" src="/brand-mark.svg"/>', '<img alt="Kemet logo" src="/brand-mark.svg"/>')
+        t2 = re.sub(r'(<img[^>]*src="https://i\.ytimg\.com/[^>]*?) alt=""(/?>)(<div><strong>)(.*?)(</strong>)',
+                    lambda m: m.group(1) + ' alt="Thumbnail: ' + m.group(4).replace('"', "&quot;") + '"' + m.group(2) + m.group(3) + m.group(4) + m.group(5), t2, flags=re.S)
+        if t2 != t:
+            p.write_text(t2, encoding="utf-8")
+            n += 1
+    return n
 
 
 def prune_dead_series(root):
@@ -15008,6 +15024,7 @@ def write_article(c, st):
                 bu = build_hubs(root, pls, vid_slug_map(root))
                 relink_series(root, pls)
                 prune_dead_series(root)
+                fix_img_alts(root)
                 hieroglyph_numbers(root)
                 add_series_nav(root)
                 sm_ = root / "sitemap.xml"
