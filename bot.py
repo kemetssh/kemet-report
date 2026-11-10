@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.227"
+BOT_VERSION = "v10.228"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -14338,7 +14338,7 @@ def ensure_latest_page(root):
         return ""
     url = f"/articles/{best}/"
     page = ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>"
-            f"<title>The newest Kemet article</title><meta name=\"robots\" content=\"noindex\"/><link rel=\"canonical\" href=\"{SITE_BASE}{url}\"/>"
+            f"<title>The newest Kemet article</title><meta name=\"description\" content=\"Opens the newest evidence-based Ancient Egypt article from Kemet.\"/><meta name=\"robots\" content=\"noindex\"/><link rel=\"canonical\" href=\"{SITE_BASE}{url}\"/>"
             f"<meta http-equiv=\"refresh\" content=\"0; url={url}\"/><script>location.replace({json.dumps(url)});</script></head>"
             f"<body><p>Opening the newest article… <a href=\"{url}\">Tap here if nothing happens.</a></p></body></html>")
     (root / "latest").mkdir(exist_ok=True)
