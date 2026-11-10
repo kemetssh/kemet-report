@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.226"
+BOT_VERSION = "v10.227"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2966,7 +2966,7 @@ The aim is to grow followers and watch time so each account can earn: x invites 
 - x: at most 160 characters, at most 1 emoji.
 - facebook: 2 to 3 short sentences for a Page post. Open with a "how" or "why" question about everyday Egyptian life or a myth when the story truly is about that. End with a question that invites comments. The article link goes under the post, so you may say the full evidence is below. Do not ask for follows.
 - instagram: a caption of 3 to 5 short lines. Open with a "how" or "why" question about everyday Egyptian life or a myth when the story truly is about that. End with one question that invites a comment and one short line inviting a follow for the next piece of evidence. Never say "save this post". Do not mention a link or the bio (I add them).
-- tiktok: one punchy line under 120 characters.
+- tiktok: one punchy line under 120 characters. Open with a "how" or "why" question when the story truly is about that, and use the main phrase people would type into TikTok search (for example "hieroglyphic numbers"). Do not add a follow line or a link (I add them).
 Return JSON only: {{"x": "...", "facebook": "...", "instagram": "...", "tiktok": "..."}}"""
 
 
@@ -3029,7 +3029,7 @@ def send_share(title, blurb, link, st=None):
              [[{"text": "📘 Share on Facebook", "url": fb_share(link)}]])
     send(f"📸 Instagram caption (press and hold to copy):\n{p['instagram']}\n\n📖 Full evidence and sources: link in bio (latest article)\n{title}\n\n(Instagram captions cannot be clicked, so I point to your bio. Put {SITE_BASE}/latest/ in your bio once and it always opens your newest article.)",
          [[{"text": "📸 Open Instagram", "url": "https://www.instagram.com/"}]])
-    send(f"🎵 TikTok caption (press and hold to copy):\n{p['tiktok']}\n\n📖 Read the full article: {link}",
+    send(f"🎵 TikTok caption (press and hold to copy):\n{p['tiktok']}\n\nFollow for the next piece of evidence.\n\n(TikTok captions cannot be clicked. If your bio has a link, use {SITE_BASE}/latest/ there. Article: {link})",
          [[{"text": "🎵 Open TikTok", "url": "https://www.tiktok.com/"}]])
     send("Facebook cannot pre-fill the text, so paste the Facebook post above after it opens. Instagram and TikTok need your vertical video from your phone: pick the Short, paste the caption, post. Nothing goes out unless you tap Post in each app.")
 
