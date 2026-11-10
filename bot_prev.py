@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.223"
+BOT_VERSION = "v10.224"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -6201,6 +6201,7 @@ def nb_scan(st, force=False):
             ig_sync()
             ig_insights()
             gsc_sync()
+            gsc_channel_sync()
             fb_plays_sync()
         except Exception as e:
             print("ig sync:", clean(e)[:80])
@@ -13042,7 +13043,83 @@ def gsc_report(queries, st, head=""):
     send("\n".join(lines) + "\n\nTap one and I write the article.", [[btn(f"✍️ {i + 1}. {c['title'][:44]}", pid, "ar", str(i))] for i, c in enumerate(cands)])
 
 
+def gsc_channel_sync(force=False):
+    """v10.224: how your YouTube channel and videos show up in Google web search (the channel's own Search Console property). Cached 6 h. Returns (True, data) or (False, reason). Never raises."""
+    m = mem()
+    c = m.get("gsc_ch") or {}
+    if not force and c.get("data") and time.time() - c.get("ts", 0) < 6 * 3600:
+        return True, c["data"]
+    try:
+        tok = yt_token()
+        H = {"Authorization": "Bearer " + tok}
+        r = S.get("https://www.googleapis.com/webmasters/v3/sites", headers=H, timeout=40)
+    except Exception as e:
+        return False, "Search Console did not answer: " + clean(e)[:80]
+    if not r.ok:
+        return False, f"Search Console answered HTTP {r.status_code}."
+    sites = [x.get("siteUrl", "") for x in r.json().get("siteEntry", [])]
+    site = next((x for x in sites if "youtube.com/channel" in x or "youtube.com/@" in x), None)
+    if not site:
+        return False, "Your Google account does not list the YouTube channel as a Search Console property."
+    end = datetime.date.today() - datetime.timedelta(days=2)
+    start = end - datetime.timedelta(days=27)
+    def q(dims, limit=250):
+        body = {"startDate": start.isoformat(), "endDate": end.isoformat(), "rowLimit": limit}
+        if dims:
+            body["dimensions"] = dims
+        rr = S.post("https://www.googleapis.com/webmasters/v3/sites/" + urllib.parse.quote(site, safe="") + "/searchAnalytics/query", headers=H, json=body, timeout=60)
+        rr.raise_for_status()
+        return rr.json().get("rows", [])
+    try:
+        tot, qs, pg, co = q(None), q(["query"]), q(["page"]), q(["country"], 10)
+    except Exception as e:
+        return False, "Search Console would not give the channel numbers: " + clean(e)[:100]
+    t = tot[0] if tot else {}
+    vids = {}
+    for x in pg:
+        mm = re.search(r"(?:watch\?v=|shorts/)([\w-]{11})", x["keys"][0])
+        if mm:
+            e = vids.setdefault(mm.group(1), [0, 0, 0.0])
+            e[0] += int(x["clicks"])
+            e[1] += int(x["impressions"])
+            e[2] = e[2] or float(x["position"])
+    data = {"totals": {"clicks": int(t.get("clicks", 0)), "impressions": int(t.get("impressions", 0)), "position": float(t.get("position", 0) or 0)},
+            "queries": [(x["keys"][0], int(x["clicks"]), int(x["impressions"]), float(x["position"])) for x in qs],
+            "videos": sorted(((k, v[0], v[1], v[2]) for k, v in vids.items()), key=lambda r: -r[2])[:10],
+            "countries": [(x["keys"][0], int(x["impressions"])) for x in co]}
+    m["gsc_ch"] = {"ts": time.time(), "data": data}
+    return True, data
+
+
+def gsc_channel_text(data):
+    t = data["totals"]
+    lines = [f"▶️ Your YouTube videos in Google search (28 days): {t['impressions']} impressions, {t['clicks']} clicks, average position {t['position']:.0f}."]
+    if data.get("countries"):
+        tot = sum(n for _, n in data["countries"]) or 1
+        nm = {"usa": "United States", "bra": "Brazil", "gbr": "United Kingdom", "can": "Canada", "fra": "France", "ind": "India", "deu": "Germany",
+              "rus": "Russia", "ukr": "Ukraine", "egy": "Egypt", "aus": "Australia", "ita": "Italy", "esp": "Spain", "tur": "Turkey", "idn": "Indonesia"}
+        lines.append("Countries: " + ", ".join(f"{nm.get(c, c.upper())} {n / tot * 100:.0f}%" for c, n in data["countries"][:4]))
+    qs = [q for q in data["queries"] if "kemet" not in q[0].lower()][:8]
+    if qs:
+        lines.append("Topics people type into Google that reach you (the game \"Gods of Kemet\" left out):")
+        lines += [f"• {q[0][:60]} ({q[2]} impressions, position {q[3]:.0f})" for q in qs]
+    if data.get("videos"):
+        try:
+            tm = {v["id"]: v["snippet"]["title"] for v in all_videos(yt_token())}
+        except Exception:
+            tm = {}
+        lines.append("Videos Google shows most:")
+        lines += [f"• {tm.get(i, i)[:55]} ({imp} impressions, position {pos:.0f})" for i, c, imp, pos in data["videos"][:5]]
+    return "\n".join(lines)
+
+
 def cmd_searchdata(st):
+    try:
+        ok2, d2 = gsc_channel_sync(force=True)
+        if ok2:
+            send(gsc_channel_text(d2))
+    except Exception as e:
+        print("gsc channel:", clean(e)[:100])
     ok, data = gsc_sync(force=True)
     if ok:
         t = data["totals"]
@@ -14065,6 +14142,12 @@ def board_snapshot():
     except Exception as e:
         print("board gsc:", clean(e)[:80])
     try:
+        ok, g2 = gsc_channel_sync()
+        if ok:
+            snap["g_ch_imp"] = g2["totals"]["impressions"]
+    except Exception as e:
+        print("board gsc channel:", clean(e)[:80])
+    try:
         fn = mem().get("funnel") or {}
         if fn:
             snap["shorts_linked"] = int(fn.get("linked", 0))
@@ -14075,7 +14158,7 @@ def board_snapshot():
 
 _BOARD_LABELS = (("subs", "YouTube subscribers"), ("views28", "YouTube views (28 days)"), ("hours28", "YouTube watch hours (28 days)"),
                  ("site_views7", "Website page views (7 days)"), ("site_visits7", "Website visits (7 days)"),
-                 ("g_imp", "Google impressions (28 days)"), ("g_clicks", "Google clicks (28 days)"), ("ig_reach28", "Instagram accounts reached (28 days)"),
+                 ("g_imp", "Google impressions (28 days)"), ("g_clicks", "Google clicks (28 days)"), ("g_ch_imp", "YouTube videos in Google search (impressions, 28 days)"), ("ig_reach28", "Instagram accounts reached (28 days)"),
                  ("shorts_linked", "Shorts that point to a long video"))
 
 
