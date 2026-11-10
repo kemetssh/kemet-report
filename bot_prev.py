@@ -136,7 +136,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.220"
+BOT_VERSION = "v10.221"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -10811,6 +10811,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/publish - put the site live\n"
         "/siteweek - website check\n"
         "/seocheck - SEO + AI search check\n"
+        "/copycheck - find sites copying you\n"
         "/synctitles - site film titles = YouTube\n"
         "/needvideos - articles without a video\n"
         "/searchdata - Google search ideas\n"
@@ -10834,10 +10835,10 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/community - posts for your newest video\n"
         "/starter - a comment-getting question\n"
         "/sublines - rotate the subscribe line\n"
-        "/chapters - add timestamps to long videos\n/learnexport - my learning notes as a file\n/fbcomments - reply to Facebook comments\n/fbviews - Facebook vs YouTube views\n"
+        "/chapters - add timestamps to long videos\n/learnexport - learning notes file\n/fbcomments - reply to Facebook comments\n/fbviews - Facebook vs YouTube views\n"
         "/flow - Google Flow prompts for a Short\n"
         "/hook - 3 opening lines for your next Short\n"
-        "/goal 100 - set a subscriber goal and track it\n"
+        "/goal 100 - set a subscriber goal\n"
         "/demand - what people search for\n/count - exact number of videos\n"
         "/refresh - fresh description lines for old videos\n"
         "/calendar - ideas for Egypt events\n"
@@ -10847,7 +10848,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/poll - feedback poll: what to film next\n"
         "/cadence 3 - how often to post\n"
         "/links /addlink /removelink - description links\n"
-        "/health - check that everything works\n/selftest - the bot tests itself\n/viral - what is taking off\n/pause /resume - stop or restart my own messages\n"
+        "/health - check that everything works\n/selftest - the bot tests itself\n/viral - what is taking off\n/pause /resume - stop/restart messages\n"
         "Or just write or speak to me normally: I work out what you want.\n"
         "/results - how your latest video is doing\n/plan - this week's plan\n"
         "/lessons - what I have learned about your channel\n"
@@ -11465,6 +11466,8 @@ def on_message(msg, st):
         cmd_sitelogo(st)
     elif text.startswith("/searchdata"):
         cmd_searchdata(st)
+    elif text.startswith("/copycheck"):
+        cmd_copycheck(st, raw)
     elif text.startswith("/seocheck"):
         cmd_seocheck(st)
     elif text.startswith("/siteweek"):
@@ -13832,6 +13835,134 @@ def indexnow_flush():
     return f"ℹ️ IndexNow answered {r.status_code}, so I will try again at the next Publish."
 
 
+
+
+
+
+# ---------------- v10.221: /copycheck - find sites that copied your articles ----------------
+_COPY_SKIP_HOSTS = ("archive.org", "archive.ph", "twitter.com", "x.com", "facebook.com", "instagram.com", "t.me", "tiktok.com",
+                    "youtube.com", "youtu.be", "translate.goog", "google.com", "bing.com", "pinterest.com", "reddit.com")
+
+
+def _copy_words(t):
+    return re.findall(r"[a-z0-9']+", html.unescape(t).lower())
+
+
+def _copy_shingles(words, k=7):
+    return {" ".join(words[i:i + k]) for i in range(0, max(0, len(words) - k + 1))}
+
+
+def copy_sentences(page_html, n=2):
+    """Two distinctive sentences from an article (one early, one late), 14-30 words, no quotes or numbers-heavy lines."""
+    body = page_html[page_html.find('<article class="article-body">'):]
+    body = body[:body.find("</article>")] if "</article>" in body else body
+    sents = []
+    for p in re.findall(r"<p>(.*?)</p>", body, re.S):
+        for sn in re.split(r"(?<=[.!?])\s+", _pg_text(p)):
+            w = sn.split()
+            if 14 <= len(w) <= 30 and '"' not in sn and "“" not in sn and sum(c.isdigit() for c in sn) < 8:
+                sents.append(sn)
+    if len(sents) < 2:
+        return sents[:n]
+    third = max(1, len(sents) // 3)
+    pick = [max(sents[:third], key=len), max(sents[-third:], key=len)]
+    return pick[:n]
+
+
+def copy_search(query, host):
+    """A raw web search that does NOT limit itself to trusted sources, leaving out our own site. Returns [{url, text}] or None when no search is possible."""
+    tv = mem().get("tavily") or {}
+    if tavily_key() and not tv.get("bad") and tv.get("out_month") != _month():
+        try:
+            r = S.post(TAVILY + "/search", headers={"Authorization": "Bearer " + tavily_key()},
+                       json={"query": query[:380], "max_results": 8, "search_depth": "basic", "include_answer": False,
+                             "include_raw_content": True, "exclude_domains": [host]}, timeout=60)
+            if r.status_code in (429, 432, 433):
+                mem()["tavily"] = dict(tv, out_month=_month() if r.status_code != 429 else "")
+            elif r.ok:
+                search_count("tavily", 1)
+                return [{"url": x.get("url", ""), "text": (x.get("raw_content") or x.get("content") or "")[:60000]} for x in r.json().get("results", [])]
+        except Exception as e:
+            print("copy tavily:", clean(e)[:100])
+    if exa_key() and not (mem().get("exa") or {}).get("bad"):
+        try:
+            r = S.post("https://api.exa.ai/search", headers={"x-api-key": exa_key(), "Content-Type": "application/json"},
+                       json={"query": query[:380], "numResults": 8, "type": "auto", "excludeDomains": [host],
+                             "contents": {"text": {"maxCharacters": 20000}}}, timeout=60)
+            if r.ok:
+                search_count("exa", 1)
+                return [{"url": x.get("url", ""), "text": x.get("text") or ""} for x in r.json().get("results", [])]
+        except Exception as e:
+            print("copy exa:", clean(e)[:100])
+    return None
+
+
+def copy_check_article(page_html, host):
+    """Returns (hits, searched_ok): hits = [(url, shared_phrases, sample)] for pages that share long runs of words with the article."""
+    body = page_html[page_html.find('<article class="article-body">'):]
+    mine = _copy_shingles(_copy_words(_pg_text(body)))
+    hits, ok = {}, False
+    for sn in copy_sentences(page_html):
+        res = copy_search(sn, host)
+        if res is None:
+            continue
+        ok = True
+        for x in res:
+            h = urllib.parse.urlparse(x["url"]).netloc.lower()
+            if not x["url"] or h.endswith(host) or any(h == d or h.endswith("." + d) for d in _COPY_SKIP_HOSTS):
+                continue
+            theirs = _copy_shingles(_copy_words(x["text"]))
+            shared = mine & theirs
+            if len(shared) >= 4:
+                cur = hits.get(x["url"])
+                if not cur or len(shared) > cur[0]:
+                    hits[x["url"]] = (len(shared), sorted(shared, key=len)[-1])
+    return sorted(((u, n, smp) for u, (n, smp) in hits.items()), key=lambda r: -r[1]), ok
+
+
+def cmd_copycheck(st, raw=""):
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("Send me your current site as a .zip first, then try again.")
+    m = re.search(r"\d+", raw or "")
+    n = max(1, min(15, int(m.group()))) if m else 6
+    if not (tavily_key() or exa_key()):
+        return send("I need a web search key (Tavily or Exa) for this, and none is connected.")
+    done = mem().setdefault("copycheck", {})
+    send(f"🕵️ Looking for sites that copied your articles. I check {n} articles now (2 searches each, about {2 * n} of your free search credits).")
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        slugs = sorted(p.parent.name for p in Path(root).glob("articles/*/index.html"))
+        todo = sorted(slugs, key=lambda s_: done.get(s_, {}).get("ts", 0))[:n]
+        host = urllib.parse.urlparse(SITE_BASE).netloc
+        found, checked, failed = [], 0, 0
+        for slug in todo:
+            t = (Path(root) / "articles" / slug / "index.html").read_text(encoding="utf-8")
+            try:
+                hits, ok = copy_check_article(t, host)
+            except Exception as e:
+                print("copycheck:", clean(e)[:100])
+                ok, hits = False, []
+            if not ok:
+                failed += 1
+                continue
+            checked += 1
+            done[slug] = {"ts": time.time(), "hits": [h[0] for h in hits]}
+            ttl = re.search(r"<title>(.*?)</title>", t, re.S)
+            for u, k, smp in hits[:2]:
+                found.append((html.unescape(ttl.group(1)).split(" | ")[0].strip() if ttl else slug, f"{SITE_BASE}/articles/{slug}/", u, k, smp))
+    if not checked:
+        return send("⚠️ The search did not answer (out of free credits, or busy). Try again later; /health shows the credits.")
+    lines = [f"🕵️ Checked {checked} article(s)" + (f"; {failed} could not be searched" if failed else "") + f". Left to check: {max(0, len(slugs) - len([s_ for s_ in slugs if s_ in done]))}."]
+    if not found:
+        lines.append("No site was found copying them. 🏺 Send /copycheck again for the next batch.")
+        return send("\n".join(lines))
+    lines.append(f"\n⚠️ {len(found)} page(s) share long runs of words with your articles:")
+    for ttl, mine_u, u, k, smp in found[:8]:
+        lines.append(f"\n• Your article: {ttl[:60]}\n  {mine_u}\n  Their page: {u}\n  {k} identical 7-word runs, e.g. \"{smp[:70]}\"")
+    lines.append("\nOpen each page and judge it yourself. A short quote with a link back to you is normal and Bing will probably reject a report about it. "
+                 "A page that copies whole paragraphs without credit is a real case. Send me its address and I prepare every field of the Bing form.")
+    send("\n".join(lines))
 
 
 
