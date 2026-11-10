@@ -136,7 +136,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.219"
+BOT_VERSION = "v10.220"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1127,7 +1127,8 @@ def yt_token():
 
 
 YT_SCOPES = ["https://www.googleapis.com/auth/youtube", "https://www.googleapis.com/auth/youtube.force-ssl",
-             "https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/yt-analytics.readonly"]
+             "https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/yt-analytics.readonly",
+             "https://www.googleapis.com/auth/webmasters.readonly"]
 YT_REDIRECT = "http://localhost"
 
 
@@ -3300,6 +3301,81 @@ Return JSON only: {{"long_id": "id or empty", "reason": "one short line",
  "pinned": "pinned comment for the Short, 1-2 sentences, mentions the full story"}}"""
 
 
+def funnel_scan(tok):
+    """Every Short on the channel: does it already point to a long video? If not, which long video fits best. Reads only."""
+    vs = all_videos(tok)
+    def secs(v):
+        return iso_seconds((v.get("contentDetails") or {}).get("duration"))
+    longs = [v for v in vs if secs(v) > 180]
+    shorts = [v for v in vs if 0 < secs(v) <= 180]
+    long_ids = {v["id"] for v in longs}
+    linked, todo, nomatch = 0, [], 0
+    for sv in shorts:
+        d = sv["snippet"].get("description", "") or ""
+        if any(i in d for i in long_ids):
+            linked += 1
+            continue
+        txt = sv["snippet"]["title"] + " " + d[:200]
+        best, bs = None, 0.0
+        for lv in longs:
+            sc = _sym_overlap(txt, lv["snippet"]["title"] + " " + (lv["snippet"].get("description", "") or "")[:200])
+            if sc > bs:
+                best, bs = lv, sc
+        if best and bs >= 0.34:
+            todo.append((sv["id"], sv["snippet"]["title"], best["id"], best["snippet"]["title"]))
+        else:
+            nomatch += 1
+    return {"shorts": len(shorts), "longs": len(longs), "linked": linked, "todo": todo, "nomatch": nomatch}
+
+
+def cmd_funnel_all(st):
+    send("🔀 Reading every Short and long video on your channel...")
+    tok = yt_token()
+    r = funnel_scan(tok)
+    if not r["longs"]:
+        return send("You have no long video yet, so there is nowhere to send Shorts viewers. /longform plans one.")
+    prev = mem().get("funnel") or {}
+    mem()["funnel"] = {"ts": time.time(), "linked": r["linked"], "total": r["shorts"]}
+    lines = [f"🔀 Shorts that point to a long video: {r['linked']} of {r['shorts']}" + (f" (last time {prev['linked']} of {prev['total']})" if prev else "") + "."]
+    try:
+        g = an_by_type(tok, "subscribersGained", 28)
+        if g:
+            lines.append(f"New subscribers in 28 days: {g.get('SHORTS', 0)} from Shorts, {g.get('VIDEO_ON_DEMAND', 0)} from long videos.")
+    except Exception as e:
+        print("funnel subs:", clean(e)[:80])
+    if r["nomatch"]:
+        lines.append(f"{r['nomatch']} Short(s) have no long video on the same story yet: each one is an idea for a long film (/longform).")
+    if not r["todo"]:
+        return send("\n".join(lines) + ("\nNothing to link right now. 🏺" if not r["nomatch"] else ""))
+    todo = r["todo"][:25]
+    lines.append(f"\nThese {len(todo)} Short(s) match a long video and have no link yet:")
+    for sv, stt, lv, ltt in todo[:8]:
+        lines.append(f"• {stt[:45]} → {ltt[:45]}")
+    if len(todo) > 8:
+        lines.append(f"… and {len(todo) - 8} more")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "funnelall", "pairs": [(a, c) for a, _, c, _ in todo], "created": time.time()}
+    send("\n".join(lines) + "\n\nTap to add \"▶ Full story: link\" at the top of each Short's description. Matching is by words in the titles, so glance at the list first.",
+         [[btn(f"🔗 Link all {len(todo)}", pid, "fy"), btn("Skip", pid, "fz")]])
+
+
+def do_funnel_all(prop, st):
+    done, failed = 0, []
+    for sv, lv in prop["pairs"]:
+        try:
+            if prepend_description(sv, f"▶ Full story: https://youtu.be/{lv}"):
+                done += 1
+                (mem()["videos"].get(sv) or {})["full"] = lv
+        except Exception as e:
+            failed.append(clean(e)[:80])
+            if len(failed) >= 3:
+                break
+    msg = f"✅ Added the link to {done} Short(s)."
+    if failed:
+        msg += f"\n⚠️ {len(failed)} failed (stopped early): {failed[0]}. Send /funnel all again later."
+    send(msg + "\nSend /funnel all in a few weeks to see the count grow.")
+
+
 def cmd_funnel(st):
     send("Looking for the best long video to send your Shorts viewers to...")
     tok = yt_token()
@@ -3732,6 +3808,12 @@ def on_prop(jid, act, st):
         remember("skips", prop["new"])
         st["props"].pop(jid, None)
         return send(f"↩️ Reverted to:\n{prop['old']}")
+    if act == "fy" and kind == "funnelall":
+        st["props"].pop(jid, None)
+        return do_funnel_all(prop, st)
+    if act == "fz" and kind == "funnelall":
+        st["props"].pop(jid, None)
+        return send("👍 Skipped.")
     if act == "sq" and kind == "seofix":
         st["props"].pop(jid, None)
         return do_seofix(prop, st)
@@ -6101,6 +6183,7 @@ def nb_scan(st, force=False):
         try:
             ig_sync()
             ig_insights()
+            gsc_sync()
             fb_plays_sync()
         except Exception as e:
             print("ig sync:", clean(e)[:80])
@@ -10697,7 +10780,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/ytauth - new YouTube login (comments, captions)\n"
         "/asked - viewer questions into videos\n"
         "/review - weekly self-review now\n"
-        "/funnel - Shorts viewers to a long video\n"
+        "/funnel [all] - Shorts to long video\n"
         "/besttime - when to post\n"
         "/watchnext - 'Watch next' links in old videos\n"
         "/hashtags - refresh old hashtags\n"
@@ -10714,9 +10797,9 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/translate - ES, PT, HI subtitles\n"
         "/shortcuts - moments for Shorts\n"
         "/playlists - themed playlists\n"
-        "/uploadrecover ID - check an interrupted upload\n"
+        "/uploadrecover ID - recover an upload\n"
         "/failed - show failed updates\n"
-        "/retry ID confirm - replay one failed update\n"
+        "/retry ID confirm - replay a failed update\n"
         "/watch - check the channel for problems\n"
         "/recheck - full checkup of all videos\n"
         "/checklast - check my upload (or paste link)\n"
@@ -10730,13 +10813,13 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/seocheck - SEO + AI search check\n"
         "/synctitles - site film titles = YouTube\n"
         "/needvideos - articles without a video\n"
-        "/searchdata - search ideas\n"
+        "/searchdata - Google search ideas\n"
         "/sitelogo - logo on site\n"
         "/cfsetup - 1-tap publish\n"
         "/xpost - X, Facebook, Insta, TikTok posts\n"
         "/articlecheck - deepen articles\n"
         "/visuals - real, mix or AI pics\n"
-        "/trends - what is hot now (tags, topics)\n"
+        "/trends - what is hot now\n"
         "/thumbtest - 3 thumbnail options\n"
         "/post - 3 Community posts to paste into YouTube\n"
         "/fbsetup - link your Facebook Page\n"
@@ -10768,7 +10851,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "Or just write or speak to me normally: I work out what you want.\n"
         "/results - how your latest video is doing\n/plan - this week's plan\n"
         "/lessons - what I have learned about your channel\n"
-        "/report - daily channel report now\n/status - videos waiting (/status clear cancels)\n/help")
+        "/report - daily channel report now\n/status - videos waiting (clear cancels)\n/help")
 
 
 # ---------------- update the bot itself from Telegram ----------------
@@ -11256,6 +11339,8 @@ def on_message(msg, st):
         cmd_asked(st)
     elif text == "/funnel":
         cmd_funnel(st)
+    elif text.startswith("/funnel ") and text.split()[1:2] == ["all"]:
+        cmd_funnel_all(st)
     elif text == "/besttime":
         cmd_besttime(st)
     elif text == "/watchnext":
@@ -11462,7 +11547,7 @@ def on_callback(cb, st):
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
     if jid == "q" and act in ("qa", "qi"):
         return ask_callback(cb, act, st)
-    if act in ("ta", "ts", "tu", "ca", "cs", "fbr", "fbn", "chp", "chs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "fbr", "fbn", "chp", "chs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr", "fy", "fz"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -12882,6 +12967,10 @@ def handle_gsc_file(msg, st):
     queries = parse_gsc_csv(raw or b"")
     if not queries:
         return send("I could not read search phrases from that file. In Search Console open Performance, tap Export (top right), choose Download CSV, and send me the zip or the Queries file.")
+    gsc_report(queries, st)
+
+
+def gsc_report(queries, st, head=""):
     tok = yt_token()
     films = []
     for pl in site_playlists(tok):
@@ -12899,7 +12988,7 @@ def handle_gsc_file(msg, st):
             print("gsc site scan:", clean(e)[:100])
     new, improve = gsc_ideas(queries, films, have, titles)
     tot = sum(q[2] for q in queries)
-    lines = [f"🔎 Search Console: {len(queries)} search phrases, {tot} impressions, {sum(q[1] for q in queries)} clicks."]
+    lines = [head or f"🔎 Search Console: {len(queries)} search phrases, {tot} impressions, {sum(q[1] for q in queries)} clicks."]
     if tot < 30:
         lines.append("That is still very little data (a new site needs a few weeks), so treat these as hints.")
     if improve:
@@ -12919,8 +13008,72 @@ def handle_gsc_file(msg, st):
 
 
 def cmd_searchdata(st):
-    send("📈 Which topics do people search for? In Search Console (search.google.com/search-console) open Performance, tap Export (top right), choose Download CSV, then send me the file here. "
-         "I match the search phrases to your films and tell you which ones deserve an article first. Nothing is changed or published.")
+    ok, data = gsc_sync(force=True)
+    if ok:
+        t = data["totals"]
+        head = (f"🔎 Search Console (last 28 days, read by me): {t['impressions']} impressions, {t['clicks']} clicks, average position {t['position']:.0f}. "
+                f"{len(data['queries'])} search phrases.")
+        if data["pages"]:
+            head += "\nTop pages: " + "; ".join(f"{p[0].replace(SITE_BASE, '') or '/'} ({p[2]})" for p in data["pages"][:3])
+        if not data["queries"]:
+            return send(head + "\nNo search phrases yet: a new site needs a few weeks. I will keep reading it.")
+        return gsc_report(data["queries"], st, head)
+    send(data + "\n\nUntil it is connected you can still send me the export: in Search Console (search.google.com/search-console) open Performance, tap Export, choose Download CSV, and send me the file here.")
+
+
+def gsc_sync(force=False):
+    """Read Search Console for the site through the API (last 28 days, data is 2-3 days behind). Cached 6 h. Returns (True, data) or (False, plain-language reason). Never raises."""
+    m = mem()
+    c = m.get("gsc") or {}
+    if not force and c.get("data") and time.time() - c.get("ts", 0) < 6 * 3600:
+        return True, c["data"]
+    try:
+        tok = yt_token()
+    except Exception as e:
+        return False, "I could not log in to Google: " + clean(e)[:80]
+    H = {"Authorization": "Bearer " + tok}
+    try:
+        r = S.get("https://www.googleapis.com/webmasters/v3/sites", headers=H, timeout=40)
+    except Exception as e:
+        return False, "Search Console did not answer: " + clean(e)[:80]
+    if r.status_code in (401, 403):
+        txt = r.text.lower()
+        if "has not been used" in txt or "disabled" in txt or "accessnotconfigured" in txt:
+            return False, ("⚠️ Search Console is not switched on for my Google app yet. One time: open console.cloud.google.com, make sure the project of your YouTube login is selected, "
+                           "tap APIs & Services, Library, search \"Google Search Console API\", tap Enable. Then send /searchdata again.")
+        return False, ("⚠️ My Google login does not have Search Console permission yet. One time: send /ytauth, follow the steps, and tick EVERY box (a new one is Search Console, view only). "
+                       "Then send /searchdata again.")
+    if not r.ok:
+        return False, f"Search Console answered HTTP {r.status_code}."
+    host = urllib.parse.urlparse(SITE_BASE).netloc
+    sites = [x.get("siteUrl", "") for x in r.json().get("siteEntry", [])]
+    site = next((x for x in sites if x.rstrip("/").endswith(host) and x.startswith("http")), None) or next((x for x in sites if x == f"sc-domain:{host}"), None)
+    if not site:
+        return False, "Your Google account does not list " + host + " in Search Console. Add and verify it there first (you did, so check it is the same Google account as the YouTube login)."
+    end = datetime.date.today() - datetime.timedelta(days=2)
+    start = end - datetime.timedelta(days=27)
+    def q(dims):
+        body = {"startDate": start.isoformat(), "endDate": end.isoformat(), "rowLimit": 250}
+        if dims:
+            body["dimensions"] = dims
+        rr = S.post("https://www.googleapis.com/webmasters/v3/sites/" + urllib.parse.quote(site, safe="") + "/searchAnalytics/query", headers=H, json=body, timeout=60)
+        rr.raise_for_status()
+        return rr.json().get("rows", [])
+    try:
+        tot = q(None)
+        qs = q(["query"])
+        pg = q(["page"])
+    except Exception as e:
+        return False, "Search Console would not give the numbers: " + clean(e)[:100]
+    t = tot[0] if tot else {}
+    data = {"totals": {"clicks": int(t.get("clicks", 0)), "impressions": int(t.get("impressions", 0)), "position": float(t.get("position", 0) or 0)},
+            "queries": [(x["keys"][0], int(x["clicks"]), int(x["impressions"]), float(x["position"])) for x in qs],
+            "pages": [(x["keys"][0], int(x["clicks"]), int(x["impressions"]), float(x["position"])) for x in pg], "site": site}
+    m["gsc"] = {"ts": time.time(), "data": data}
+    hist = m.setdefault("gsc_hist", [])
+    hist.append({"ts": time.time(), "imp": data["totals"]["impressions"], "clicks": data["totals"]["clicks"], "pos": round(data["totals"]["position"], 1)})
+    m["gsc_hist"] = hist[-60:]
+    return True, data
 
 
 # ---------------- the Kemet hieroglyph logo on the website ----------------
