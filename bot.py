@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.224"
+BOT_VERSION = "v10.226"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2964,8 +2964,8 @@ Rules for all: honest, no clickbait or claim the film does not make, a curious f
 No hashtags at all (I add checked ones myself).
 The aim is to grow followers and watch time so each account can earn: x invites a reply; facebook ends with a question and keeps people watching; instagram invites a save or share; tiktok promises the next piece of evidence so people follow for Part 2. Never promise what the film does not show.
 - x: at most 160 characters, at most 1 emoji.
-- facebook: 2 to 3 short sentences for a Page post, a question at the end to invite comments.
-- instagram: a caption of 3 to 5 short lines. Do not mention a link or the bio (I add the link).
+- facebook: 2 to 3 short sentences for a Page post. Open with a "how" or "why" question about everyday Egyptian life or a myth when the story truly is about that. End with a question that invites comments. The article link goes under the post, so you may say the full evidence is below. Do not ask for follows.
+- instagram: a caption of 3 to 5 short lines. Open with a "how" or "why" question about everyday Egyptian life or a myth when the story truly is about that. End with one question that invites a comment and one short line inviting a follow for the next piece of evidence. Never say "save this post". Do not mention a link or the bio (I add them).
 - tiktok: one punchy line under 120 characters.
 Return JSON only: {{"x": "...", "facebook": "...", "instagram": "...", "tiktok": "..."}}"""
 
@@ -3027,7 +3027,7 @@ def send_share(title, blurb, link, st=None):
     else:
         send(f"📘 Facebook Page:\n{p['facebook']}\n{link}\n\n(Send /fbsetup to link your Page and post with one tap.)",
              [[{"text": "📘 Share on Facebook", "url": fb_share(link)}]])
-    send(f"📸 Instagram caption (press and hold to copy):\n{p['instagram']}\n\n📖 Read the full article: {link}\n\n(Instagram does not make caption links clickable. Readers can copy the address, and you can also put it in your bio.)",
+    send(f"📸 Instagram caption (press and hold to copy):\n{p['instagram']}\n\n📖 Full evidence and sources: link in bio (latest article)\n{title}\n\n(Instagram captions cannot be clicked, so I point to your bio. Put {SITE_BASE}/latest/ in your bio once and it always opens your newest article.)",
          [[{"text": "📸 Open Instagram", "url": "https://www.instagram.com/"}]])
     send(f"🎵 TikTok caption (press and hold to copy):\n{p['tiktok']}\n\n📖 Read the full article: {link}",
          [[{"text": "🎵 Open TikTok", "url": "https://www.tiktok.com/"}]])
@@ -6203,6 +6203,7 @@ def nb_scan(st, force=False):
             gsc_sync()
             gsc_channel_sync()
             fb_plays_sync()
+            fb_insights()
         except Exception as e:
             print("ig sync:", clean(e)[:80])
         try:
@@ -8374,6 +8375,71 @@ def fb_views(cfg, pid_):
     return None, (why[-1] if why else "no number")
 
 
+def fb_insights(force=False):
+    """v10.226: Facebook Page numbers beyond reel plays: 28-day views, reach, engagement, page visits, followers gained and lost, and where followers live.
+    Each metric is asked alone, so one refusal never blocks the rest. Cached 12 h. Never raises."""
+    m = mem()
+    c = m.get("fb_ins") or {}
+    if not force and c.get("ts") and time.time() - c["ts"] < 12 * 3600:
+        return c
+    cfg = fb_cfg()
+    if not cfg or not cfg.get("token") or not cfg.get("page_id"):
+        return c
+    now = int(time.time())
+    new = {"ts": time.time(), "tot": {}, "country": [], "err": []}
+    def series(metric):
+        j = fb_call("GET", f"{cfg['page_id']}/insights", params={"access_token": cfg["token"], "metric": metric, "period": "day",
+                                                                  "since": now - 28 * 86400, "until": now})
+        return (j.get("data") or [{}])[0].get("values") or []
+    for key, metrics in (("views", ("page_media_view", "page_impressions")), ("reach", ("page_total_media_view_unique", "page_impressions_unique")),
+                         ("engage", ("page_post_engagements",)), ("visits", ("page_views_total",)),
+                         ("gained", ("page_daily_follows_unique", "page_fan_adds_unique")), ("lost", ("page_daily_unfollows_unique", "page_fan_removes_unique"))):
+        for metric in metrics:
+            try:
+                vals = [v.get("value") for v in series(metric)]
+                nums = [v for v in vals if isinstance(v, (int, float))]
+                if nums:
+                    new["tot"][key] = {"d28": int(sum(nums)), "d7": int(sum(nums[-7:]))}
+                    break
+            except Exception as e:
+                last = clean(e)[:70]
+        else:
+            new["err"].append(key + ": " + last)
+    for metric in ("page_follows_country", "page_fans_country"):
+        try:
+            vals = series(metric)
+            d = (vals[-1].get("value") if vals else None) or {}
+            if isinstance(d, dict) and d:
+                tot = sum(d.values()) or 1
+                new["country"] = [(k, round(v / tot * 100)) for k, v in sorted(d.items(), key=lambda x: -x[1])[:5]]
+                break
+        except Exception as e:
+            new["err"].append("country: " + clean(e)[:60])
+    m["fb_ins"] = new
+    return new
+
+
+def fb_insights_text(c):
+    t = c.get("tot") or {}
+    names = (("views", "Views"), ("reach", "People reached"), ("engage", "Reactions, comments, shares and clicks"), ("visits", "Page visits"),
+             ("gained", "New followers"), ("lost", "Followers lost"))
+    lines = [f"• {nm}: {t[k]['d28']:,} in 28 days, {t[k]['d7']:,} in the last 7" for k, nm in names if k in t]
+    out = ""
+    if lines:
+        out = "📊 Your Facebook Page, last 28 days:\n" + "\n".join(lines)
+        r_, v_ = (t.get("reach") or {}).get("d28"), (t.get("visits") or {}).get("d28")
+        e_ = (t.get("engage") or {}).get("d28")
+        if r_ and e_ is not None:
+            out += f"\n→ {e_ / r_ * 100:.1f}% of the people reached did something (react, comment, share or click)"
+        if r_ and v_ is not None:
+            out += f"; {v_ / r_ * 100:.1f}% visited the Page"
+    if c.get("country"):
+        out += "\n\n👥 Where followers live: " + ", ".join(f"{k} {v}%" for k, v in c["country"])
+    if not out and c.get("err"):
+        out = ("Facebook refused the detailed Page numbers (" + "; ".join(c["err"][:2]) + "). The Page key needs read_insights and pages_read_engagement: send /fbsetup to renew it.")
+    return out.strip()
+
+
 def cmd_fbviews(st):
     """Facebook plays next to YouTube views for the same video, so the owner sees which topics each platform pushes."""
     cfg = fb_cfg()
@@ -8417,6 +8483,12 @@ def cmd_fbviews(st):
         msg += f"\n\n{len(none)} posts gave no number. Facebook's answer: " + "; ".join(f"{w} (x{n})" for w, n in sorted(reasons.items(), key=lambda x: -x[1])[:2])
         msg += "\nPlain photo or text posts have no play count; for a reel it usually means the key may not read insights."
     send(msg)
+    try:
+        txt = fb_insights_text(fb_insights(force=True))
+        if txt:
+            send(txt)
+    except Exception as e:
+        print("fb insights:", clean(e)[:100])
 
 
 CHAPTERS_PROMPT = """Watch this YouTube video of the channel "Kemet | Ancient Egypt" from start to end. It is {mins} long.
@@ -12804,6 +12876,7 @@ def build_listing(root, cat):
         ensure_site_css(root)
         fix_img_alts(root)
         link_related(root)
+        ensure_latest_page(root)
     except Exception as e:
         print("key sources:", clean(e)[:120])
     try:
@@ -13200,6 +13273,7 @@ def apply_site_logo(root):
     hieroglyph_numbers(root)
     fix_img_alts(root)
     link_related(root)
+    ensure_latest_page(root)
     (root / "brand-mark.svg").write_text(LOGO_MARK_SVG, encoding="utf-8")
     (root / "logo").mkdir(exist_ok=True)
     (root / "logo" / "kemet-logo-lockup.svg").write_text(LOGO_LOCKUP_SVG, encoding="utf-8")
@@ -13768,6 +13842,8 @@ def seo_audit(root):
     n = 0
     for p in sorted(root.rglob("index.html")):
         rel = p.relative_to(root).parent.as_posix()
+        if rel == "latest":
+            continue
         t = p.read_text(encoding="utf-8", errors="ignore")
         n += 1
         tt = re.search(r"<title>(.*?)</title>", t, re.S)
@@ -14245,6 +14321,31 @@ def cmd_ypp(st):
     if sources:
         out += "\n\nSources:\n" + "\n".join(f"• {t_[:60]}: {u_}" for t_, u_ in sources[:4])
     send(out[:3700] + "\n\nThis is a checklist from public pages, not a decision by YouTube. Check Studio → Earn for the official verdict.")
+
+
+def ensure_latest_page(root):
+    """v10.225: /latest/ always opens the newest article, so the link in your Instagram bio never has to change. Returns the slug (or "")."""
+    root = Path(root)
+    best, bk = "", ("", "")
+    for p in root.glob("articles/*/index.html"):
+        t = p.read_text(encoding="utf-8", errors="ignore")
+        pub = re.search(r'property="article:published_time"', t) and re.search(r'<meta content="([^"]*)" property="article:published_time"', t)
+        up = re.search(r'"uploadDate":\s*"([^"]*)"', t)
+        key = (pub.group(1) if pub else "", up.group(1) if up else "")
+        if key > bk:
+            best, bk = p.parent.name, key
+    if not best:
+        return ""
+    url = f"/articles/{best}/"
+    page = ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>"
+            f"<title>The newest Kemet article</title><meta name=\"robots\" content=\"noindex\"/><link rel=\"canonical\" href=\"{SITE_BASE}{url}\"/>"
+            f"<meta http-equiv=\"refresh\" content=\"0; url={url}\"/><script>location.replace({json.dumps(url)});</script></head>"
+            f"<body><p>Opening the newest article… <a href=\"{url}\">Tap here if nothing happens.</a></p></body></html>")
+    (root / "latest").mkdir(exist_ok=True)
+    f = root / "latest" / "index.html"
+    if not f.exists() or f.read_text(encoding="utf-8") != page:
+        f.write_text(page, encoding="utf-8")
+    return best
 
 
 def link_related(root):
@@ -15937,6 +16038,7 @@ def write_article(c, st):
                 prune_dead_series(root)
                 fix_img_alts(root)
                 link_related(root)
+                ensure_latest_page(root)
                 hieroglyph_numbers(root)
                 add_series_nav(root)
                 sm_ = root / "sitemap.xml"
