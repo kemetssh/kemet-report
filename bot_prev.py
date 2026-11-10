@@ -6,6 +6,7 @@ pick thumbnail -> upload (private) -> optional "try to make public".
 Nothing is uploaded or published without a tap from you.
 """
 import base64
+import collections
 import copy
 import datetime
 import hashlib
@@ -136,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.222"
+BOT_VERSION = "v10.223"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -6009,6 +6010,22 @@ def housekeeping(st):
             print("review:", clean(e))
         else:
             _weekly_succeeded(m, "review", week)
+    if g.tm_wday == 5 and g.tm_hour >= 12 and _weekly_due(m, "scoreboard", week, now):
+        try:
+            cmd_scoreboard(st, auto=True)
+        except Exception as e:
+            _weekly_failed(m, "scoreboard", week, now, e)
+            print("scoreboard:", clean(e)[:120])
+        else:
+            _weekly_succeeded(m, "scoreboard", week)
+    if g.tm_wday == 6 and g.tm_hour >= 18 and _weekly_due(m, "backup", week, now):
+        try:
+            send_backup(st)
+        except Exception as e:
+            _weekly_failed(m, "backup", week, now, e)
+            print("backup:", clean(e)[:120])
+        else:
+            _weekly_succeeded(m, "backup", week)
     if g.tm_wday == 6 and g.tm_hour >= 7 and _weekly_due(m, "plan", week, now):
         try:
             do_plan(st)
@@ -6195,6 +6212,14 @@ def nb_scan(st, force=False):
             nb_auto_predict(n, vids, now)
         except Exception as e:
             print("auto predict:", clean(e)[:80])
+        try:
+            followups(st, vids, now)
+        except Exception as e:
+            print("followups:", clean(e)[:100])
+        try:
+            credit_alerts(st)
+        except Exception as e:
+            print("credit alerts:", clean(e)[:100])
         old = {f["key"] for f in n["facts"]}
         nb_score(n)
         n["facts"] = [f for f in nb_lessons(n["obs"]) if f["key"] not in n["muted"]]
@@ -10803,7 +10828,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/watch - check the channel for problems\n"
         "/recheck - full checkup of all videos\n"
         "/checklast - check my upload (or paste link)\n"
-        "/image <subject> - AI picture + real photo\n"
+        "/image <subject> - AI + real photo\n"
         "/articles - website articles\n"
         "/articlelinks - article links\n"
         "/dupes - duplicate playlists\n"
@@ -10812,6 +10837,8 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/siteweek - website check\n"
         "/seocheck - SEO + AI search check\n"
         "/copycheck - find sites copying you\n"
+        "/scoreboard - this week vs last week\n"
+        "/ypp - earning rules check\n"
         "/synctitles - site film titles = YouTube\n"
         "/needvideos - articles without a video\n"
         "/searchdata - Google search ideas\n"
@@ -10822,9 +10849,9 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/visuals - real, mix or AI pics\n"
         "/trends - what is hot now\n"
         "/thumbtest - 3 thumbnail options\n"
-        "/post - 3 Community posts to paste into YouTube\n"
+        "/post - 3 Community posts\n"
         "/fbsetup - link your Facebook Page\n"
-        "/news - fresh Egypt news to turn into videos\n"
+        "/news - Egypt news to videos\n"
         "/pins - fix weak pinned comments (you tap)\n"
         "/audit - test a myth or your claim\n"
         "/audited - /audit + video; \"pov\" first = POV\n"
@@ -10833,7 +10860,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/batch - 5 scripts to film in one sitting\n"
         "/collab - messages to similar channels\n"
         "/community - posts for your newest video\n"
-        "/starter - a comment-getting question\n"
+        "/starter - comment-getting question\n"
         "/sublines - rotate the subscribe line\n"
         "/chapters - add timestamps to long videos\n/learnexport - learning notes file\n/fbcomments - reply to Facebook comments\n/fbviews - Facebook vs YouTube views\n"
         "/flow - Google Flow prompts for a Short\n"
@@ -11466,6 +11493,10 @@ def on_message(msg, st):
         cmd_sitelogo(st)
     elif text.startswith("/searchdata"):
         cmd_searchdata(st)
+    elif text.startswith("/scoreboard"):
+        cmd_scoreboard(st)
+    elif text.startswith("/ypp"):
+        cmd_ypp(st)
     elif text.startswith("/copycheck"):
         cmd_copycheck(st, raw)
     elif text.startswith("/seocheck"):
@@ -12771,6 +12802,7 @@ def build_listing(root, cat):
         add_key_sources(root)
         ensure_site_css(root)
         fix_img_alts(root)
+        link_related(root)
     except Exception as e:
         print("key sources:", clean(e)[:120])
     try:
@@ -13090,6 +13122,7 @@ def apply_site_logo(root):
     ensure_site_css(root)
     hieroglyph_numbers(root)
     fix_img_alts(root)
+    link_related(root)
     (root / "brand-mark.svg").write_text(LOGO_MARK_SVG, encoding="utf-8")
     (root / "logo").mkdir(exist_ok=True)
     (root / "logo" / "kemet-logo-lockup.svg").write_text(LOGO_LOCKUP_SVG, encoding="utf-8")
@@ -13992,6 +14025,273 @@ def cmd_copycheck(st, raw=""):
     lines.append("\nOpen each page and judge it yourself. A short quote with a link back to you is normal and Bing will probably reject a report about it. "
                  "A page that copies whole paragraphs without credit is a real case. Send me its address and I prepare every field of the Bing form.")
     send("\n".join(lines))
+
+
+
+
+# ---------------- v10.223: weekly scoreboard, credit alerts, backup, earning-policy check, related articles, 7/30-day follow-ups ----------------
+def board_snapshot():
+    snap = {}
+    tok = yt_token()
+    try:
+        snap["subs"] = int(yt_get("channels", tok, part="statistics", mine="true")["items"][0]["statistics"].get("subscriberCount", 0))
+    except Exception as e:
+        print("board subs:", clean(e)[:80])
+    for key, metric in (("views28", "views"), ("hours28", "estimatedMinutesWatched")):
+        try:
+            v = an_query(tok, metric, 28)[0]
+            snap[key] = round(v / 60) if key == "hours28" else int(v)
+        except Exception as e:
+            print("board " + key + ":", clean(e)[:80])
+    for p_, lst in (mem().get("plat_followers") or {}).items():
+        if lst:
+            snap["f_" + p_] = int(lst[-1][1])
+    try:
+        r_ = ((mem().get("ig_ins") or {}).get("tot") or {}).get("reach") or {}
+        if r_.get("d28") is not None:
+            snap["ig_reach28"] = int(r_["d28"])
+    except Exception:
+        pass
+    try:
+        if cf_cfg():
+            w_ = site_stats(7)
+            snap["site_views7"], snap["site_visits7"] = int(w_["views"]), int(w_["visits"])
+    except Exception as e:
+        print("board site:", clean(e)[:80])
+    try:
+        ok, g = gsc_sync()
+        if ok:
+            snap["g_imp"], snap["g_clicks"] = g["totals"]["impressions"], g["totals"]["clicks"]
+    except Exception as e:
+        print("board gsc:", clean(e)[:80])
+    try:
+        fn = mem().get("funnel") or {}
+        if fn:
+            snap["shorts_linked"] = int(fn.get("linked", 0))
+    except Exception:
+        pass
+    return snap
+
+
+_BOARD_LABELS = (("subs", "YouTube subscribers"), ("views28", "YouTube views (28 days)"), ("hours28", "YouTube watch hours (28 days)"),
+                 ("site_views7", "Website page views (7 days)"), ("site_visits7", "Website visits (7 days)"),
+                 ("g_imp", "Google impressions (28 days)"), ("g_clicks", "Google clicks (28 days)"), ("ig_reach28", "Instagram accounts reached (28 days)"),
+                 ("shorts_linked", "Shorts that point to a long video"))
+
+
+def cmd_scoreboard(st, auto=False):
+    send("📋 Putting this week's numbers together...")
+    snap = board_snapshot()
+    m = mem()
+    prev = m.get("board") or {}
+    old = prev.get("snap") if prev and time.time() - prev.get("ts", 0) > 3 * 86400 else None
+    lines = ["📋 Scoreboard" + (" (this week vs last)" if old else " (first reading: next week I show the change)"), ""]
+    def row(label, v, o):
+        if v is None:
+            return None
+        d = ""
+        if o is not None:
+            diff = v - o
+            d = f" (last week {o:,}, {'+' if diff >= 0 else ''}{diff:,})"
+        return f"• {label}: {v:,}{d}"
+    labels = list(_BOARD_LABELS) + [("f_" + p_, f"{PLATFORM_NAMES.get(p_, p_)} followers") for p_ in sorted(k[2:] for k in snap if k.startswith("f_"))]
+    for k, lab in labels:
+        r_ = row(lab, snap.get(k), (old or {}).get(k))
+        if r_:
+            lines.append(r_)
+    if len(lines) <= 2:
+        return send("I could not read any numbers just now. Try again in a few minutes.")
+    if old and snap.get("subs") is not None and old.get("subs") is not None:
+        lines.append("\nGoal check: " + (f"{snap['subs']} of 1,000 subscribers" if snap["subs"] < 1000 else "1,000 subscribers reached"))
+    send("\n".join(lines))
+    if not prev or time.time() - prev.get("ts", 0) > 6 * 86400:
+        m["board"] = {"ts": time.time(), "snap": snap}
+
+
+def credit_alerts(st):
+    """Once per month and kind: tell the owner before a free allowance runs out. Silent otherwise."""
+    m = mem()
+    al = m.setdefault("alerts", {})
+    mo = _month()
+    used = search_count("tavily", 0)
+    if used >= 800 and al.get("tavily") != mo:
+        al["tavily"] = mo
+        send(f"⚠️ Free web-search credits: {used} of about 1,000 used this month. Past that I switch to the backup (Exa) if it is connected, "
+             "and some fact checks may be skipped. Heavy users: /copycheck, long audits and article writing.")
+    try:
+        kb = len(json.dumps(m, default=str)) // 1024
+    except Exception:
+        kb = 0
+    if kb >= 2600 and al.get("memory") != mo:
+        al["memory"] = mo
+        send(f"⚠️ My memory file is {kb} KB and keeps growing. If /health starts showing errors, tell me and I will trim it.")
+
+
+def send_backup(st):
+    txt = learning_export()
+    name = "kemet-learning-backup-" + time.strftime("%Y%m%d", time.gmtime()) + ".json"
+    r = S.post(f"{TGAPI}/sendDocument", data={"chat_id": CHAT, "caption": "💾 Weekly backup of everything I have learned (no keys inside). Keep it; if my memory is ever lost I can start from this."},
+               files={"document": (name, txt.encode("utf-8"), "application/json")}, timeout=120).json()
+    if not r.get("ok"):
+        raise RuntimeError("backup refused: " + str(r.get("description", ""))[:100])
+
+
+YPP_PROMPT = """You check a small YouTube history channel against YouTube's PUBLIC monetization rules, so its owner knows what to fix BEFORE applying to the Partner Program.
+Use web search on YouTube's official pages (support.google.com/youtube): the YouTube Partner Program policies, the "inauthentic content" policy (mass-produced or repetitive content), reused content, altered or synthetic content disclosure, copyright and reuse of other people's material, and the current eligibility thresholds. Use the current wording you find, not memory.
+Channel facts measured by the bot (do not invent others): {facts}
+Return a SHORT checklist in plain English, max 9 lines, each starting with ✅ (looks fine from these facts), ⚠️ (a risk the facts suggest) or ❓ (the owner must check it, the bot cannot see it). Cover: repetitive or template-made videos, reused or third-party material and image rights, AI-made voice or pictures and the disclosure label, accurate titles and thumbnails, copyright claims, and the thresholds. Name the rule briefly. Never promise approval. Last line: what to do first."""
+
+
+def cmd_ypp(st):
+    send("🔎 Checking your channel against YouTube's earning rules (about a minute)...")
+    tok = yt_token()
+    vs = all_videos(tok)
+    secs = [iso_seconds((v.get("contentDetails") or {}).get("duration")) for v in vs]
+    shorts = sum(1 for x in secs if 0 < x <= 180)
+    titles = [v["snippet"]["title"] for v in vs][:12]
+    ai_n = sum(1 for r in mem().get("videos", {}).values() if r.get("ai"))
+    facts = {"videos": len(vs), "shorts": shorts, "long": len(vs) - shorts, "recent_titles": titles,
+             "videos_uploaded_by_bot_with_AI_label": ai_n, "descriptions_with_article_link_and_sources_on_website": "yes, every video has an article with sources",
+             "channel_topic": "evidence-based Ancient Egypt history, narrated explainers",
+             "owner_confirms_voice_and_script": "unknown", "images_used": "AI pictures and real photos (the bot can use Wikimedia photos)"}
+    try:
+        text, sources = gemini_text(YPP_PROMPT.format(facts=json.dumps(facts, ensure_ascii=False)), search=True)
+    except Exception as e:
+        return send("I could not run the check (" + clean(e)[:80] + "). Try again later.")
+    out = text.strip()
+    if sources:
+        out += "\n\nSources:\n" + "\n".join(f"• {t_[:60]}: {u_}" for t_, u_ in sources[:4])
+    send(out[:3700] + "\n\nThis is a checklist from public pages, not a decision by YouTube. Check Studio → Earn for the official verdict.")
+
+
+def link_related(root):
+    """Every article links to 3 articles on a similar topic (keywords, title, summary), spread so no article is left without incoming links.
+    Replaces the old 'Continue:' lines. Returns pages changed."""
+    root = Path(root)
+    arts = {}
+    for p in root.glob("articles/*/index.html"):
+        t = p.read_text(encoding="utf-8")
+        tt = re.search(r"<title>(.*?)</title>", t, re.S)
+        kw = re.search(r'<meta content="([^"]*)" name="keywords"', t)
+        dk = re.search(r'class="article-deck">(.*?)</p>', t, re.S)
+        title = html.unescape(tt.group(1)).rsplit(" | ", 1)[0].strip() if tt else p.parent.name
+        text = title + " " + (html.unescape(kw.group(1)) if kw else "") + " " + (_pg_text(dk.group(1))[:200] if dk else "")
+        words = {w for w in re.findall(r"[a-z]{4,}", text.lower()) if w not in GENERIC_WORDS}
+        arts[p.parent.name] = {"path": p, "html": t, "title": title, "words": words}
+    if len(arts) < 4:
+        return 0
+    df = collections.Counter(w for a in arts.values() for w in a["words"])
+    inbound = collections.Counter()
+    picks = {}
+    order = sorted(arts, key=lambda k: len(arts[k]["words"]))
+    for k in order:
+        a = arts[k]
+        sc = []
+        for k2, b in arts.items():
+            if k2 == k:
+                continue
+            shared = a["words"] & b["words"]
+            if not shared:
+                continue
+            score = sum(1.0 / math.log(2 + df[w]) for w in shared) - 0.15 * inbound[k2]
+            sc.append((score, k2))
+        sc.sort(reverse=True)
+        picks[k] = [k2 for sc_, k2 in sc[:3] if sc_ > 0]
+        for k2 in picks[k]:
+            inbound[k2] += 1
+    for o in [k for k in arts if inbound[k] == 0]:              # nobody links to it yet: its closest article gets a 4th link
+        sc = [(sum(1.0 / math.log(2 + df[w]) for w in arts[o]["words"] & b["words"]), k2) for k2, b in arts.items() if k2 != o and arts[o]["words"] & b["words"]]
+        if sc:
+            best = max(sc)[1]
+            picks[best] = picks.get(best, []) + [o]
+            inbound[o] += 1
+    changed = 0
+    for k, a in arts.items():
+        t = a["html"]
+        m = re.search(r'(<div class="article-related">)(.*?)(<a href="/about/">)', t, re.S)
+        if not m:
+            continue
+        inner = re.sub(r'<a href="/articles/[^"]+/">(?:Continue|Related): .*?</a><br/>', "", m.group(2), flags=re.S)
+        new = "".join(f'<a href="/articles/{k2}/">Related: {html.escape(arts[k2]["title"])} →</a><br/>' for k2 in picks.get(k, []))
+        t2 = t[:m.start()] + m.group(1) + inner + new + m.group(3) + t[m.end():]
+        if t2 != t:
+            a["path"].write_text(t2, encoding="utf-8")
+            changed += 1
+    return changed
+
+
+def followup_note(row, peers_adj, pct, med_pct, subs, views, secs, title, day):
+    notes = []
+    tags = [k for k, v in type_tags(title).items() if v]
+    if peers_adj is not None:
+        if peers_adj >= 1.5:
+            notes.append("It beat your usual for its age. Note what is different (topic" + (f": {tags[0]}" if tags else "") + ", title wording, the first seconds) and make a follow-up on the same story.")
+        elif peers_adj <= 0.6:
+            notes.append("It is below your usual for its age. Next time test a different title or opening line on the same story; /whatworks shows what has worked.")
+    if pct is not None and med_pct:
+        if pct <= med_pct - 8:
+            notes.append(f"Viewers leave earlier than usual ({pct:.0f}% watched vs your usual {med_pct:.0f}%): put the surprise in the first 3 seconds and cut slow lead-ins.")
+        elif pct >= med_pct + 8:
+            notes.append(f"Viewers stayed longer than usual ({pct:.0f}% vs {med_pct:.0f}%): keep this pacing.")
+    if views >= 300 and subs == 0:
+        notes.append("Almost nobody subscribed: end with one clear line to subscribe or watch the long film (/funnel).")
+    if secs > 180 and day == 7:
+        notes.append("Long video: check chapters, the pinned comment and the end screen are set (paste its link and I do it).")
+    return notes[:3] or ["Nothing stands out yet. Compare it again at 30 days."]
+
+
+def followups(st, vids=None, now=None, limit=3):
+    """A short report 7 and 30 days after each video that came out after this feature started. Measured numbers only; the notes are rules, not guesses."""
+    m = mem()
+    now = now or time.time()
+    since = m.setdefault("fu_since", now)
+    fu = m.setdefault("followups", {})
+    tok = yt_token()
+    vids = vids if vids is not None else all_videos(tok)
+    n = nb()
+    sent = 0
+    for v in vids:
+        if sent >= limit:
+            break
+        sn = v["snippet"]
+        pub = iso_ts(sn.get("publishedAt", ""))
+        if not pub or pub < since - 86400:
+            continue
+        age = (now - pub) / 86400
+        rec = fu.setdefault(v["id"], {})
+        day = 30 if age >= 30 and "d30" not in rec else 7 if age >= 7 and "d7" not in rec else 0
+        if not day or age > 45:
+            continue
+        st_ = v.get("statistics") or {}
+        views, likes, com = int(st_.get("viewCount", 0)), int(st_.get("likeCount", 0)), int(st_.get("commentCount", 0))
+        secs = iso_seconds((v.get("contentDetails") or {}).get("duration"))
+        try:
+            vw, mins, pct, subs = an_query(tok, "views,estimatedMinutesWatched,averageViewPercentage,subscribersGained", int(age) + 2, "video==" + v["id"])
+        except Exception as e:
+            print("followup analytics:", clean(e)[:80])
+            vw, mins, pct, subs = views, 0, None, 0
+        rows = [dict(o) for o in n["obs"].values() if o.get("age", 0) >= 3 and o.get("views") is not None]
+        me = {"views": views, "age": max(age, 1), "secs": secs}
+        rows.append(me)
+        nb_adjust(rows)
+        kind_short = 0 < secs <= 60
+        peers = sorted(o["pct"] for o in n["obs"].values() if o.get("pct") and (0 < o.get("secs", 0) <= 60) == kind_short)
+        med = peers[len(peers) // 2] if peers else None
+        adj = me.get("adj")
+        lines = [f"📆 {day}-day follow-up: {sn['title'][:70]}", "",
+                 f"• Views {views:,}" + (f" ({adj:.1f}x what videos of this kind usually have at this age)" if adj else ""),
+                 f"• Likes {likes}, comments {com}, new subscribers {int(subs)}"]
+        if pct is not None and mins:
+            lines.append(f"• Watched on average {pct:.0f}%" + (f" (your usual {med:.0f}%)" if med else "") + f", {mins:.0f} minutes in total")
+        if day == 30 and rec.get("d7"):
+            a_ = rec["d7"].get("views", 0)
+            lines.append(f"• Views at day 7: {a_:,} → now {views:,}" + (f" ({(views - a_) / a_ * 100:+.0f}%)" if a_ else ""))
+        lines.append("\nNext time:")
+        lines += ["• " + x for x in followup_note(me, adj, pct, med, int(subs), views, secs, sn["title"], day)]
+        rec["d%d" % day] = {"views": views, "ts": now}
+        send("\n".join(lines))
+        sent += 1
+    return sent
 
 
 
@@ -15553,6 +15853,7 @@ def write_article(c, st):
                 relink_series(root, pls)
                 prune_dead_series(root)
                 fix_img_alts(root)
+                link_related(root)
                 hieroglyph_numbers(root)
                 add_series_nav(root)
                 sm_ = root / "sitemap.xml"
