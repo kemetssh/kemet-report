@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.231"
+BOT_VERSION = "v10.232"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -14730,7 +14730,9 @@ def site_fix_items(root):
         art, _v, _p, srcs = page_article(p.read_text(encoding="utf-8"))
         good = any(_trusted_source_url(u) for _, u in srcs)
         short = article_words(art) < ART_MIN_WORDS
-        few = len(srcs) < 3 or not good
+        real = [x for x in srcs if not _junk_source(x[1])]
+        lim_ = (mem().get("src_limit") or {}).get(p.parent.name)
+        few = (len(real) < 3 and not (lim_ is not None and len(real) >= lim_)) or not good     # same rule as the weekly check (v10.232)
         it = {"slug": p.parent.name, "title": art["title"]}
         if short:
             out.append(dict(it, task="deep"))
@@ -14791,7 +14793,7 @@ def fixq_step(st):
             with tempfile.TemporaryDirectory() as d:
                 root = site_zip_from(mem()["site_zip"]["file_id"], d)
                 art, _v, _p, srcs = page_article((root / "articles" / it["slug"] / "index.html").read_text(encoding="utf-8"))
-            if len(srcs) >= 3 and any(_trusted_source_url(u) for _, u in srcs):
+            if len([x for x in srcs if not _junk_source(x[1])]) >= 3 and any(_trusted_source_url(u) for _, u in srcs):
                 q["log"].append(f"✅ {it['title'][:50]}: sources already good")
                 return fixq_finish(st) if not q["items"] else None
         except Exception as e:
