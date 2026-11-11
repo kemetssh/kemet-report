@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.228"
+BOT_VERSION = "v10.230"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -10908,9 +10908,10 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/merge - merge playlists\n"
         "/publish - put the site live\n"
         "/siteweek - website check\n"
-        "/seocheck - SEO + AI search check\n"
-        "/copycheck - find sites copying you\n"
-        "/scoreboard - this week vs last week\n"
+        "/seocheck - SEO + AI check\n"
+        "/copycheck - find copycats\n"
+        "/addsource words | link - add a source\n"
+        "/scoreboard - week vs last week\n"
         "/ypp - earning rules check\n"
         "/synctitles - site film titles = YouTube\n"
         "/needvideos - articles without a video\n"
@@ -10935,7 +10936,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/community - posts for your newest video\n"
         "/starter - comment-getting question\n"
         "/sublines - rotate the subscribe line\n"
-        "/chapters - add timestamps to long videos\n/learnexport - learning notes file\n/fbcomments - reply to Facebook comments\n/fbviews - Facebook vs YouTube views\n"
+        "/chapters - add timestamps to long videos\n/learnexport - notes file\n/fbcomments - reply to Facebook comments\n/fbviews - Facebook vs YouTube views\n"
         "/flow - Google Flow prompts for a Short\n"
         "/hook - 3 opening lines for your next Short\n"
         "/goal 100 - set a subscriber goal\n"
@@ -10948,7 +10949,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/poll - feedback poll: what to film next\n"
         "/cadence 3 - how often to post\n"
         "/links /addlink /removelink - description links\n"
-        "/health - check that everything works\n/selftest - the bot tests itself\n/viral - what is taking off\n/pause /resume - stop/restart messages\n"
+        "/health - check that everything works\n/selftest - the bot tests itself\n/viral - what is taking off\n/pause /resume - mute/unmute\n"
         "Or just write or speak to me normally: I work out what you want.\n"
         "/results - how your latest video is doing\n/plan - this week's plan\n"
         "/lessons - what I have learned about your channel\n"
@@ -11566,6 +11567,8 @@ def on_message(msg, st):
         cmd_sitelogo(st)
     elif text.startswith("/searchdata"):
         cmd_searchdata(st)
+    elif text.startswith("/addsource"):
+        cmd_addsource(st, raw)
     elif text.startswith("/scoreboard"):
         cmd_scoreboard(st)
     elif text.startswith("/ypp"):
@@ -14533,6 +14536,106 @@ def weak_articles(root):
     return out
 
 
+def cmd_addsource(st, raw):
+    """v10.229: /addsource <words of the article title> | <link>  adds one source YOU found. The bot checks the host is a museum, university or journal,
+    that the page opens, and that it is about the topic, then updates the article's Sources and Key sources."""
+    body = re.sub(r"^/addsource\S*\s*", "", raw or "", flags=re.I).strip()
+    if "|" not in body:
+        return send("Send it like this:\n/addsource war deities | https://www.ees.ac.uk/resource/the-lintel-of-ahmose-and-montu.html\n"
+                    "Before the | write a few words of the article's title; after it, the web address of the museum, university or journal page.")
+    words, _, url = [x.strip() for x in body.partition("|")]
+    m = re.search(r"https?://\S+", url)
+    if not words or not m:
+        return send("I need a few words of the article's title, then |, then the full web address.")
+    url = m.group().rstrip(".,)")
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("Send me your current site .zip first.")
+    if not _trusted_source_url(url) or _blocked_source_url(url) or _junk_source(url):
+        return send("I do not accept that address as a source: it is not on my list of museum, university and journal sites, or it is a children's or general page. "
+                    "Send a page from a museum, university or journal and I add it.")
+    try:
+        r = S.get(url, timeout=40, headers={"User-Agent": "Mozilla/5.0 (compatible; KemetBot/1.0)"})
+    except Exception as e:
+        return send("I could not open that page (" + clean(e)[:80] + "). Check the address.")
+    if not r.ok:
+        return send(f"That page answered HTTP {r.status_code}, so I did not add it.")
+    ttl_m = re.search(r"<title[^>]*>(.*?)</title>", r.text, re.S | re.I)
+    ptitle = re.sub(r"\s+", " ", html.unescape(ttl_m.group(1))).strip()[:140] if ttl_m else url
+    text_ = _pg_text(r.text[:400000]).lower()
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        cands = sorted(((title_overlap(words, p.parent.name.replace("-", " ")), p.parent.name) for p in Path(root).glob("articles/*/index.html")), reverse=True)
+        if not cands or cands[0][0] < 0.2:
+            return send("I could not match those words to an article title. Use 3 or 4 distinctive words from the title.")
+        slug = cands[0][1]
+        pg = root / "articles" / slug / "index.html"
+        art, vid, pub, old_srcs = page_article(pg.read_text(encoding="utf-8"))
+        topic = [w for w in re.findall(r"[a-z]{5,}", art["title"].lower()) if w not in GENERIC_WORDS]
+        hits = [w for w in topic if w in text_]
+        if topic and len(hits) < 1:
+            return send(f"That page does not seem to be about \"{art['title'][:60]}\" (none of its key words appear), so I did not add it.")
+        if any(u.rstrip("/") == url.rstrip("/") for _, u in old_srcs):
+            return send("That source is already listed on the article.")
+        srcs = rank_sources(dedupe_sources([(ptitle, url)] + [tuple(x) for x in old_srcs], 16))[:8]
+        tok = yt_token()
+        v = {"id": vid, "title": art["title"], "desc": "", "published": pub, "iso": "", "secs": 0}
+        try:
+            it = (yt_get("videos", tok, part="snippet,contentDetails", id=vid).get("items") or [None])[0]
+            if it:
+                v.update(title=it["snippet"]["title"], desc=it["snippet"].get("description", ""), published=it["snippet"].get("publishedAt", pub),
+                         iso=it["contentDetails"].get("duration", ""), secs=iso_seconds(it["contentDetails"].get("duration", "")))
+        except Exception as e:
+            print("video facts:", clean(e)[:100])
+        cat = site_catalog(root)
+        others = sorted([x for x in cat if x["slug"] != slug], key=lambda x: x["pub"], reverse=True)
+        series = None
+        try:
+            for pl in site_playlists(tok):
+                if vid in [i["id"] for i in pl["items"]]:
+                    series = {"title": pl["title"], "slug": pl_slug(pl)}
+                    break
+        except Exception as e:
+            print("series:", clean(e)[:100])
+        pg.write_text(art_page(art, v, slug, srcs, others, series), encoding="utf-8")
+        build_listing(root, site_catalog(root))
+        real = [x for x in srcs if not _junk_source(x[1])]
+        if len(real) >= 3:
+            (mem().get("src_limit") or {}).pop(slug, None)
+        r_ = pack_site(root, d, f"🏛 Site updated: added a source to {art['title']}.")
+    if not r_.get("ok"):
+        return send("Telegram refused the file: " + str(r_.get("description", ""))[:120])
+    send(f"✅ Added to \"{art['title'][:60]}\": {ptitle[:80]}\nIt now lists {len(real)} real source(s). I only checked that the page opens and mentions the topic; read it yourself to make sure it supports what the article says.")
+    offer_publish(st)
+
+
+_KW_GENERIC = {"ancient egypt", "egypt", "history", "archaeology", "mythology", "deities", "religion", "egyptology", "ancient egyptian", "culture", "pharaoh", "pharaohs"}
+
+
+def entity_sources(art, have=0, max_searches=5):
+    """v10.230: when the usual title search finds too few sources, search for the NAMES in the article (its keywords, such as Montu or Sekhmet) on museum,
+    university and journal sites. A result counts only if its title or text really mentions the name. Returns [(title, url)]."""
+    names = [k for k in art.get("kw", []) if k.lower() not in _KW_GENERIC and len(k) > 3][:3]
+    if not names:
+        names = [w for w in re.findall(r"\b[A-Z][a-z]{3,}\b", " ".join(h["h"] for h in art.get("sections", []))) if w.lower() not in _KW_GENERIC][:2]
+    out, used = [], 0
+    for nm in names:
+        for q in (f"{nm} ancient Egypt museum collection", f"{nm} Egyptologist study university"):
+            if used >= max_searches:
+                return dedupe_sources(out, 8)
+            used += 1
+            try:
+                for x in web_search(q, 6):
+                    if _trusted_source_url(x["url"]) and not _blocked_source_url(x["url"]) and not _junk_source(x["url"]) \
+                            and nm.lower() in (x.get("title", "") + " " + (x.get("content") or "")[:1500]).lower():
+                        out.append((x["title"], x["url"]))
+            except Exception as e:
+                print("entity search:", clean(e)[:100])
+        if len(rank_sources(dedupe_sources(out, 8))) + have >= 4:
+            break
+    return dedupe_sources(out, 8)
+
+
 def resource_article(item, st):
     """Look for museum, university and journal sources for an article, check its claims against them, soften what they do not support, and add the good sources."""
     sz = mem().get("site_zip")
@@ -14557,6 +14660,17 @@ def resource_article(item, st):
             if len(dedupe_sources(found, 8)) >= 4:
                 break
         found = dedupe_sources(found, 8)
+    try:                                       # still thin: search for the names inside the article (v10.230)
+        if len(rank_sources(found)) < 3:
+            with tempfile.TemporaryDirectory() as d0:
+                root0 = site_zip_from(sz["file_id"], d0)
+                pgx = root0 / "articles" / item["slug"] / "index.html"
+                if pgx.exists():
+                    art0, _v0, _p0, old0 = page_article(pgx.read_text(encoding="utf-8"))
+                    extra = entity_sources(art0, have=len([x for x in old0 if not _junk_source(x[1])]))
+                    found = dedupe_sources(list(found) + extra, 8)
+    except Exception as e:
+        print("entity fallback:", clean(e)[:100])
     if not found:
         return send("I could not find a museum, university or journal page for this topic right now (search may be busy). I left the article as it is. Try again later.")
     with tempfile.TemporaryDirectory() as d:
