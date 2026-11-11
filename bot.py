@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.236"
+BOT_VERSION = "v10.237"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -8435,6 +8435,33 @@ def ig_open_comments(cfg, cap=12):
     return got[:cap], errs
 
 
+def cmd_fbdebug(st):
+    """v10.237: raw probe of what Facebook returns for comments, to find why none are readable."""
+    cfg = fb_cfg()
+    if not cfg:
+        return send("Facebook is not connected. Send /fbsetup.")
+    L = []
+    def probe(label, path, **prm):
+        try:
+            j = fb_call("GET", path, params=dict({"access_token": cfg["token"]}, **prm))
+            L.append(f"✓ {label}: " + json.dumps(j, ensure_ascii=False)[:330])
+        except Exception as e:
+            L.append(f"✗ {label}: " + clean(e)[:200])
+    try:
+        d = (fb_call("GET", "debug_token", params={"input_token": cfg["token"], "access_token": cfg["token"]}).get("data") or {})
+        L.append(f"Key: type={d.get('type')} valid={d.get('is_valid')} app={str(d.get('app_id'))[-4:]} expires={d.get('expires_at')} data_access_expires={d.get('data_access_expires_at')}")
+    except Exception as e:
+        L.append("Key check: " + clean(e)[:120])
+    probe("Page", cfg["page_id"], fields="name,id,link")
+    probe("feed", f"{cfg['page_id']}/feed", fields="id,message,created_time,comments.limit(2).summary(true){id,message,attachment}", limit=3)
+    probe("published_posts", f"{cfg['page_id']}/published_posts", fields="id,created_time,comments.summary(true).limit(1)", limit=2)
+    items, _e = fb_items(cfg, 3)
+    for pid_, t in items[:2]:
+        probe(f"{pid_[-6:]} comments", f"{pid_}/comments", summary="true", limit=3)
+        probe(f"{pid_[-6:]} object", pid_, fields="id,comments.limit(0).summary(true),reactions.limit(0).summary(true),permalink_url")
+    send("🔬 Facebook probe:\n" + "\n\n".join(L))
+
+
 def cmd_igcomments(st):
     cfg = fb_cfg()
     if not cfg:
@@ -11705,6 +11732,8 @@ def on_message(msg, st):
         cmd_fbviews(st)
     elif text == "/fbcomments":
         cmd_fbcomments(st)
+    elif text == "/fbdebug":
+        cmd_fbdebug(st)
     elif text == "/igcomments":
         cmd_igcomments(st)
     elif text == "/allcomments":
