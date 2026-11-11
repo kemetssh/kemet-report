@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.234"
+BOT_VERSION = "v10.236"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -3461,6 +3461,23 @@ def follow_up(tok, cid, chid):
             "author": last["snippet"].get("authorDisplayName", "")}
 
 
+def own_thread_reply(tok, cid, chid, own_text):
+    """v10.235: a viewer wrote under one of the CHANNEL'S OWN comments (for example the pinned question). Returns the thread to answer, or None."""
+    try:
+        rs = yt_get("comments", tok, part="snippet", parentId=cid, maxResults=20, textFormat="plainText")["items"]
+    except Exception:
+        return None
+    if not rs:
+        return None
+    who = lambda r: r["snippet"].get("authorChannelId", {}).get("value")
+    last = rs[-1]
+    if who(last) == chid or sum(1 for r in rs if who(r) == chid) >= 2:
+        return None
+    thread = "Kemet: " + own_text[:300] + "\n" + "\n".join(("Kemet" if who(r) == chid else r["snippet"].get("authorDisplayName", "Viewer")) + ": " +
+                                                      r["snippet"].get("textOriginal", "")[:300] for r in rs[-3:])
+    return {"key": last["id"], "thread": thread, "text": last["snippet"].get("textOriginal", "")[:500], "author": last["snippet"].get("authorDisplayName", "")}
+
+
 def cmd_comments(st, full=False):
     send("Checking ALL your comments that have no reply from you..." if full else "Checking new comments...")
     tok = yt_token()
@@ -3481,6 +3498,10 @@ def cmd_comments(st, full=False):
             cid = top["id"]
             author_id = top["snippet"].get("authorChannelId", {}).get("value")
             if author_id == chid:
+                if t["snippet"].get("totalReplyCount", 0) > 0:
+                    fu = own_thread_reply(tok, cid, chid, top["snippet"].get("textOriginal", ""))
+                    if fu and fu["key"] not in skip_ids:
+                        items.append({"id": cid, "key": fu["key"], "video": v["snippet"]["title"], "author": fu["author"], "text": fu["text"], "thread": fu["thread"]})
                 continue
             if t["snippet"].get("totalReplyCount", 0) > 0:
                 if not full or cid in pending:
@@ -3510,6 +3531,7 @@ def cmd_comments(st, full=False):
             if not it:
                 continue
             seen.add(it["id"])
+            seen.add(it.get("key", it["id"]))
             reply = (r.get("reply") or "").replace('"', "'").strip()[:500]
             if r.get("action") != "reply" or not reply:
                 held.append(it)
@@ -3793,7 +3815,7 @@ def on_prop(jid, act, st):
         st["props"].pop(jid, None)
         return send("Skipped.")
     if act == "fbr" and kind == "fbcomment":
-        fb_post_reply(prop["cid"], prop["reply"])
+        (ig_post_reply if prop.get("ig") else fb_post_reply)(prop["cid"], prop["reply"])
         mem()["fbseen"] = ((mem().get("fbseen") or []) + [prop["cid"], prop.get("ck", "")])[-1500:]
         st["props"].pop(jid, None)
         return send("✅ Reply posted on Facebook.")
@@ -5956,6 +5978,10 @@ def housekeeping(st):
                 step()
             except Exception as e:
                 print("housekeeping:", clean(e))
+    try:
+        daily_comments(st)
+    except Exception as e:
+        print("daily comments:", clean(e)[:120])
     try:
         daily_idea_taps(st)
     except Exception as e:
@@ -8257,6 +8283,19 @@ def fb_open_comments(cfg, cap=12):
         except Exception as e:
             errs.append(clean(e)[:100])
             continue
+        if not j.get("data") and stats["items"] and (pid_, title) in items[:4]:
+            # v10.236: nothing came back for a recent post. Retry the ways Facebook still lists comments (all comments, then fewer fields),
+            # and remember what it answered so the report can say why.
+            for tag_, prm_ in (("stream", {"filter": "stream", "order": "reverse_chronological", "fields": "id,message,from,created_time,comment_count,attachment{type,title,description}"}),
+                               ("plain", {"fields": "id,message,created_time,attachment"})):
+                try:
+                    j2 = fb_call("GET", f"{pid_}/comments", params=dict({"access_token": cfg["token"], "limit": 25, "summary": "true"}, **prm_))
+                    stats.setdefault("diag", []).append(f"{pid_[-6:]} {tag_}: {len(j2.get('data', []))} read, Facebook counts {(j2.get('summary') or {}).get('total_count', '?')}")
+                    if j2.get("data"):
+                        j = j2
+                        break
+                except Exception as e:
+                    stats.setdefault("diag", []).append(f"{pid_[-6:]} {tag_}: {clean(e)[:70]}")
         stats["claimed"] += int((j.get("summary") or {}).get("total_count", 0) or 0)
         stats["seen"] += len(j.get("data", []))
         for c in j.get("data", []):
@@ -8313,6 +8352,8 @@ def cmd_fbcomments(st):
                            else ("\nThe permissions are all there. " + ("The comments I can see are ones you already answered or skipped, so none is waiting." if fl.get("seen") else "Your newest posts simply have no comments yet."))))
         except Exception as e:
             why += "\n(I could not read the key's permissions: " + clean(e)[:80] + ")"
+        if fl.get("diag"):
+            why += "\nWhat Facebook answered for the newest posts: " + "; ".join(fl["diag"][:6])
         return send("No Facebook comments are waiting for a reply." + why + (f"\n(Facebook said: {errs[0]})" if errs else ""))
     seen = mem().setdefault("fbseen", [])
     liked, nolike = 0, ""
@@ -8364,6 +8405,111 @@ def cmd_fbcomments(st):
     del seen[:-1500]
     if not drafts:
         send("Nothing here is worth a reply (spam or abuse).")
+
+
+def ig_open_comments(cfg, cap=12):
+    """v10.235: unanswered comments on the newest Instagram posts and reels (read through the Facebook Page key). Returns (items, errors)."""
+    pg = fb_call("GET", cfg["page_id"], params={"access_token": cfg["token"], "fields": "instagram_business_account{id,username}"})
+    ig = pg.get("instagram_business_account") or {}
+    if not ig.get("id"):
+        raise RuntimeError("no Instagram account is linked to the Page")
+    me = (ig.get("username") or "").lower()
+    media = fb_call("GET", f"{ig['id']}/media", params={"access_token": cfg["token"], "limit": 10, "fields": "id,caption"}).get("data", [])
+    done = {str(x) for x in (mem().get("fbseen") or [])}
+    got, errs = [], []
+    for m_ in media:
+        try:
+            cs = fb_call("GET", f"{m_['id']}/comments", params={"access_token": cfg["token"], "limit": 25,
+                                                               "fields": "id,text,username,timestamp,replies{username}"}).get("data", [])
+        except Exception as e:
+            errs.append(clean(e)[:100])
+            continue
+        for c in cs:
+            cid = str(c.get("id") or "")
+            txt = re.sub(r"\s+", " ", c.get("text") or "").strip()
+            if not cid or cid in done or not txt or (c.get("username") or "").lower() == me:
+                continue
+            if any((r.get("username") or "").lower() == me for r in (c.get("replies") or {}).get("data", [])):
+                continue
+            got.append({"id": cid, "ck": cid, "video": (m_.get("caption") or "Instagram post")[:50], "author": c.get("username", "A viewer"), "text": txt[:500]})
+    return got[:cap], errs
+
+
+def cmd_igcomments(st):
+    cfg = fb_cfg()
+    if not cfg:
+        return send("Facebook is not connected yet (Instagram is read through the Page). Send /fbsetup.")
+    send("Checking Instagram comments...")
+    try:
+        items, errs = ig_open_comments(cfg)
+    except Exception as e:
+        return send("Instagram comments could not be read: " + clean(e)[:140] + ". The key needs instagram_manage_comments: send /fbsetup, add it in step 4, then /fbconnect.")
+    if not items:
+        return send("No Instagram comments are waiting for a reply." + (f"\n(Instagram said: {errs[0]})" if errs else ""))
+    seen = mem().setdefault("fbseen", [])
+    out = gemini([{"text": FB_STYLE.replace("FACEBOOK", "INSTAGRAM") + COMMENTS_PROMPT + json.dumps(items)}])
+    by = {i["id"]: i for i in items}
+    n = 0
+    for r in out.get("items", []):
+        it = by.get(r.get("id"))
+        if not it:
+            continue
+        reply = (r.get("reply") or "").replace('"', "'").strip()[:500]
+        if r.get("action") != "reply" or not reply:
+            seen.append(it["id"])
+            continue
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "fbcomment", "cid": it["id"], "ck": it["id"], "reply": reply, "ig": True, "created": time.time()}
+        send(f"📸 {it['author']} on \"{it['video']}\":\n{it['text']}\n\nDraft reply:\n{reply}", [[btn("✅ Post reply", pid, "fbr"), btn("Skip", pid, "fbn")]])
+        n += 1
+    del seen[:-1500]
+    if not n:
+        send("Nothing on Instagram is worth a reply (spam or abuse).")
+
+
+def ig_post_reply(cid, text):
+    cfg = fb_cfg()
+    try:
+        fb_call("POST", f"{cid}/replies", data={"message": text, "access_token": cfg["token"]})
+    except RuntimeError as e:
+        raise RuntimeError("Instagram did not allow replying: the key lacks instagram_manage_comments. Send /fbsetup, add it in step 4, then /fbconnect. (" + clean(e)[:80] + ")")
+
+
+def daily_comments(st, force=False):
+    """v10.235: every day from 9:00 Cairo time, check YouTube, Facebook and Instagram comments once and send reply drafts for approval."""
+    m = mem()
+    now_c = datetime.datetime.now(cairo_zone())
+    day = now_c.strftime("%Y-%m-%d")
+    if not force and (now_c.hour < 9 or m.get("comments_day") == day or time.time() - m.get("comments_try", 0) < 1800):
+        return
+    m["comments_try"] = time.time()
+    m["comments_day"] = day
+    stats = {"drafts": 0}
+    real_send = globals()["send"]
+    quiet = ("Checking", "No new comments", "No comments are", "No Facebook comments", "No Instagram comments", "Nothing here", "Nothing on Instagram")
+    def filt(text, rows=None, *a, **k):
+        if rows:
+            stats["drafts"] += 1
+            return real_send(text, rows, *a, **k)
+        if str(text).startswith(quiet):
+            return None
+        return real_send(text, rows, *a, **k) if rows is not None else real_send(text, *a, **k)
+    problems = []
+    globals()["send"] = filt
+    try:
+        for name, fn in (("YouTube", lambda: cmd_comments(st)), ("Facebook", lambda: cmd_fbcomments(st)), ("Instagram", lambda: cmd_igcomments(st))):
+            if name != "YouTube" and not fb_cfg():
+                continue
+            try:
+                fn()
+            except Exception as e:
+                problems.append(f"{name}: {clean(e)[:90]}")
+    finally:
+        globals()["send"] = real_send
+    msg = "☀️ Morning comments: " + (f"{stats['drafts']} draft repl{'y' if stats['drafts'] == 1 else 'ies'} above, tap ✅ to post." if stats["drafts"] else "nothing is waiting on YouTube, Facebook or Instagram.")
+    if problems:
+        msg += "\n⚠️ " + "; ".join(problems)
+    real_send(msg)
 
 
 def fb_post_reply(cid, text):
@@ -10961,7 +11107,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/community - posts for your newest video\n"
         "/starter - comment-getting question\n"
         "/sublines - rotate the subscribe line\n"
-        "/chapters - add timestamps to long videos\n/learnexport - notes file\n/fbcomments - reply to Facebook comments\n/fbviews - Facebook vs YouTube views\n"
+        "/chapters - timestamps for long videos\n/learnexport - notes file\n/allcomments - YouTube+Facebook+Instagram comments (auto 9:00 Cairo)\n/fbviews - Facebook views\n"
         "/flow - Google Flow prompts for a Short\n"
         "/hook - 3 opening lines for your next Short\n"
         "/goal 100 - set a subscriber goal\n"
@@ -11559,6 +11705,10 @@ def on_message(msg, st):
         cmd_fbviews(st)
     elif text == "/fbcomments":
         cmd_fbcomments(st)
+    elif text == "/igcomments":
+        cmd_igcomments(st)
+    elif text == "/allcomments":
+        daily_comments(st, force=True)
     elif text == "/flow" or text.startswith("/flow "):
         cmd_flow(st, text)
     elif text == "/health":
