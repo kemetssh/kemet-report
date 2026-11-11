@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.232"
+BOT_VERSION = "v10.234"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -3138,6 +3138,7 @@ Voice: warm, calm, short (1-2 sentences), no emoji spam, never argue, never prom
 only state facts you are sure of. For each comment decide: "reply" (praise, question, interest)
 or "hold" (rude, hateful, spam, scam links, bait; these get a separate evidence check).
 For a first-time viewer's praise or question, you may occasionally (not in every reply) end with a gentle welcome such as "Welcome aboard, more Egypt stories are coming.", never pushy.
+Some comments are only a GIF, sticker or photo with no words (shown like "[sent a GIF with no text]"). You cannot see the picture, so never describe it or guess its meaning: reply with a short, warm, generic thanks (for example "Thank you for watching and for the reaction!"), and vary the wording from one comment to the next.
 Some comments carry a "thread": an exchange where the channel already replied and the viewer wrote back. Then answer the viewer's LATEST message:
 never repeat what was already said, keep it to 1-2 sentences, and if they insist on something unsupported, say once, calmly, that the evidence does not support it and stop. Return JSON only:
 {"items": [{"id": "...", "action": "reply" or "hold", "reply": "text, empty if hold"}]}
@@ -8252,7 +8253,7 @@ def fb_open_comments(cfg, cap=12):
     for pid_, title in items:
         try:
             j = fb_call("GET", f"{pid_}/comments", params={"access_token": cfg["token"], "limit": 25, "filter": "toplevel", "summary": "true",
-                                                          "fields": "id,message,from,created_time,comment_count"})
+                                                          "fields": "id,message,from,created_time,comment_count,attachment{type,title,description}"})
         except Exception as e:
             errs.append(clean(e)[:100])
             continue
@@ -8261,7 +8262,12 @@ def fb_open_comments(cfg, cap=12):
         for c in j.get("data", []):
             cid = str(c.get("id") or "").strip()
             author = c.get("from") or {}
-            text = re.sub(r"\s+", " ", (c.get("message") or "").strip()).casefold()[:120]
+            raw_msg = (c.get("message") or "").strip()
+            at = c.get("attachment") or {}
+            if not raw_msg and at:       # GIF, sticker, photo or video with no words (v10.233)
+                kind_ = {"animated_image_share": "GIF", "animated_image_autoplay": "GIF", "sticker": "sticker", "photo": "photo", "video_inline": "video", "share": "link"}.get(at.get("type", ""), at.get("type") or "picture")
+                raw_msg = f"[sent a {kind_}" + (f": {(at.get('title') or at.get('description') or '')[:80]}" if (at.get("title") or at.get("description")) else "") + " with no text]"
+            text = re.sub(r"\s+", " ", raw_msg).casefold()[:120]
             # Facebook IDs are the primary key. The fallback is scoped to
             # post + author ID + normalized text and never uses display names.
             ck = cid or ("fallback:" + hashlib.sha1((str(pid_) + "|" + str(author.get("id") or "") + "|" + text).encode()).hexdigest()[:20])
@@ -8279,7 +8285,7 @@ def fb_open_comments(cfg, cap=12):
                         continue
                 except Exception:
                     pass
-            got.append({"id": cid or ck, "ck": ck, "video": title, "author": author.get("name", "A viewer"), "text": c["message"][:500]})
+            got.append({"id": cid or ck, "ck": ck, "video": title, "author": author.get("name", "A viewer"), "text": raw_msg[:500]})
     return got[:cap], errs
 
 
@@ -8309,6 +8315,25 @@ def cmd_fbcomments(st):
             why += "\n(I could not read the key's permissions: " + clean(e)[:80] + ")"
         return send("No Facebook comments are waiting for a reply." + why + (f"\n(Facebook said: {errs[0]})" if errs else ""))
     seen = mem().setdefault("fbseen", [])
+    liked, nolike = 0, ""
+    rest = []
+    for it in items:                    # sticker/GIF/photo-only comments: a ❤️ from the Page is the natural answer (v10.234)
+        if re.fullmatch(r"\[sent a .*with no text\]", it["text"]) and not nolike:
+            try:
+                fb_call("POST", f"{it['id']}/reactions", data={"type": "LOVE", "access_token": cfg["token"]})
+                seen.append(it["id"])
+                liked += 1
+                continue
+            except Exception as e:
+                nolike = clean(e)[:100]      # no permission (or Facebook refused): fall back to a text reply draft
+        rest.append(it)
+    items = rest
+    if liked:
+        send(f"❤️ Reacted with a heart to {liked} sticker/GIF comment(s). They are marked as handled.")
+    if nolike:
+        send("ℹ️ I could not react with a heart (" + nolike + "). If it says permission, send /fbsetup, add pages_manage_engagement in step 4, then /fbconnect. Meanwhile I draft text replies for those.")
+    if not items:
+        return
     out = gemini([{"text": FB_STYLE + COMMENTS_PROMPT + json.dumps(items)}])
     by = {i["id"]: i for i in items}
     held = []
