@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.243"
+BOT_VERSION = "v10.244"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -11784,7 +11784,7 @@ def on_message(msg, st):
             send("Nothing waiting. Send me a video any time.")
     elif not raw.startswith("/") and summary_video_id(raw) and re.search(r"\b(?:summari[sz]e|summary|tldr|tl;dr)\b", raw, re.I):
         cmd_summarize(st, raw)
-    elif (text.startswith("/check") and YT_LINK.search(raw)) or (YT_LINK.search(raw) and len(YT_LINK.sub("", raw).strip()) < 30):
+    elif (text.startswith("/check") and YT_LINK.search(raw)) or (YT_LINK.search(raw) and not text.startswith("/reply") and len(YT_LINK.sub("", raw).strip()) < 30):
         cmd_checkvideo(st, YT_LINK.search(raw).group(1))
     elif text.startswith("/articlecheck"):
         cmd_articlecheck(st)
