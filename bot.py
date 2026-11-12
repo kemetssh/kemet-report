@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.244"
+BOT_VERSION = "v10.245"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -14186,22 +14186,60 @@ def cmd_seocheck(st):
     if a["geo"].get("no_faq"):
         pid = new_pid(st)
         st["props"][pid] = {"type": "seofix", "created": time.time()}
-        rows = [[btn(f"➕ Add FAQ markup to up to {len(a['geo']['no_faq'])} articles", pid, "sq"), btn("Skip", pid, "sx")]]
+        rows = [[btn(f"➕ Fix FAQ for up to {len(a['geo']['no_faq'])} articles", pid, "sq"), btn("Skip", pid, "sx")]]
     send(seo_report(a) + "\n\nThe bot also tells Bing about new and changed pages by itself every time you Publish (IndexNow). Google still needs a manual request in Search Console."
-         + ("\n\nThe FAQ button only copies each question heading and the first paragraph under it into hidden markup. Nothing visible changes, nothing is invented." if rows else ""), rows)
+         + ("\n\nThe FAQ button turns a few statement headings into questions (same meaning, no new facts) and copies them into hidden markup. Links never change." if rows else ""), rows)
+
+
+def seo_questions(root, limit=5):
+    """Turns statement headings into questions (same meaning, same section, no new facts) in articles with fewer than 3 question headings.
+    Page addresses never change. Returns number of pages changed. At most `limit` pages per run to spare the free AI quota."""
+    changed = 0
+    for p in sorted(Path(root).glob("articles/*/index.html")):
+        if changed >= limit:
+            break
+        t = p.read_text(encoding="utf-8")
+        have = len(re.findall(r"<h2>[^<]*\?</h2>", t))
+        if have >= 3 or '"FAQPage"' in t:
+            continue
+        cands = [(h, _pg_text(a)) for h, a in re.findall(r"<h2>([^<?]*)</h2>\s*<p>(.*?)</p>", t, re.S) if len(_pg_text(a).split()) >= 12]
+        need = 4 - have
+        cands = cands[:max(need, 0)]
+        if len(cands) < need - 0 or len(cands) + have < 3:
+            continue
+        listing = "\n".join(f"{i + 1}) Heading: {_pg_text(h)}\n   First paragraph: {' '.join(a.split()[:45])}" for i, (h, a) in enumerate(cands))
+        prompt = ("Rewrite each statement heading of a history article as a short, natural question (under 90 characters) that the paragraph below it directly answers. "
+                  "Keep the same meaning and the same topic. Do not add facts, names or numbers that are not in the heading or paragraph. Keep the language of the heading.\n" + listing +
+                  "\nAnswer ONLY with a JSON array of " + str(len(cands)) + " strings, each ending with a question mark.")
+        try:
+            r = _gpost({"contents": [{"parts": [{"text": prompt}]}]})
+            raw = "".join(x.get("text", "") for x in r.json()["candidates"][0]["content"]["parts"])
+            qs = json.loads(re.search(r"\[.*\]", raw, re.S).group(0))
+        except GeminiBusy:
+            break
+        except Exception:
+            continue
+        if not (isinstance(qs, list) and len(qs) == len(cands) and all(isinstance(q, str) and q.strip().endswith("?") and 8 <= len(q.strip()) <= 110 for q in qs)):
+            continue
+        for (h, _a), q in zip(cands, qs):
+            t = t.replace(f"<h2>{h}</h2>", "<h2>" + html.escape(q.strip(), quote=True) + "</h2>", 1)
+        p.write_text(t, encoding="utf-8")
+        changed += 1
+    return changed
 
 
 def do_seofix(prop, st):
     sz = mem().get("site_zip")
     if not sz:
         return send("Send me your site .zip first.")
-    send("➕ Adding FAQ markup...")
+    send("➕ Writing question headings and FAQ markup (a few articles per tap)...")
     with tempfile.TemporaryDirectory() as d:
         root = site_zip_from(sz["file_id"], d)
+        q = seo_questions(root)
         n = seo_fix(root)
-        if not n:
-            return send("No article needed it (or none has 3 clear question-and-answer pairs). Nothing changed.")
-        r = pack_site(root, d, f"🔎 Site updated: FAQ markup added to {n} articles. Tap 🚀 Publish below to put it live.")
+        if not n and not q:
+            return send("No article needed it (or none has enough clear sections). Nothing changed.")
+        r = pack_site(root, d, f"🔎 Site updated: {q} articles got question headings, FAQ markup added to {n}. Tap 🚀 Publish below to put it live. (Run /seocheck again for the next few.)")
     if not r.get("ok"):
         return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
     offer_publish(st)
