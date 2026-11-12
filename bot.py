@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.239"
+BOT_VERSION = "v10.241"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -3138,6 +3138,7 @@ Voice: warm, calm, short (1-2 sentences), no emoji spam, never argue, never prom
 only state facts you are sure of. For each comment decide: "reply" (praise, question, interest)
 or "hold" (rude, hateful, spam, scam links, bait; these get a separate evidence check).
 For a first-time viewer's praise or question, you may occasionally (not in every reply) end with a gentle welcome such as "Welcome aboard, more Egypt stories are coming.", never pushy.
+When a comment is only praise or a reaction (for example "wonderful", "great video", emojis), still thank them warmly AND add ONE short, well-established fact about the topic of that video (taken from the video title), so the reply teaches something. Keep it to 2 short sentences, use only widely accepted facts with no invented numbers or dates, and say "scholars think" when it is an interpretation. 
 Some comments are only a GIF, sticker or photo with no words (shown like "[sent a GIF with no text]"). You cannot see the picture, so never describe it or guess its meaning: reply with a short, warm, generic thanks (for example "Thank you for watching and for the reaction!"), and vary the wording from one comment to the next.
 Some comments carry a "thread": an exchange where the channel already replied and the viewer wrote back. Then answer the viewer's LATEST message:
 never repeat what was already said, keep it to 1-2 sentences, and if they insist on something unsupported, say once, calmly, that the evidence does not support it and stop. Return JSON only:
@@ -3818,7 +3819,7 @@ def on_prop(jid, act, st):
         (ig_post_reply if prop.get("ig") else fb_post_reply)(prop["cid"], prop["reply"])
         mem()["fbseen"] = ((mem().get("fbseen") or []) + [prop["cid"], prop.get("ck", "")])[-1500:]
         st["props"].pop(jid, None)
-        return send("✅ Reply posted on Facebook.")
+        return send("✅ Reply posted on " + ("Instagram." if prop.get("ig") else "Facebook."))
     if act == "fbn" and kind == "fbcomment":
         mem()["fbseen"] = ((mem().get("fbseen") or []) + [prop["cid"], prop.get("ck", "")])[-1500:]
         st["props"].pop(jid, None)
