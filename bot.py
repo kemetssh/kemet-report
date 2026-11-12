@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.241"
+BOT_VERSION = "v10.243"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -8350,7 +8350,7 @@ def cmd_fbcomments(st):
                 need = [p for p in ("pages_read_user_content", "pages_manage_engagement", "pages_read_engagement") if p not in sc]
                 why += ("\nYour Page key has: " + ", ".join(sorted(sc))[:300] + "."
                         + (("\n❌ Missing: " + ", ".join(need) + ". That is why I see no comments. Send /fbsetup, add them in step 4, then /fbconnect again.") if need
-                           else ("\nThe permissions are all there. " + ("The comments I can see are ones you already answered or skipped, so none is waiting." if fl.get("seen") else "Your newest posts simply have no comments yet."))))
+                           else ("\nThe permissions are all there. " + ("The comments I can see are ones you already answered or skipped, so none is waiting." if fl.get("seen") else "Your newest posts may have no comments yet. But if you can see comments on Facebook that I cannot, Facebook is hiding other people's comments from this app: until Meta approves the app (App Review), it only shows comments written by people with a role on the app. Test: comment from your own profile, then send /fbcomments again."))))
         except Exception as e:
             why += "\n(I could not read the key's permissions: " + clean(e)[:80] + ")"
         if fl.get("diag"):
@@ -10967,11 +10967,19 @@ def chat_remember(said, reply):
     mem()["chat_hist"] = h[-8:]
 
 
+REPLY_RULES = """Rules for every reply: write in the same language as the comment (Arabic stays Arabic). Keep it to 1-3 short sentences, warm and calm. If the comment is only praise or a reaction, thank them and add ONE short, widely accepted fact about the video's topic (use "scholars think" for interpretations; no invented numbers or dates). If it is only a sticker, GIF or emoji, reply with a short warm thanks. If it asks a question, answer it with careful, well-established facts, or say it is debated. If it is critical, stay polite and give the evidence-based point without arguing. Never add links."""
+
+
 IMG_CHAT_PROMPT = """You are the assistant of the owner of the YouTube channel "Kemet | Ancient Egypt" (short history videos).
 What you know about the channel: {context}
 Recent conversation: {history}
-He sent this file (often a screenshot of YouTube, a viewer comment, a Telegram message from you, or an error). His words with it: {text}
-First say in one short line what it shows. Then help with what he most likely needs: answer his question, explain an error and what to do, or, if it is a viewer comment, draft a short, calm, fact-careful reply he can post. Be honest; never invent facts about a video you cannot see. At most 8 short lines, plain text."""
+He sent this file (often a screenshot of comments on any app, a Telegram message from you, or an error). His words with it: {text}
+First say in one short line what it shows. Then help with what he most likely needs: answer his question, or explain an error and what to do.
+If it shows viewer comments (on Facebook, Instagram, TikTok, X or YouTube), write one reply for EVERY comment that needs one (up to 12), skipping comments written by the channel itself and spam or abuse (say "skip" for those). Format each as:
+1) Name: "the comment, shortened"
+Reply: the reply he can copy
+""" + REPLY_RULES + """
+Otherwise: at most 8 short lines, plain text. Be honest; never invent facts about a video you cannot see."""
 
 
 def handle_attachment(msg, st):
@@ -11002,6 +11010,19 @@ def handle_attachment(msg, st):
     reply = plain("".join(x.get("text", "") for x in r.json()["candidates"][0]["content"]["parts"]).strip())
     chat_remember("[sent " + str(name)[:40] + "] " + cap, reply)
     send(reply[:3800] or "I could not read that. Try a clearer screenshot.")
+
+
+def cmd_reply(st, raw, quoted=""):
+    body = (raw[len("/reply"):] if raw.lower().startswith("/reply") else raw).strip() or (quoted or "").strip()
+    if not body:
+        return send("Paste or forward the comments after /reply, or reply to a message with /reply. You can also send a screenshot of the comments. I write one reply for each, on any app.")
+    ctx = learned() + "\nRecent videos made here: " + json.dumps([r["title"] for r in mem()["videos"].values()][-8:])
+    prompt = ("You help the owner of the channel \"Kemet | Ancient Egypt\" answer viewers. What you know about the channel: " + ctx +
+              "\nHe pasted these viewer comments (any app; the video may be unknown):\n" + body[:6000] +
+              "\nWrite one reply for EVERY comment that needs one (up to 12); say \"skip\" for spam or abuse. Format each as:\n1) Name: \"the comment, shortened\"\nReply: the reply he can copy\n" +
+              REPLY_RULES + "\nPlain text only.")
+    r = _gpost({"contents": [{"parts": [{"text": prompt}]}]})
+    send(plain("".join(x.get("text", "") for x in r.json()["candidates"][0]["content"]["parts"]).strip())[:3800] or "I could not write replies for that. Send it again.")
 
 
 def route_text(text, st):
@@ -11085,7 +11106,6 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/whatworks - which video types win\n"
         "/log - send TikTok or X numbers\n"
         "/platforms - what works where\n"
-        "/money - how close to earning\n"
         "/covered - topics already made\n"
         "/instagram - read Instagram now\n"
         "/fullrefresh - refresh everything I know\n"
@@ -11135,7 +11155,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/community - posts for your newest video\n"
         "/starter - comment-getting question\n"
         "/sublines - rotate the subscribe line\n"
-        "/chapters - timestamps for long videos\n/learnexport - notes file\n/allcomments - YouTube+Facebook+Instagram comments (auto 9:00 Cairo)\n/fbviews - Facebook views\n"
+        "/chapters - timestamps for long videos\n/learnexport - notes file\n/allcomments - comments of all apps (auto 9:00 Cairo)\n/reply - paste comments, get replies\n/fbviews - Facebook views\n"
         "/flow - Google Flow prompts for a Short\n"
         "/hook - 3 opening lines for your next Short\n"
         "/goal 100 - set a subscriber goal\n"
@@ -11772,6 +11792,8 @@ def on_message(msg, st):
         cmd_sitelogo(st)
     elif text.startswith("/searchdata"):
         cmd_searchdata(st)
+    elif text.startswith("/reply"):
+        cmd_reply(st, raw, rp_)
     elif text.startswith("/addsource"):
         cmd_addsource(st, raw)
     elif text.startswith("/scoreboard"):
