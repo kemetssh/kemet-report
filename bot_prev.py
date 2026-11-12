@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.238"
+BOT_VERSION = "v10.239"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -15464,7 +15464,34 @@ def rebuild_site_hubs(root, tok):
     return len(pls)
 
 
+def trim_titles(root, limit=65):
+    """v10.239: search results cut titles over 65 characters (Bing flags them). Shortens only the <title> tag: first drops ' | Kemet', then cuts at a word. The visible headline is never touched. Returns pages changed."""
+    root = Path(root)
+    n = 0
+    for p in root.rglob("index.html"):
+        t = p.read_text(encoding="utf-8", errors="ignore")
+        m = re.search(r"<title>(.*?)</title>", t, re.S)
+        if not m:
+            continue
+        cur = html.unescape(m.group(1)).strip()
+        if len(cur) <= limit:
+            continue
+        new = cur[:-len(" | Kemet")].rstrip() if cur.endswith(" | Kemet") else cur
+        if len(new) > limit:
+            cut = new[:limit - 1].rsplit(" ", 1)[0].rstrip(" ,:;-—–")
+            new = cut + "…" if len(cut) >= 25 else new
+        if new != cur and 25 <= len(new) <= limit:
+            t2 = t[:m.start()] + "<title>" + html.escape(new) + "</title>" + t[m.end():]
+            p.write_text(t2, encoding="utf-8")
+            n += 1
+    return n
+
+
 def pack_site(root, d, caption):
+    try:
+        trim_titles(root)         # titles that search engines would cut (v10.239)
+    except Exception as e:
+        print("trim titles:", clean(e)[:120])
     try:
         seo_fix(root)             # FAQ markup on every new article, automatically
     except Exception as e:
