@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.237"
+BOT_VERSION = "v10.238"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -14530,9 +14530,69 @@ def cmd_ypp(st):
     send(out[:3700] + "\n\nThis is a checklist from public pages, not a decision by YouTube. Check Studio → Earn for the official verdict.")
 
 
+PRIVACY_BODY = """<h2>Who we are.</h2>
+<p>Kemet is an independent Ancient Egypt history channel and website (kemet-stories.pages.dev). This page explains what information the website and the tools behind it handle, in plain words.</p>
+<h2>This website.</h2>
+<ul>
+<li>The site has no accounts, no advertising and no tracking cookies of our own.</li>
+<li>The site is hosted by Cloudflare, which keeps standard server logs and privacy-friendly visit counts (pages viewed, country). These are used only to see which articles are read.</li>
+<li>If you type a question into the optional question box, the text you send is delivered to the person who runs Kemet so it can be answered. Please do not include personal details in it.</li>
+</ul>
+<h2>The tools Kemet uses on its own accounts.</h2>
+<p>Kemet uses a private assistant app (“Kemet Bot”) that works only on Kemet’s own YouTube channel, Facebook Page and Instagram account. It reads the numbers of our own posts (views, reach, followers) and the public comments that viewers write on our posts, so that the person running Kemet can reply. Replies are posted only after that person approves them.</p>
+<ul>
+<li>It does not sell, share or advertise with anything it reads.</li>
+<li>It keeps only what it needs to avoid answering the same comment twice (a comment identifier). It does not build profiles of viewers.</li>
+<li>It is not offered to other people and no one else can log in through it.</li>
+</ul>
+<h2>Deleting your information.</h2>
+<p>A comment you wrote is deleted by you or by us on the platform where you wrote it (YouTube, Facebook or Instagram), and the assistant then no longer sees it. To ask us to remove something you sent through the website’s question box, or to ask what we hold about you, write to us through the question box on the home page or a message to the Kemet YouTube channel. We will answer and remove it.</p>
+<h2>Changes.</h2>
+<p>If this page changes, the new version replaces this one at the same address.</p>"""
+
+
+def ensure_privacy_page(root):
+    """v10.237: a /privacy/ page in the site's own design (Meta's App Review needs a privacy policy address). Built from the About page layout."""
+    root = Path(root)
+    ab = root / "about" / "index.html"
+    if not ab.exists():
+        return False
+    t = ab.read_text(encoding="utf-8")
+    i, j = t.find("<title>"), t.find("<main")
+    k = t.find("<footer")
+    if min(i, j, k) < 0:
+        return False
+    url = f"{SITE_BASE}/privacy/"
+    desc = "How the Kemet website and its private assistant tools handle information: no tracking cookies, no ads and no selling of data."
+    img = f"{SITE_BASE}/social/og-home.png"
+    head = (t[:i] + f"<title>Privacy policy: how Kemet handles information | Kemet</title><meta content=\"{desc}\" name=\"description\"/><link href=\"{url}\" rel=\"canonical\"/><meta content=\"{img}\" property=\"og:image\"/><meta content=\"Privacy policy | Kemet\" property=\"og:title\"/><meta content=\"{desc}\" property=\"og:description\"/><meta content=\"{url}\" property=\"og:url\"/>"
+            "<link href=\"/brand-mark.svg\" rel=\"icon\" type=\"image/svg+xml\"/><link href=\"/styles.css\" rel=\"stylesheet\"/></head>\n<body>\n")
+    body = t[t.find("<body>") + 7:j] if "<body>" in t[:j] else ""
+    main = ("<main id=\"main-content\">\n<header class=\"article-hero\"><div class=\"section-shell\"><div class=\"article-meta\"><span>Kemet / Privacy</span></div>"
+            "<h1>Privacy<br/><em>in plain words.</em></h1><p class=\"article-deck\">What the Kemet website and its tools do, and do not do, with information.</p></div></header>\n"
+            "<div class=\"section-shell article-layout\"><article class=\"article-body\">\n" + PRIVACY_BODY +
+            "\n<a class=\"article-back\" href=\"/\">← Home</a></article></div>\n</main>\n")
+    page = head + body + main + t[k:]
+    d = root / "privacy"
+    d.mkdir(exist_ok=True)
+    f = d / "index.html"
+    if not f.exists() or f.read_text(encoding="utf-8") != page:
+        f.write_text(page, encoding="utf-8")
+    sm = root / "sitemap.xml"
+    if sm.exists():
+        x = sm.read_text(encoding="utf-8")
+        if "/privacy/" not in x and "</urlset>" in x:
+            sm.write_text(x.replace("</urlset>", f"<url><loc>{url}</loc></url>\n</urlset>", 1), encoding="utf-8")
+    return True
+
+
 def ensure_latest_page(root):
     """v10.225: /latest/ always opens the newest article, so the link in your Instagram bio never has to change. Returns the slug (or "")."""
     root = Path(root)
+    try:
+        ensure_privacy_page(root)
+    except Exception as e:
+        print("privacy page:", clean(e)[:100])
     best, bk = "", ("", "")
     for p in root.glob("articles/*/index.html"):
         t = p.read_text(encoding="utf-8", errors="ignore")
