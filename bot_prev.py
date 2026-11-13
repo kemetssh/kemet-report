@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.245"
+BOT_VERSION = "v10.246"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -14647,6 +14647,51 @@ def ensure_privacy_page(root):
     return True
 
 
+GUIDE_FREE_URL = "https://amenoegypt.gumroad.com/l/myth-vs-evidence-free"
+GUIDE_PAID_URL = "https://amenoegypt.gumroad.com/l/myth-vs-evidence-complete"
+
+
+def ensure_guide_page(root):
+    """v10.246: /guide/ page with the free ebook button (and the complete edition once its link is set). Same design as the privacy page."""
+    root = Path(root)
+    ab = root / "about" / "index.html"
+    if not ab.exists():
+        return False
+    t = ab.read_text(encoding="utf-8")
+    i, j = t.find("<title>"), t.find("<main")
+    k = t.find("<footer")
+    if min(i, j, k) < 0:
+        return False
+    url = f"{SITE_BASE}/guide/"
+    desc = "A free guide from Kemet: ten popular claims about ancient Egypt checked against the evidence, with sources."
+    img = f"{SITE_BASE}/social/og-home.png"
+    head = (t[:i] + f"<title>Free guide: Ancient Egypt, Myth vs Evidence | Kemet</title><meta content=\"{desc}\" name=\"description\"/><link href=\"{url}\" rel=\"canonical\"/>"
+            f"<meta content=\"Free guide: Ancient Egypt, Myth vs Evidence\" property=\"og:title\"/><meta content=\"{desc}\" property=\"og:description\"/><meta content=\"{img}\" property=\"og:image\"/><meta content=\"{url}\" property=\"og:url\"/>"
+            "<link href=\"/brand-mark.svg\" rel=\"icon\" type=\"image/svg+xml\"/><link href=\"/styles.css\" rel=\"stylesheet\"/></head>\n<body>\n")
+    body = t[t.find("<body>") + 7:j] if "<body>" in t[:j] else ""
+    paid = (f"<h2>Want the whole book?</h2><p>The complete edition has 20 chapters and 155 pages, with the full text and the sources after every chapter.</p>"
+            f"<p><a class=\"button button-quiet\" href=\"{GUIDE_PAID_URL}\" rel=\"noopener\" target=\"_blank\">Get the complete edition</a></p>") if GUIDE_PAID_URL else ""
+    main = ("<main id=\"main-content\">\n<header class=\"article-hero\"><div class=\"section-shell\"><div class=\"article-meta\"><span>Kemet / Free guide</span></div>"
+            "<h1>Ancient Egypt:<br/><em>Myth vs Evidence</em></h1><p class=\"article-deck\">A free 36-page guide that checks ten popular claims about ancient Egypt against what archaeologists and scientists actually say.</p></div></header>\n"
+            "<div class=\"section-shell article-layout\"><article class=\"article-body\">\n"
+            "<h2>What is inside?</h2><p>The pharaoh's curse, how the pyramids were built, the logbooks of Merer, cutting granite with sound, the Herodotus claim about mummification, the face of Cleopatra, Tutankhamun's dagger from the sky, the Orion theory, the Sphinx and the question of whether Egyptians reached America.</p>"
+            "<h2>How does it work?</h2><p>Every chapter is a short version of a Kemet article, with its sources. Where scholars disagree, the guide says so and never presents a guess as a fact.</p>"
+            f"<p><a class=\"button button-primary\" href=\"{GUIDE_FREE_URL}\" rel=\"noopener\" target=\"_blank\">Get the free guide</a></p>" + paid +
+            "\n<a class=\"article-back\" href=\"/\">← Home</a></article></div>\n</main>\n")
+    page = head + body + main + t[k:]
+    d = root / "guide"
+    d.mkdir(exist_ok=True)
+    f = d / "index.html"
+    if not f.exists() or f.read_text(encoding="utf-8") != page:
+        f.write_text(page, encoding="utf-8")
+    sm = root / "sitemap.xml"
+    if sm.exists():
+        x = sm.read_text(encoding="utf-8")
+        if "/guide/" not in x and "</urlset>" in x:
+            sm.write_text(x.replace("</urlset>", f"<url><loc>{url}</loc></url>\n</urlset>", 1), encoding="utf-8")
+    return True
+
+
 def ensure_latest_page(root):
     """v10.225: /latest/ always opens the newest article, so the link in your Instagram bio never has to change. Returns the slug (or "")."""
     root = Path(root)
@@ -14654,6 +14699,10 @@ def ensure_latest_page(root):
         ensure_privacy_page(root)
     except Exception as e:
         print("privacy page:", clean(e)[:100])
+    try:
+        ensure_guide_page(root)
+    except Exception as e:
+        print("guide page:", clean(e)[:100])
     best, bk = "", ("", "")
     for p in root.glob("articles/*/index.html"):
         t = p.read_text(encoding="utf-8", errors="ignore")
