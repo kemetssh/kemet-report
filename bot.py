@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.254"
+BOT_VERSION = "v10.255"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -4073,6 +4073,8 @@ def on_prop(jid, act, st):
         except Exception as e:
             print("article comment offer:", clean(e)[:100])
         return
+    if act == "mw" and kind == "mart":
+        return run_mergearticles(st, jid, prop)
     if act == "lk" and kind == "lka":
         return run_linksall(st, jid, prop)
     if act == "lu" and kind == "lku":
@@ -11873,6 +11875,8 @@ def on_message(msg, st):
         cmd_needvideos(st)
     elif text.startswith("/articlevideos"):
         cmd_articlevideos(st)
+    elif text == "/mergearticles":
+        cmd_mergearticles(st)
     elif text == "/linksall":
         cmd_linksall(st)
     elif text == "/undolinks":
@@ -11932,7 +11936,7 @@ def on_callback(cb, st):
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
     if jid == "q" and act in ("qa", "qi"):
         return ask_callback(cb, act, st)
-    if act in ("ta", "ts", "tu", "ca", "cs", "fbr", "fbn", "chp", "chs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr", "fy", "fz", "lk", "lu"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "fbr", "fbn", "chp", "chs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr", "fy", "fz", "lk", "lu", "mw"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -15864,6 +15868,81 @@ def cmd_hubs(st):
     ap = mem().get("after_pub") or {}
     if ap.get("chain") and time.time() - ap.get("ts", 0) < 3 * 86400:
         return offer_article_in_chain(st)
+    offer_publish(st)
+
+
+def shared_film_groups(root):
+    """v10.255: {film id: [article slugs]} for films that more than one article shows."""
+    g = {}
+    for p in sorted((root / "articles").glob("*/index.html")):
+        vid = extract_video_id(p.read_text(encoding="utf-8"))
+        if vid:
+            g.setdefault(vid, []).append(p.parent.name)
+    return {v: sl for v, sl in g.items() if len(sl) > 1}
+
+
+def cmd_mergearticles(st):
+    """Two articles about the same film: keep the older one (it is already known to Google), redirect the other to it. One tap."""
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("First send me your current site .zip, then send /mergearticles again.")
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        groups = shared_film_groups(root)
+        if not groups:
+            return send("No two articles share a film. ✅")
+        plans = []
+        for vid, slugs in groups.items():
+            info = []
+            for sl in slugs:
+                t = (root / "articles" / sl / "index.html").read_text(encoding="utf-8")
+                a = page_article(t)[0]
+                pub = re.search(r'<meta content="([^"]*)" property="article:published_time"', t)
+                words = len(re.sub(r"<[^>]+>", " ", t).split())
+                mod = re.search(r'<meta content="([^"]*)" property="article:modified_time"', t)
+                info.append(((pub.group(1) if pub else "9") + "|" + (mod.group(1) if mod else "9"), sl, a["title"], words))      # same publish date: the page changed longer ago is the older one
+            info.sort()
+            plans.append({"vid": vid, "keep": info[0][1], "drop": [x[1] for x in info[1:]], "lines": [f"• {x[2][:60]} ({x[3]} words)" for x in info]})
+    for pl in plans:
+        pid = new_pid(st)
+        st["props"][pid] = {"type": "mart", "keep": pl["keep"], "drop": pl["drop"], "created": time.time()}
+        send("Two articles show the same film:\n" + "\n".join(pl["lines"]) + f"\n\nKeep the OLDER one ({pl['keep'][:50]}…). The other one is removed and its address redirects to the kept one, so no link breaks.",
+             [[btn("✅ Merge", pid, "mw"), btn("Skip", pid, "cs")]])
+
+
+def run_mergearticles(st, jid, prop):
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("Send me your site .zip first.")
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        keep = prop["keep"]
+        if not (root / "articles" / keep / "index.html").exists():
+            return send("The article to keep is not in the stored site any more; nothing changed.")
+        red = root / "_redirects"
+        lines = red.read_text(encoding="utf-8").splitlines() if red.exists() else []
+        for dr in prop["drop"]:
+            shutil.rmtree(root / "articles" / dr, ignore_errors=True)
+            rule = f"/articles/{dr}/ /articles/{keep}/ 301"
+            if rule not in lines:
+                lines.append(rule)
+            for k, a in list((mem().get("articles") or {}).items()):
+                if a.get("slug") == dr:
+                    a["slug"] = keep
+        red.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        for fn, args in ((link_related, (root,)), (rebuild_site_hubs, (root, yt_token())), (build_listing, (root, site_catalog(root))), (ensure_latest_page, (root,))):
+            try:
+                fn(*args)
+            except Exception as e:
+                print("merge articles", getattr(fn, "__name__", ""), clean(e)[:100])
+        left = [x for x in (root / "articles").rglob("*") if x.is_file() and x.name == "index.html"]
+        hits = sum(1 for f in root.rglob("*.html") if any(f"/articles/{dr}/" in f.read_text(encoding="utf-8", errors="ignore") for dr in prop["drop"]))
+        r = pack_site(root, d, f"🔀 Merged: {len(prop['drop'])} article removed (redirects to the kept one). {len(left)} articles now. Tap 🚀 Publish below to put it live.")
+    st["props"].pop(jid, None)
+    if not r.get("ok"):
+        return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
+    if hits:
+        send(f"ℹ️ {hits} page(s) still mention the old address; the redirect covers them.")
     offer_publish(st)
 
 
