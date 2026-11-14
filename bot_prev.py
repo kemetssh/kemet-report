@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.251"
+BOT_VERSION = "v10.252"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -13110,8 +13110,8 @@ def refresh_home_reads(root, extra):
         return
     rows = "".join(f'<a class="more-read" href="/articles/{c["slug"]}/"><strong>{esc(re.sub(chr(10) + "+", " ", c["title"]))}</strong><span>{esc(cut_words(c["desc"], 150))}</span></a>' for c in new)
     block = f'<div class="more-reads reveal"><h3>More in-depth reads</h3><div class="more-reads-grid">{rows}</div></div>'
-    if 'class="more-reads' in s:
-        s2 = re.sub(r'<div class="more-reads[^"]*">.*?</div></div>', lambda m: block, s, count=1, flags=re.S)
+    if '<div class="more-reads reveal">' in s:                 # v10.252: only the old reads block; the Start-here grid (class more-reads-grid) must never match, or the page below it is deleted
+        s2 = re.sub(r'<div class="more-reads reveal">.*?</div></div>', lambda m: block, s, count=1, flags=re.S)
     else:
         i = s.find('<section aria-labelledby="films-title"')
         if i < 0:
@@ -14830,6 +14830,57 @@ def _fix_text(root, sl, old):
     return html.escape(cut_words(html.unescape(ds.group(1)).strip(), 165), quote=False)
 
 
+PDF_CSS = """
+/*kemet-pdf*/
+.pdf-offer{margin:56px auto 0;padding:0 16px;max-width:860px}
+.pdf-offer-in{border:1px solid rgba(212,175,55,.35);border-radius:14px;padding:26px 24px;background:rgba(212,175,55,.06);text-align:center}
+.pdf-offer .pdf-kicker{font-size:.78rem;letter-spacing:.14em;text-transform:uppercase;opacity:.75;margin:0 0 6px}
+.pdf-offer h2{margin:0 0 8px;font-size:1.35rem}
+.pdf-offer p{margin:0 0 16px}
+.pdf-offer .pdf-buttons{display:flex;flex-wrap:wrap;gap:12px;justify-content:center}
+.pdf-offer .pdf-note{margin:14px 0 0;font-size:.85rem;opacity:.75}
+"""
+
+
+def ensure_pdf_offer(root):
+    """v10.252: the end of every page offers the free guide and the complete edition (the two PDFs). Safe to run every time; returns pages changed."""
+    root = Path(root)
+    free, paid = src_tag(GUIDE_FREE_URL, "pf"), src_tag(GUIDE_PAID_URL, "pp")
+    block = ('<!--kemet-pdf--><section class="pdf-offer" aria-labelledby="pdf-offer-title"><div class="pdf-offer-in">'
+             '<p class="pdf-kicker">Free PDF guide</p><h2 id="pdf-offer-title">Ancient Egypt: Myth vs Evidence</h2>'
+             '<p>Ten popular claims about ancient Egypt, checked against the evidence. Take the free 36-page guide, or the complete 155-page edition with every source.</p>'
+             f'<div class="pdf-buttons"><a class="button button-primary" href="{free}" rel="noopener" target="_blank">Get the free PDF</a>'
+             f'<a class="button button-quiet" href="{paid}" rel="noopener" target="_blank">Complete edition (155 pages)</a></div>'
+             '<p class="pdf-note">The free guide needs no payment.</p></div></section><!--/kemet-pdf-->')
+    n = 0
+    for f in root.rglob("index.html"):
+        rel = f.relative_to(root).as_posix()
+        if rel.startswith(("guide/", "latest/")):
+            continue
+        t = f.read_text(encoding="utf-8", errors="ignore")
+        if "<html" not in t or 'http-equiv="refresh"' in t:
+            continue
+        t2 = re.sub(r"<!--kemet-pdf-->.*?<!--/kemet-pdf-->\n?", "", t, flags=re.S)
+        m = None
+        for pat in ("</main>", "<footer", '<div class="footer-bottom">', "</body>"):
+            i = t2.rfind(pat) if pat != "<footer" else t2.find(pat)
+            if i >= 0:
+                m = i
+                break
+        if m is None:
+            continue
+        t2 = t2[:m] + block + "\n" + t2[m:]
+        if t2 != t:
+            f.write_text(t2, encoding="utf-8")
+            n += 1
+    css = root / "styles.css"
+    if css.exists():
+        c = css.read_text(encoding="utf-8")
+        if "/*kemet-pdf*/" not in c:
+            css.write_text(c + PDF_CSS, encoding="utf-8")
+    return n
+
+
 def ensure_latest_page(root):
     """v10.225: /latest/ always opens the newest article, so the link in your Instagram bio never has to change. Returns the slug (or "")."""
     root = Path(root)
@@ -14845,6 +14896,10 @@ def ensure_latest_page(root):
         ensure_home_funnel(root)
     except Exception as e:
         print("home funnel:", clean(e)[:100])
+    try:
+        ensure_pdf_offer(root)
+    except Exception as e:
+        print("pdf offer:", clean(e)[:100])
     best, bk = "", ("", "")
     for p in root.glob("articles/*/index.html"):
         t = p.read_text(encoding="utf-8", errors="ignore")
@@ -15801,7 +15856,12 @@ def set_description_article(video_id, line, url):
     tok = yt_token()
     sn = yt_get("videos", tok, part="snippet", id=video_id)["items"][0]["snippet"]
     desc = sn.get("description", "")
-    if url in desc or len(line) + 2 + len(desc) > 4990:
+    if url in desc:
+        return False
+    old_ = re.search(r"^📖 Read the full article: " + re.escape(SITE_BASE) + r"/articles/[^\s]*\n*", desc)     # v10.252: a line that points to ANOTHER article is replaced, not stacked
+    if old_:
+        desc = desc[old_.end():]
+    if len(line) + 2 + len(desc) > 4990:
         return False
     body = {"title": sn["title"], "description": line + "\n\n" + desc, "categoryId": sn.get("categoryId", "27"), "tags": sn.get("tags", [])}
     if sn.get("defaultLanguage"):
@@ -16179,6 +16239,23 @@ def title_overlap(a, b):
     return len(wa & wb) / (len(wa) or 1)
 
 
+_FIT_STOP = {"ancient", "egypt", "egyptian", "egyptians", "pharaoh", "pharaohs", "truth", "about", "real", "secret", "secrets", "what", "were", "that", "this", "with", "from",
+             "they", "their", "have", "does", "really", "behind", "story", "evidence", "fact", "check", "checking", "more", "than", "just", "myth", "myths", "true", "into", "over",
+             "only", "when", "explained", "kemet", "video", "film", "kind", "made", "many", "most", "your", "ever", "each", "will", "would", "could", "should", "been", "also",
+             "the", "was", "and", "for", "are", "did", "how", "why", "who", "its", "not", "can", "one", "but", "has", "had", "you", "all", "his", "her", "she", "our", "out",
+             "any", "get", "use", "new", "old", "too", "may", "way", "own"}
+
+
+def _fit_words(t):
+    return {w[:5] for w in re.findall(r"[a-z0-9]{3,}", html.unescape(t or "").lower().replace("’", "").replace("'", "")) if w not in _FIT_STOP}
+
+
+def film_fits(article_text, film_title):
+    """v10.252: does this film talk about this article's subject? True when they share at least one distinctive word. Stops a film (for example a Senet video) from
+    being put on an article about something else (kohl). article_text = title + summary + headings."""
+    return bool(_fit_words(article_text) & _fit_words(film_title))
+
+
 def site_title_changes(root, vt):
     """Film titles on the site pages that no longer match YouTube: [(video_id, old_title, new_title)]. vt = {video_id: current YouTube title}."""
     out, seen = [], set()
@@ -16388,7 +16465,7 @@ def cmd_fixvideos(st):
                         picks = []
                     else:
                         j = gemini([{"text": REVIDEO_PROMPT.format(title=title, deck=art.get("deck", "")[:400], vids=lst, exclude=vid)}])
-                        picks = [p for p in (j.get("picks") or []) if p in free_vt and p != vid][:3]
+                        picks = [p for p in (j.get("picks") or []) if p in free_vt and p != vid and film_fits(title + " " + art.get("deck", ""), free_vt[p])][:3]
                 except Exception as e:
                     print("revideo picks:", clean(e)[:100])
                     picks = None                           # the AI failed: this is not the same as "no match"
@@ -16426,6 +16503,13 @@ def revideo_article(item, new_vid, st):
             return send("I could not read that video on YouTube.")
         v = {"id": new_vid, "title": it["snippet"]["title"], "desc": it["snippet"].get("description", ""), "published": it["snippet"].get("publishedAt", pub),
              "iso": it["contentDetails"].get("duration", ""), "secs": iso_seconds(it["contentDetails"].get("duration", ""))}
+        try:                                                # v10.252: never put a film on an article about something else
+            at_ = art.get("title", "") + " " + art.get("deck", "") + " " + " ".join(x.get("h", "") for x in (art.get("sections") or []))
+            if not film_fits(at_, v["title"]):
+                return send(f"🛑 I did NOT attach it: the film \"{v['title'][:70]}\" does not talk about the same subject as the article \"{art.get('title', '')[:70]}\", so I left the article as it is. "
+                            "That film needs its own article: send /articles and tap ✍️ Write its own article.")
+        except Exception as e:
+            print("film fit:", clean(e)[:100])
         cat = site_catalog(root)
         others = sorted([x for x in cat if x["slug"] != item["slug"]], key=lambda x: x["pub"], reverse=True)
         series = None
@@ -16461,7 +16545,8 @@ def cmd_articlelinks(st):
                 site_slugs = set(site_map.values())
                 arts = {v: a for v, a in arts.items() if a.get("slug") not in site_slugs}      # keep only notes for articles the site does not have (reported as not live)
                 for vid, slug in site_map.items():
-                    arts[vid] = {"slug": slug, "title": page_article((root / "articles" / slug / "index.html").read_text(encoding="utf-8"))[0]["title"]}
+                    pa_ = page_article((root / "articles" / slug / "index.html").read_text(encoding="utf-8"))[0]
+                    arts[vid] = {"slug": slug, "title": pa_["title"], "text": pa_["title"] + " " + pa_.get("deck", "") + " " + " ".join(x.get("h", "") for x in (pa_.get("sections") or []))}
     except Exception as e:
         print("articlelinks site scan:", clean(e)[:120])
     if not arts:
@@ -16475,7 +16560,7 @@ def cmd_articlelinks(st):
     for k_ in [k for k, p in st["props"].items() if p.get("type") in ("alb", "ala")]:      # old untapped cards: show them again instead of silently skipping those videos
         st["props"].pop(k_, None)
     pending = set()
-    notlive, have, pids = [], 0, []
+    notlive, have, pids, odd = [], 0, [], []
     for vid, a in arts.items():
         url = f"{SITE_BASE}/articles/{a['slug']}/"
         try:
@@ -16493,6 +16578,9 @@ def cmd_articlelinks(st):
             continue
         if vid in pending:
             continue
+        if a.get("text") and not film_fits(a["text"], sn.get("title", "")):      # v10.252: the film and the article are about different things: do not link them
+            odd.append((sn.get("title", ""), a["title"]))
+            continue
         line = "📖 Read the full article: " + src_tag(url, "yt")
         pid = new_pid(st)
         st["props"][pid] = {"type": "alb", "video_id": vid, "title": sn.get("title", ""), "line": line, "url": url, "created": time.time()}
@@ -16504,6 +16592,15 @@ def cmd_articlelinks(st):
         st["props"][pa] = {"type": "ala", "pids": pids, "created": time.time()}
         send(f"Add the article link to all {len(pids)} videos" + (f" (the first 4 are shown above, {len(pids) - 4} more are not)" if len(pids) > 4 else " above") + "?", [[btn(f"✅ Add to all {len(pids)}", pa, "aa")]])
     msg = []
+    if odd:
+        msg.append(f"⚠️ {len(odd)} film(s) do not match the article the site pairs them with, so I did NOT touch their descriptions:\n" + "\n".join(f"• film \"{a[:55]}\" ≠ article \"{b[:55]}\"" for a, b in odd[:6])
+                   + "\nFix: send /fixvideos, or /articles to give the film its own article.")
+    try:                                                    # v10.252: films that have no article at all
+        none_ = [v for v in all_videos(tok) if v["id"] not in arts]
+        if none_:
+            msg.append(f"📝 {len(none_)} of your films have no article yet" + (": " + "; ".join(v["snippet"]["title"][:40] for v in none_[:4]) + ("…" if len(none_) > 4 else "") if none_ else "") + ". Send /articles to write them.")
+    except Exception as e:
+        print("articlelinks no-article scan:", clean(e)[:100])
     if notlive:
         msg.append("Not live on the site yet (upload the zip first): " + "; ".join(notlive[:5]))
     if have:
