@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.247"
+BOT_VERSION = "v10.248"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -11753,6 +11753,8 @@ def on_message(msg, st):
         cmd_fbviews(st)
     elif text == "/fbcomments":
         cmd_fbcomments(st)
+    elif text == "/guidepage":
+        cmd_guidepage(st)
     elif text == "/fbdebug":
         cmd_fbdebug(st)
     elif text == "/igcomments":
@@ -14240,6 +14242,22 @@ def do_seofix(prop, st):
         if not n and not q:
             return send("No article needed it (or none has enough clear sections). Nothing changed.")
         r = pack_site(root, d, f"🔎 Site updated: {q} articles got question headings, FAQ markup added to {n}. Tap 🚀 Publish below to put it live. (Run /seocheck again for the next few.)")
+    if not r.get("ok"):
+        return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
+    offer_publish(st)
+
+
+def cmd_guidepage(st):
+    """v10.248: rebuilds the /guide/ page (free guide + complete edition) in the stored site and offers Publish."""
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("Send me your site .zip first.")
+    send("📘 Updating the guide page...")
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        if not ensure_guide_page(root):
+            return send("I could not build the guide page (the About page layout was not found).")
+        r = pack_site(root, d, "📘 Guide page updated (cover, list, prices). Tap 🚀 Publish below to put it live.")
     if not r.get("ok"):
         return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
     offer_publish(st)
