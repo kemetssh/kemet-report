@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.248"
+BOT_VERSION = "v10.250"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1198,9 +1198,34 @@ def _yt_label_field_unsupported(response):
                                    "unsupported", "field is not writable"))
 
 
+def src_tag(url, src):
+    """v10.250: adds ?src=... so the site's visitor numbers can show which link brought a reader (pages ignore it; canonical tags stay clean)."""
+    return url + ("&" if "?" in url else "?") + "src=" + src
+
+
+def guide_line(src="yt"):
+    """v10.249: one line pointing to the free guide page. Empty when switched off (/guideoff)."""
+    if mem().get("guide_promo") is False:
+        return ""
+    return "📘 Free guide, Ancient Egypt: Myth vs Evidence: " + src_tag(SITE_BASE + "/guide/", src)
+
+
+def with_guide(text, limit=4900, src="yt"):
+    """Adds the guide line at the end once (never twice, never past the limit)."""
+    ln = guide_line(src)
+    text = (text or "").rstrip()
+    if not ln or "/guide/" in text or len(text) + 2 + len(ln) > limit:
+        return text
+    return (text + "\n\n" + ln).strip()
+
+
 def yt_upload(path, title, desc, tags, tok, ai=False):
     """Returns (video_id, label_ok); never drops an AI label on an unrelated error."""
     size = os.path.getsize(path)
+    try:
+        desc = with_guide(desc)
+    except Exception:
+        pass
 
     def start(with_label):
         status = {"privacyStatus": "private", "selfDeclaredMadeForKids": False}
@@ -8796,6 +8821,7 @@ def cmd_crosspost(st, video_id=None):
             body = (str(c["caption"]).strip() + ("\n\n" + tags if tags else "")).strip()
             if key == "facebook" and fb and file_id:
                 pid = new_pid(st)
+                body = with_guide(body, 1900, "fb")
                 st["props"][pid] = {"type": "fbpost", "video_id": vid, "caption": body, "created": time.time()}
                 send(body, [[btn("📘 Post this to my Facebook Page", pid, "fp")]])
             else:
@@ -11753,6 +11779,9 @@ def on_message(msg, st):
         cmd_fbviews(st)
     elif text == "/fbcomments":
         cmd_fbcomments(st)
+    elif text in ("/guideoff", "/guideon"):
+        mem()["guide_promo"] = (text == "/guideon")
+        send("📘 Guide link in new video descriptions and Facebook captions: " + ("ON" if text == "/guideon" else "OFF"))
     elif text == "/guidepage":
         cmd_guidepage(st)
     elif text == "/fbdebug":
@@ -14715,6 +14744,64 @@ def ensure_guide_page(root):
     return True
 
 
+START_HERE = ["the-shining-facade-of-the-great-pyramid-of-giza",
+              "engineering-giza-how-they-actually-moved-multi-ton-blocks",
+              "decoding-the-stone-how-were-the-pyramids-really-built",
+              "the-pharaohs-curse-myth-science-and-the-valley-of-the-kings",
+              "the-logbooks-of-merer-deciphering-gizas-workforce",
+              "uncovering-the-truth-about-the-dendera-light-relief"]
+
+
+def ensure_home_funnel(root):
+    """v10.250: homepage gets (1) the free-guide button next to YouTube and (2) a 'Start here' block of 6 strong articles. Safe to run every time."""
+    root = Path(root)
+    f = root / "index.html"
+    if not f.exists():
+        return False
+    t = f.read_text(encoding="utf-8")
+    o = t
+    # 1. guide button + sentence in the 'Keep the conversation alive' panel (only inside that panel)
+    k0 = t.find('id="follow-title"')
+    if k0 > 0 and 'href="/guide/"' not in t[k0:k0 + 2500]:
+        head_, tail = t[:k0], t[k0:]
+        tail = tail.replace('<div class="follow-actions">',
+                            '<div class="follow-actions"><a class="button button-primary" href="/guide/">Get the free Myth vs Evidence guide <span aria-hidden="true">→</span></a>', 1)
+        tail = tail.replace('<a class="button button-primary" href="https://www.youtube.com/@Kemet-ssh"', '<a class="button button-quiet" href="https://www.youtube.com/@Kemet-ssh"', 1)
+        tail = tail.replace("<p>New films, field notes, and historical curiosities from the banks of the Nile.</p>",
+                            "<p>Get the free 36-page guide to ten popular claims about ancient Egypt, checked against the evidence. Then explore new films and field notes from the banks of the Nile.</p>", 1)
+        t = head_ + tail
+    # 2. 'Start here'
+    slugs = mem().get("start_here") or START_HERE
+    cards = []
+    for sl in slugs:
+        p = root / "articles" / sl / "index.html"
+        if not p.exists():
+            continue
+        a = p.read_text(encoding="utf-8")
+        ttl = re.search(r"<title>(.*?)</title>", a, re.S)
+        ds = re.search(r'<meta content="([^"]*)" name="description"', a) or re.search(r'name="description" content="([^"]*)"', a)
+        if not ttl or not ds:
+            continue
+        title = html.unescape(ttl.group(1)).split(" | ")[0].strip()
+        d = html.unescape(ds.group(1)).strip()
+        if len(d) > 150:
+            d = d[:147].rsplit(" ", 1)[0] + "…"
+        cards.append(f'<a class="more-read" href="/articles/{sl}/"><strong>{html.escape(title, quote=False)}</strong><span>{html.escape(d, quote=False)}</span></a>')
+    if len(cards) >= 3:
+        block = ('<section class="section-shell more-reads" id="start-here" aria-label="Start here"><h3>Start here</h3>'
+                 '<p class="section-deck">New to Kemet? These six are the most-read, each with its sources and film.</p>'
+                 '<div class="more-reads-grid">' + "".join(cards) + "</div></section>\n")
+        if 'id="start-here"' in t:
+            t = re.sub(r'<section class="section-shell more-reads" id="start-here".*?</section>\n?', lambda m: block, t, count=1, flags=re.S)
+        else:
+            k = t.find('<section aria-labelledby="archive-title"')
+            if k > 0:
+                t = t[:k] + block + t[k:]
+    if t != o:
+        f.write_text(t, encoding="utf-8")
+    return True
+
+
 def ensure_latest_page(root):
     """v10.225: /latest/ always opens the newest article, so the link in your Instagram bio never has to change. Returns the slug (or "")."""
     root = Path(root)
@@ -14726,6 +14813,10 @@ def ensure_latest_page(root):
         ensure_guide_page(root)
     except Exception as e:
         print("guide page:", clean(e)[:100])
+    try:
+        ensure_home_funnel(root)
+    except Exception as e:
+        print("home funnel:", clean(e)[:100])
     best, bk = "", ("", "")
     for p in root.glob("articles/*/index.html"):
         t = p.read_text(encoding="utf-8", errors="ignore")
@@ -16371,7 +16462,7 @@ def cmd_articlelinks(st):
             continue
         if vid in pending:
             continue
-        line = "📖 Read the full article: " + url
+        line = "📖 Read the full article: " + src_tag(url, "yt")
         pid = new_pid(st)
         st["props"][pid] = {"type": "alb", "video_id": vid, "title": sn.get("title", ""), "line": line, "url": url, "created": time.time()}
         pids.append(pid)
