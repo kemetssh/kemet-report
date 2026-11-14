@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.256"
+BOT_VERSION = "v10.257"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -15817,11 +15817,40 @@ def trim_titles(root, limit=65):
     return n
 
 
+def trim_descriptions(root, limit=160):
+    """v10.257: search results cut descriptions over 160 characters. Shortens the meta description (and the social copies that are identical to it) at a sentence or word; the page text and the structured data are never touched. Returns pages changed."""
+    root = Path(root)
+    n = 0
+    for p in root.rglob("index.html"):
+        if p.relative_to(root).as_posix().startswith("latest/"):
+            continue
+        t = p.read_text(encoding="utf-8", errors="ignore")
+        m = re.search(r'<meta name="description" content="([^"]*)"', t) or re.search(r'<meta content="([^"]*)" name="description"', t)
+        if not m:
+            continue
+        cur = html.unescape(m.group(1))
+        if len(cur) <= limit:
+            continue
+        new = cut_words(cur, limit - 1)
+        if len(new) < 70 or len(new) > limit:
+            continue
+        esc_old, esc_new = m.group(1), html.escape(new)
+        t2 = t.replace(f'content="{esc_old}"', f'content="{esc_new}"')
+        if t2 != t:
+            p.write_text(t2, encoding="utf-8")
+            n += 1
+    return n
+
+
 def pack_site(root, d, caption):
     try:
         trim_titles(root)         # titles that search engines would cut (v10.239)
     except Exception as e:
         print("trim titles:", clean(e)[:120])
+    try:
+        trim_descriptions(root)   # descriptions that search engines would cut (v10.257)
+    except Exception as e:
+        print("trim descriptions:", clean(e)[:120])
     try:
         seo_fix(root)             # FAQ markup on every new article, automatically
     except Exception as e:
