@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.255"
+BOT_VERSION = "v10.256"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -11865,7 +11865,7 @@ def on_message(msg, st):
         cmd_xpost(st, text)
     elif text.startswith("/publish"):
         cmd_publish(st)
-    elif text.startswith("/merge"):
+    elif text.startswith("/merge") and not text.startswith("/mergearticles"):
         cmd_merge(st)
     elif text.startswith("/dupes"):
         cmd_dupes(st)
