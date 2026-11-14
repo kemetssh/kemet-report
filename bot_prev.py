@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.250"
+BOT_VERSION = "v10.251"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -4063,7 +4063,16 @@ def on_prop(jid, act, st):
         except Exception as e:
             return send("YouTube did not accept the change: " + clean(e)[:160])
         st["props"].pop(jid, None)
-        return send("✅ Added the article link to the description." if ok_ else "That description already has the link or is too long, so I left it as it is.")
+        send("✅ Added the article link to the description." if ok_ else "That description already has the link or is too long, so I left it as it is.")
+        try:
+            pc = new_pid(st)
+            ctext = "📖 Sources and the full article: " + src_tag(prop["url"], "ytc")
+            st["props"][pc] = {"type": "pin", "video_id": prop["video_id"], "text": ctext, "created": time.time()}
+            return send("Want the article link as a comment too? I post it; you pin it (press and hold it in the YouTube app, tap Pin). YouTube does not let me pin by code.\n\n" + ctext,
+                        [[btn("📌 Post this comment", pc, "pc"), btn("Skip", pc, "cs")]])
+        except Exception as e:
+            print("article comment offer:", clean(e)[:100])
+        return
     if act == "aa" and kind == "ala":
         done, failed = 0, []
         for p in prop["pids"]:
@@ -14784,8 +14793,7 @@ def ensure_home_funnel(root):
             continue
         title = html.unescape(ttl.group(1)).split(" | ")[0].strip()
         d = html.unescape(ds.group(1)).strip()
-        if len(d) > 150:
-            d = d[:147].rsplit(" ", 1)[0] + "…"
+        d = cut_words(d, 165)
         cards.append(f'<a class="more-read" href="/articles/{sl}/"><strong>{html.escape(title, quote=False)}</strong><span>{html.escape(d, quote=False)}</span></a>')
     if len(cards) >= 3:
         block = ('<section class="section-shell more-reads" id="start-here" aria-label="Start here"><h3>Start here</h3>'
@@ -14797,9 +14805,29 @@ def ensure_home_funnel(root):
             k = t.find('<section aria-labelledby="archive-title"')
             if k > 0:
                 t = t[:k] + block + t[k:]
+    # 3. no article twice: the 'More in-depth reads' grids lose the cards already shown in 'Start here'
+    m_ = re.search(r'<section class="section-shell more-reads" id="start-here".*?</section>\n?', t, re.S)
+    if m_:
+        blk, rest = m_.group(0), t[:m_.start()] + "\0" + t[m_.end():]
+        for sl in slugs:
+            rest = re.sub(r'<a class="more-read" href="/articles/' + re.escape(sl) + r'/">.*?</a>', "", rest, flags=re.S)
+        t = rest.replace("\0", blk)
+    # 4. every card's text is re-cut cleanly from the article's own description (fixes older cut-off cards)
+    t = re.sub(r'(<a class="more-read" href="/articles/([a-z0-9-]+)/"><strong>.*?</strong><span>)(.*?)(</span></a>)', lambda m: m.group(1) + (_fix_text(root, m.group(2), m.group(3))) + m.group(4), t, flags=re.S)
     if t != o:
         f.write_text(t, encoding="utf-8")
     return True
+
+
+def _fix_text(root, sl, old):
+    p = Path(root) / "articles" / sl / "index.html"
+    if not p.exists():
+        return old
+    a2 = p.read_text(encoding="utf-8")
+    ds = re.search(r'<meta content="([^"]*)" name="description"', a2) or re.search(r'name="description" content="([^"]*)"', a2)
+    if not ds:
+        return old
+    return html.escape(cut_words(html.unescape(ds.group(1)).strip(), 165), quote=False)
 
 
 def ensure_latest_page(root):
@@ -15429,15 +15457,18 @@ def pl_slug(pl):
 
 
 def cut_words(text, n):
-    """Shorten at a word (better: a sentence) boundary, never in the middle of a word."""
+    """Shorten at a sentence boundary when one is reasonably near, else at a word; never ends on 'of the', 'and', 'a'..."""
     t = " ".join(str(text).split())
     if len(t) <= n:
         return t
     head = t[:n]
     k = max(head.rfind(". "), head.rfind("? "), head.rfind("! "))
-    if k > n * 0.5:
+    if k > n * 0.4:
         return head[:k + 1]
-    return head[:head.rfind(" ")].rstrip(" ,;:-") + "…"
+    words = head[:head.rfind(" ")].rstrip(" ,;:-").split(" ")
+    while len(words) > 4 and words[-1].lower().strip(".,;:") in ("of", "the", "a", "an", "and", "or", "to", "in", "on", "for", "by", "with", "as", "was", "were", "from", "that", "its", "their", "his", "her", "is", "are", "at", "into", "than", "this"):
+        words.pop()
+    return " ".join(words).rstrip(" ,;:-") + "…"
 
 
 def plural(n, word):
