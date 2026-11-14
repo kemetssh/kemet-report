@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.252"
+BOT_VERSION = "v10.253"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -4073,6 +4073,10 @@ def on_prop(jid, act, st):
         except Exception as e:
             print("article comment offer:", clean(e)[:100])
         return
+    if act == "lk" and kind == "lka":
+        return run_linksall(st, jid, prop)
+    if act == "lu" and kind == "lku":
+        return run_undolinks(st, jid)
     if act == "aa" and kind == "ala":
         done, failed = 0, []
         for p in prop["pids"]:
@@ -11157,7 +11161,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/checklast - check my upload (or paste link)\n"
         "/image <subject> - AI + real photo\n"
         "/articles - website articles\n"
-        "/articlelinks - article links\n"
+        "/linksall - fix all article links\n"
         "/dupes - duplicate playlists\n"
         "/merge - merge playlists\n"
         "/publish - put the site live\n"
@@ -11869,6 +11873,10 @@ def on_message(msg, st):
         cmd_needvideos(st)
     elif text.startswith("/articlevideos"):
         cmd_articlevideos(st)
+    elif text == "/linksall":
+        cmd_linksall(st)
+    elif text == "/undolinks":
+        cmd_undolinks(st)
     elif text.startswith("/articlelinks"):
         cmd_articlelinks(st)
     elif text == "/count":
@@ -11924,7 +11932,7 @@ def on_callback(cb, st):
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
     if jid == "q" and act in ("qa", "qi"):
         return ask_callback(cb, act, st)
-    if act in ("ta", "ts", "tu", "ca", "cs", "fbr", "fbn", "chp", "chs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr", "fy", "fz"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "fbr", "fbn", "chp", "chs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr", "fy", "fz", "lk", "lu"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -16533,6 +16541,192 @@ def revideo_article(item, new_vid, st):
     offer_publish(st)
 
 
+def site_article_map():
+    """v10.253: {video id: {slug, title, text}} straight from the stored site (the site says which film each article shows)."""
+    arts = {}
+    sz = mem().get("site_zip")
+    if not sz:
+        return arts
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        for vid, slug in vid_slug_map(root).items():
+            pa_ = page_article((root / "articles" / slug / "index.html").read_text(encoding="utf-8"))[0]
+            arts[vid] = {"slug": slug, "title": pa_["title"], "text": pa_["title"] + " " + pa_.get("deck", "") + " " + " ".join(x.get("h", "") for x in (pa_.get("sections") or []))}
+    return arts
+
+
+def article_desc(desc, line, url):
+    """New description with the article line first. Returns (new, removed_old_line); new is None when the link is already there or the result would be too long."""
+    if url in desc:
+        return None, ""
+    old_ = re.search(r"^📖 Read the full article: " + re.escape(SITE_BASE) + r"/articles/[^\s]*\n*", desc)
+    removed = old_.group(0).strip() if old_ else ""
+    rest = desc[old_.end():] if old_ else desc
+    new = line + "\n\n" + rest
+    return (new if len(new) <= 4990 else None), removed
+
+
+def put_description(tok, vid, sn, new_desc):
+    """Write one description. Returns "ok", "quota", or an error text."""
+    body = {"title": sn["title"], "description": new_desc, "categoryId": sn.get("categoryId", "27"), "tags": sn.get("tags", [])}
+    if sn.get("defaultLanguage"):
+        body["defaultLanguage"] = sn["defaultLanguage"]
+    r = S.put(f"{YT}/youtube/v3/videos?part=snippet", headers={"Authorization": f"Bearer {tok}"}, json={"id": vid, "snippet": body}, timeout=60)
+    if r.status_code == 403 and "quota" in r.text.lower():
+        return "quota"
+    if r.status_code >= 400:
+        return f"HTTP {r.status_code}"
+    return "ok"
+
+
+def snippets_of(tok, ids):
+    out = {}
+    ids = list(ids)
+    for k in range(0, len(ids), 50):
+        for i in yt_get("videos", tok, part="snippet", id=",".join(ids[k:k + 50])).get("items", []):
+            out[i["id"]] = i["snippet"]
+    return out
+
+
+def cmd_linksall(st):
+    """v10.253: check EVERY article-backed video on the channel and fix all missing or wrong article links in one go (one tap). Old lines are remembered so /undolinks can restore them."""
+    send("Checking every video description against the site... this takes a minute.")
+    try:
+        arts = site_article_map()
+    except Exception as e:
+        return send("I could not read your site zip: " + clean(e)[:150] + ". Send the site zip to me again first.")
+    if not arts:
+        return send("First send me your current site .zip (a normal file attachment), then send /linksall again.")
+    tok = yt_token()
+    sns = snippets_of(tok, arts)
+    live = {}
+    todo, have, odd, notlive, toolong, gone = [], 0, [], [], [], 0
+    for vid, a in arts.items():
+        sn = sns.get(vid)
+        if not sn:
+            gone += 1
+            continue
+        url = f"{SITE_BASE}/articles/{a['slug']}/"
+        if url not in live:
+            try:
+                live[url] = S.get(url, timeout=20).status_code == 200
+            except Exception:
+                live[url] = False
+        if not live[url]:
+            notlive.append(a["title"])
+            continue
+        if url in sn.get("description", ""):
+            have += 1
+            continue
+        if a.get("text") and not film_fits(a["text"], sn.get("title", "")):
+            odd.append((sn.get("title", ""), a["title"]))
+            continue
+        new, _rm = article_desc(sn.get("description", ""), "📖 Read the full article: " + src_tag(url, "yt"), url)
+        if new is None:
+            toolong.append(sn.get("title", ""))
+            continue
+        todo.append(vid)
+    msg = [f"✅ {have} video(s) already have their article link.", f"🔧 {len(todo)} need it added or corrected."]
+    if odd:
+        msg.append(f"⚠️ {len(odd)} film(s) do not match their article, left alone: " + "; ".join(f"\"{a[:40]}\"" for a, _b in odd[:5]) + " (send /fixvideos)")
+    if notlive:
+        msg.append(f"Not live on the site yet: {len(notlive)} (publish the site zip first)")
+    if toolong:
+        msg.append(f"Description too long for a new line: {len(toolong)}")
+    try:
+        none_ = [v for v in all_videos(tok) if v["id"] not in arts]
+        if none_:
+            msg.append(f"📝 {len(none_)} film(s) have no article at all (send /articles)")
+    except Exception as e:
+        print("linksall no-article scan:", clean(e)[:100])
+    if not todo:
+        return send("\n".join(msg))
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "lka", "vids": todo, "created": time.time()}
+    send("\n".join(msg) + f"\n\nI will put the article link as the first line and keep the rest of each description. Costs about {len(todo) * 50} of today's YouTube quota.",
+         [[btn(f"✅ Fix all {len(todo)} now", pid, "lk")]])
+
+
+def run_linksall(st, jid, prop):
+    tok = yt_token()
+    arts = site_article_map()
+    sns = snippets_of(tok, prop["vids"])
+    bk = dict((mem().get("links_backup") or {}).get("items") or {})
+    done, errs, quota_hit, left = 0, [], False, []
+    for n, vid in enumerate(prop["vids"]):
+        sn, a = sns.get(vid), arts.get(vid)
+        if quota_hit:
+            left.append(vid)
+            continue
+        if not sn or not a:
+            continue
+        url = f"{SITE_BASE}/articles/{a['slug']}/"
+        line = "📖 Read the full article: " + src_tag(url, "yt")
+        new, removed = article_desc(sn.get("description", ""), line, url)
+        if new is None:
+            continue
+        try:
+            res = put_description(tok, vid, sn, new)
+        except Exception as e:
+            res = clean(e)[:80]
+        if res == "ok":
+            done += 1
+            bk[vid] = {"title": sn.get("title", "")[:60], "added": line, "removed": removed}
+        elif res == "quota":
+            quota_hit = True
+            left.append(vid)
+        else:
+            errs.append(f"{sn.get('title', vid)[:40]}: {res}")
+        if (n + 1) % 40 == 0:
+            send(f"…{n + 1} of {len(prop['vids'])} done")
+    mem()["links_backup"] = {"time": datetime.datetime.utcnow().isoformat(), "items": bk}
+    st["props"].pop(jid, None)
+    out = [f"✅ Article link added or corrected in {done} description(s)."]
+    if quota_hit:
+        out.append(f"⏸ YouTube's daily quota ran out. {len(left)} video(s) are left: send /linksall again tomorrow.")
+    if errs:
+        out.append(f"⚠️ {len(errs)} failed: " + "; ".join(errs[:4]))
+    out.append("To restore the old descriptions: /undolinks. To confirm everything: /linksall again.")
+    send("\n".join(out))
+
+
+def cmd_undolinks(st):
+    bk = (mem().get("links_backup") or {}).get("items") or {}
+    if not bk:
+        return send("Nothing to undo: no /linksall run is remembered.")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "lku", "created": time.time()}
+    send(f"Restore the previous descriptions of {len(bk)} video(s) (removes the article line that /linksall added)?", [[btn(f"↩️ Undo {len(bk)}", pid, "lu")]])
+
+
+def run_undolinks(st, jid):
+    tok = yt_token()
+    bk = dict((mem().get("links_backup") or {}).get("items") or {})
+    sns = snippets_of(tok, bk)
+    done, errs, left = 0, [], {}
+    for vid, b in bk.items():
+        sn = sns.get(vid)
+        if not sn:
+            continue
+        d = sn.get("description", "")
+        if not d.startswith(b["added"]):
+            continue
+        d2 = d[len(b["added"]):].lstrip("\n")
+        if b.get("removed"):
+            d2 = b["removed"] + "\n\n" + d2
+        res = put_description(tok, vid, sn, d2)
+        if res == "ok":
+            done += 1
+        else:
+            errs.append(f"{b.get('title', vid)}: {res}")
+            left[vid] = b
+            if res == "quota":
+                break
+    mem()["links_backup"] = {"time": datetime.datetime.utcnow().isoformat(), "items": left}
+    st["props"].pop(jid, None)
+    send(f"↩️ Restored {done} description(s)." + (f" ⚠️ {len(errs)} not restored; send /undolinks again." if errs else ""))
+
+
 def cmd_articlelinks(st):
     """For every article that is live on the site, propose a 'Read the full article' line in its video's description (nothing changes until you tap)."""
     arts = dict(mem().get("articles") or {})
@@ -17072,6 +17266,7 @@ def main():
             {"command": "xpost", "description": "Posts for X, Facebook, Instagram, TikTok"},
             {"command": "fixvideos", "description": "Give shared-film articles their own film"},
             {"command": "articlevideos", "description": "Which video each article uses"},
+            {"command": "linksall", "description": "Fix article links in ALL video descriptions"},
             {"command": "articlelinks", "description": "Put article links in video descriptions"},
             {"command": "dupes", "description": "Merge duplicate playlists"},
             {"command": "merge", "description": "Merge overlapping playlists"},
