@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.258"
+BOT_VERSION = "v10.259"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2999,6 +2999,47 @@ def x_intent(text, link):
     return "https://x.com/intent/post?" + urllib.parse.urlencode({"text": text, "url": link}, quote_via=urllib.parse.quote)
 
 
+def reddit_submit(title, link):
+    return "https://www.reddit.com/submit?" + urllib.parse.urlencode({"url": link, "title": title[:290], "type": "LINK"}, quote_via=urllib.parse.quote)
+
+
+QUORA_PROMPT = """You write an answer for Quora on behalf of the history channel "Kemet | Ancient Egypt". The owner will post it himself.
+Question from Quora: {q}
+These are the channel's website articles (slug: title):
+{arts}
+Rules: answer the question directly in the first sentence, then give the evidence in 120-220 words of plain paragraphs (no headings, no bullet lists, no emoji, no hashtags).
+Only well-established facts. Say "scholars think" or "it is debated" for interpretations. Never invent numbers, dates, quotes or sources. If the premise of the question is a myth, say so politely and show what the evidence says.
+Write in the language of the question. Do NOT put any link in the answer text.
+Pick the ONE article slug from the list that answers this question best, or "" when none fits well. Return JSON only: {{"answer": "...", "slug": "..."}}"""
+
+
+def cmd_quora(st, raw, quoted=""):
+    q = (raw[len("/quora"):] if raw.lower().startswith("/quora") else raw).strip() or (quoted or "").strip()
+    if not q:
+        return send("Paste a Quora question after /quora (for example: /quora Were the pyramids built by slaves?). I write an evidence-based answer and, when one of your articles fits, the link to add at the end. Quora does not let bots post, so you post it yourself.")
+    send("Writing the answer...")
+    try:
+        arts = site_article_map()
+    except Exception as e:
+        print("quora arts:", clean(e)[:100])
+        arts = {}
+    by_slug = {a["slug"]: a["title"] for a in arts.values()}
+    lst = "\n".join(f"{sl}: {t}" for sl, t in list(by_slug.items())[:160])
+    try:
+        out = gemini([{"text": QUORA_PROMPT.format(q=q[:600], arts=lst or "(none)")}]) or {}
+    except Exception as e:
+        return send("I could not write the answer right now (" + clean(str(e))[:80] + "). Try again in a minute.")
+    ans = plain(str(out.get("answer", ""))).strip()
+    if not ans:
+        return send("I could not write an answer for that. Send the question again.")
+    ans = re.sub(r"https?://\S+", "", ans).strip()
+    sl = str(out.get("slug", "")).strip()
+    link = f"{SITE_BASE}/articles/{sl}/" if sl in by_slug else ""
+    tail = f"\n\nI cover the evidence and the sources here: {src_tag(link, 'qu')}" if link else ""
+    send((ans + tail)[:3800] + "\n\n(Copy it, and post it yourself on Quora. Keep the link as the last line, and answer a few questions without a link too, so the account looks like a real contributor.)",
+         [[{"text": "🔎 Find the question on Quora", "url": "https://www.quora.com/search?" + urllib.parse.urlencode({"q": q[:150]}, quote_via=urllib.parse.quote)}]])
+
+
 def fb_share(link):
     return "https://www.facebook.com/sharer/sharer.php?" + urllib.parse.urlencode({"u": link})
 
@@ -3056,6 +3097,8 @@ def send_share(title, blurb, link, st=None):
          [[{"text": "📸 Open Instagram", "url": "https://www.instagram.com/"}]])
     send(f"🎵 TikTok caption (press and hold to copy):\n{p['tiktok']}\n\nFollow for the next piece of evidence.\n\n(TikTok captions cannot be clicked. If your bio has a link, use {SITE_BASE}/latest/ there. Article: {link})",
          [[{"text": "🎵 Open TikTok", "url": "https://www.tiktok.com/"}]])
+    send(f"👽 Reddit (optional, your best articles only):\n{title}\n{link}\n\nPick a subreddit that allows links to articles (for example r/AncientEgypt or r/history), read its rules first, and answer the comments. Do not post every article: Reddit bans accounts that only promote.",
+         [[{"text": "👽 Open Reddit (title and link filled in)", "url": reddit_submit(title, link)}]])
     send("Facebook cannot pre-fill the text, so paste the Facebook post above after it opens. Instagram and TikTok need your vertical video from your phone: pick the Short, paste the caption, post. Nothing goes out unless you tap Post in each app.")
 
 
@@ -11158,7 +11201,7 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/translate - ES, PT, HI subtitles\n"
         "/shortcuts - moments for Shorts\n"
         "/playlists - themed playlists\n"
-        "/uploadrecover ID - recover an upload\n"
+        "/quora QUESTION - Quora answer\n"
         "/failed - show failed updates\n"
         "/retry ID confirm - replay a failed update\n"
         "/watch - check the channel for problems\n"
@@ -11878,6 +11921,8 @@ def on_message(msg, st):
         cmd_needvideos(st)
     elif text.startswith("/articlevideos"):
         cmd_articlevideos(st)
+    elif text.lower().startswith("/quora"):
+        cmd_quora(st, raw, rp_)
     elif text == "/mergearticles":
         cmd_mergearticles(st)
     elif text == "/linksall":
