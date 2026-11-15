@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.257"
+BOT_VERSION = "v10.258"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -3155,6 +3155,7 @@ TITLES_PROMPT = """You help the YouTube history channel "Kemet | Ancient Egypt".
 Below are the channel's recent videos as JSON. Pick at most 3 (or the number asked below) whose TITLE could clearly be
 better (more curious, clearer, under 70 characters) while staying 100% true to the video.
 Do not touch titles that are already good. Never invent facts or use clickbait lies.
+NEVER start a title with "Fact Check:" (this channel tested it three times and every test lost views), and avoid "X or Y" titles; a plain question works better ("Were Millions of Kittens Sacrificed in Ancient Egypt?").
 Return JSON only: {"proposals": [{"video_id": "...", "new_title": "...", "why": "one short line"}]}
 Videos: """
 
@@ -3223,6 +3224,8 @@ def cmd_titles(st, focus=None):
         new = (p.get("new_title") or "").strip()[:100]
         if not v or not new or new == v["snippet"]["title"]:
             continue
+        if re.match(r"\s*fact[\s-]*check\s*[:\-–—]", new, re.I) and not re.match(r"\s*fact[\s-]*check\s*[:\-–—]", v["snippet"]["title"], re.I):
+            continue                                                # v10.258: "Fact Check:" rewrites lost views in all 3 tests, so the bot never proposes them
         if exp_blocker(v["id"], v["snippet"].get("publishedAt", ""), min_age):
             continue
         age_d = (time.time() - (iso_ts(v["snippet"].get("publishedAt", "")) or time.time())) / 86400
