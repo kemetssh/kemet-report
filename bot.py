@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.260"
+BOT_VERSION = "v10.261"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -11215,10 +11215,10 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/publish - put the site live\n"
         "/siteweek - website check\n"
         "/seocheck - SEO + AI check\n"
-        "/copycheck - find copycats\n"
         "/addsource words | link - add a source\n"
         "/scoreboard - week vs last week\n"
         "/month - this month so far\n"
+        "/searchcheck - Google + Bing check\n"
         "/ypp - earning rules check\n"
         "/synctitles - site film titles = YouTube\n"
         "/needvideos - articles without a video\n"
@@ -11454,7 +11454,7 @@ def recover_update_journal(st):
     return changed
 
 
-_SECRET_CMD = re.compile(r"^\s*/(ytcode|bigsetup|bigcode|exakey|fbconnect|searchkey|cfconnect)\b", re.I)
+_SECRET_CMD = re.compile(r"^\s*/(ytcode|bigsetup|bigcode|exakey|bingkey|fbconnect|searchkey|cfconnect)\b", re.I)
 _SECRET_TOKEN = re.compile(r"(tvly-[A-Za-z0-9_-]{8,}|AIza[0-9A-Za-z_-]{20,}|EAA[0-9A-Za-z]{20,}|[A-Za-z0-9_-]{32,})")
 
 
@@ -11892,6 +11892,10 @@ def on_message(msg, st):
         cmd_scoreboard(st)
     elif text == "/month" or text.startswith("/month@"):
         cmd_month(st)
+    elif text.startswith("/searchcheck"):
+        cmd_searchcheck(st)
+    elif text.startswith("/bingkey"):
+        cmd_bingkey(msg, st, raw)
     elif text.startswith("/ypp"):
         cmd_ypp(st)
     elif text.startswith("/copycheck"):
@@ -14778,6 +14782,161 @@ def cmd_month(st):
     send("\n".join(out)[:3900])
 
 
+# ---------------- v10.261: /searchcheck (Google + Bing) and /bingkey ----------------
+def bing_key():
+    return os.getenv("BING_KEY") or (mem().get("bing") or {}).get("key", "")
+
+
+def _bing_call(method, **params):
+    p = {"apikey": bing_key(), **params}
+    r = S.get("https://ssl.bing.com/webmaster/api.svc/json/" + method, params=p, timeout=40)
+    if r.status_code in (401, 403):
+        raise RuntimeError("Bing refused the key")
+    if not r.ok:
+        raise RuntimeError(f"Bing HTTP {r.status_code}")
+    return r.json().get("d")
+
+
+def _bing_date(v):
+    m_ = re.search(r"(-?\d{9,})", str(v or ""))
+    if not m_:
+        return ""
+    ts = int(m_.group(1)) / 1000
+    return time.strftime("%Y-%m-%d", time.gmtime(ts)) if ts > 86400 * 365 else ""
+
+
+def cmd_bingkey(msg, st, raw):
+    parts = raw.split()
+    forget_message(msg)
+    key = parts[1] if len(parts) > 1 else ""
+    if key.lower() == "off":
+        mem().pop("bing", None)
+        return send("Bing key deleted from my notes.")
+    if not re.fullmatch(r"[A-Za-z0-9]{20,}", key):
+        return send("That does not look like a Bing key. I deleted your message. In Bing Webmaster Tools: Settings, API access, Generate API Key. Then send: /bingkey YOURKEY")
+    mem()["bing"] = {"key": key, "ts": time.time()}
+    try:
+        q = _bing_call("GetUrlSubmissionQuota", siteUrl=SITE_BASE + "/")
+        send("✅ Bing connected (daily URL quota: %s). Your message is deleted. Send /searchcheck." % (q if not isinstance(q, dict) else q.get("DailyQuota", "ok")))
+    except Exception as e:
+        mem().pop("bing", None)
+        send("Bing did not accept that key (%s). I deleted your message and did not keep it. Check that %s is added in Bing Webmaster Tools under the same account, then retry." % (clean(e)[:60], SITE_BASE))
+
+
+def _sc_urls():
+    """Homepage plus the newest articles, read from the live sitemap."""
+    urls = [SITE_BASE + "/"]
+    try:
+        x = S.get(SITE_BASE + "/sitemap.xml", timeout=25).text
+        items = re.findall(r"<url>\s*<loc>([^<]+)</loc>(?:\s*<lastmod>([^<]*)</lastmod>)?", x)
+        arts = [(lm, u) for u, lm in items if "/articles/" in u and not u.rstrip("/").endswith("/articles")]
+        arts.sort(key=lambda t: t[0])
+        urls += [u for _, u in arts[-8:]][::-1]
+    except Exception as e:
+        print("searchcheck sitemap:", clean(e)[:80])
+    return urls
+
+
+def cmd_searchcheck(st):
+    send("🔎 Asking Google and Bing…")
+    urls = _sc_urls()
+    out = ["🔎 Search check (%d pages)" % len(urls)]
+    todo = []
+    # ---- Google
+    try:
+        ok, g = gsc_sync()
+        if not ok:
+            raise RuntimeError(g)
+        site = g["site"]
+        H = {"Authorization": "Bearer " + yt_token()}
+        gs = urllib.parse.quote(site, safe="")
+        try:
+            r = S.get("https://www.googleapis.com/webmasters/v3/sites/" + gs + "/sitemaps", headers=H, timeout=40)
+            r.raise_for_status()
+            sm = r.json().get("sitemap") or []
+            if not sm:
+                out.append("\nGoogle sitemap: none listed. Add sitemap.xml in Search Console.")
+                todo.append("Add sitemap.xml in Search Console")
+            for x in sm[:3]:
+                errs, warns = int(x.get("errors", 0) or 0), int(x.get("warnings", 0) or 0)
+                sub = sum(int(c.get("submitted", 0) or 0) for c in x.get("contents") or [])
+                out.append("\nGoogle sitemap %s: last read %s, %s, %d errors, %d warnings, %d URLs found" % (
+                    x.get("path", "")[-30:], (x.get("lastDownloaded") or "never")[:10], "processing" if x.get("isPending") else "done", errs, warns, sub))
+                if not x.get("lastDownloaded") or errs:
+                    todo.append("Google cannot read the sitemap: remove and re-add it once in Search Console")
+        except Exception as e:
+            out.append("\nGoogle sitemap: not readable (%s)" % clean(e)[:70])
+        res = []
+        for u in urls:
+            try:
+                rr = S.post("https://searchconsole.googleapis.com/v1/urlInspection/index:inspect", headers=H, json={"inspectionUrl": u, "siteUrl": site}, timeout=60)
+                if rr.status_code == 429:
+                    out.append("Google page checks: daily limit reached, try again tomorrow")
+                    break
+                rr.raise_for_status()
+                ix = (rr.json().get("inspectionResult") or {}).get("indexStatusResult") or {}
+                res.append((u, ix.get("verdict", "?"), ix.get("coverageState", "?"), (ix.get("lastCrawlTime") or "")[:10]))
+            except Exception as e:
+                out.append("Google page check failed (%s)" % clean(e)[:70])
+                break
+        if res:
+            n_ok = sum(1 for r_ in res if r_[1] == "PASS")
+            out.append("Google indexed: %d of %d pages" % (n_ok, len(res)))
+            for u, v, c, d in res:
+                if v != "PASS":
+                    out.append("  ✗ %s: %s%s" % (u.replace(SITE_BASE, "") or "/", c[:50], (", crawled " + d) if d else ""))
+            if n_ok < len(res):
+                todo.append("Google: pages not indexed yet are normal for a new site; keep publishing and check again in a week")
+    except Exception as e:
+        out.append("\nGoogle: not readable now (%s)" % clean(e)[:90])
+    # ---- Bing
+    if not bing_key():
+        out.append("\nBing: not connected. Bing Webmaster Tools, Settings, API access, Generate API Key, then send /bingkey YOURKEY")
+    else:
+        try:
+            site = SITE_BASE + "/"
+            try:
+                q = _bing_call("GetUrlSubmissionQuota", siteUrl=site)
+                if isinstance(q, dict):
+                    out.append("\nBing URL quota today: %s daily, %s monthly" % (q.get("DailyQuota", "?"), q.get("MonthlyQuota", "?")))
+            except Exception as e:
+                if "refused" in str(e):
+                    raise
+            try:
+                iss = _bing_call("GetCrawlIssues", siteUrl=site) or []
+                out.append("Bing crawl issues: %d" % len(iss))
+                if iss:
+                    todo.append("Bing reports %d crawl issues: open Bing Webmaster Tools, Site Explorer" % len(iss))
+            except Exception as e:
+                out.append("Bing crawl issues: not readable (%s)" % clean(e)[:50])
+            seen, bad = 0, []
+            for u in urls:
+                try:
+                    d = _bing_call("GetUrlInfo", siteUrl=site, url=u) or {}
+                except Exception as e:
+                    out.append("Bing page check failed (%s)" % clean(e)[:60])
+                    break
+                lc = _bing_date(d.get("LastCrawledDate"))
+                if lc:
+                    seen += 1
+                else:
+                    bad.append(u.replace(SITE_BASE, "") or "/")
+            out.append("Bing has crawled: %d of %d pages" % (seen, len(urls)))
+            if bad:
+                out.append("  not crawled yet: " + ", ".join(b[:35] for b in bad[:4]))
+            try:
+                tr = _bing_call("GetRankAndTrafficStats", siteUrl=site) or []
+                if tr:
+                    last = tr[-14:]
+                    out.append("Bing last %d days: %d impressions, %d clicks" % (len(last), sum(int(x.get("Impressions", 0) or 0) for x in last), sum(int(x.get("Clicks", 0) or 0) for x in last)))
+            except Exception as e:
+                print("bing traffic:", clean(e)[:60])
+        except Exception as e:
+            out.append("\nBing: %s. Send /bingkey again." % clean(e)[:70])
+    out.append("\nNext: " + ("; ".join(todo[:3]) if todo else "nothing to fix, keep publishing"))
+    send("\n".join(out)[:3900])
+
+
 def cmd_scoreboard(st, auto=False):
     send("📋 Putting this week's numbers together...")
     snap = board_snapshot()
@@ -17626,6 +17785,7 @@ def main():
             {"command": "learnexport", "description": "Send what I learned as a file"},
             {"command": "chapters", "description": "Add timestamps to long videos"},
             {"command": "month", "description": "All numbers, 1st of month to today"},
+            {"command": "searchcheck", "description": "Google and Bing: sitemap and indexed pages"},
             {"command": "fbviews", "description": "Facebook views vs YouTube"},
             {"command": "fbcomments", "description": "Reply to Facebook comments"},
             {"command": "flow", "description": "Google Flow prompts for a Short"},
