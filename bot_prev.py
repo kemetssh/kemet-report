@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.259"
+BOT_VERSION = "v10.260"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -11218,11 +11218,11 @@ HELP = ("Send me your finished video (as a normal video, under 20 MB).\n"
         "/copycheck - find copycats\n"
         "/addsource words | link - add a source\n"
         "/scoreboard - week vs last week\n"
+        "/month - this month so far\n"
         "/ypp - earning rules check\n"
         "/synctitles - site film titles = YouTube\n"
         "/needvideos - articles without a video\n"
         "/searchdata - Google search ideas\n"
-        "/sitelogo - logo on site\n"
         "/cfsetup - 1-tap publish\n"
         "/xpost - X, Facebook, Insta, TikTok posts\n"
         "/articlecheck - deepen articles\n"
@@ -11890,6 +11890,8 @@ def on_message(msg, st):
         cmd_addsource(st, raw)
     elif text.startswith("/scoreboard"):
         cmd_scoreboard(st)
+    elif text == "/month" or text.startswith("/month@"):
+        cmd_month(st)
     elif text.startswith("/ypp"):
         cmd_ypp(st)
     elif text.startswith("/copycheck"):
@@ -14621,6 +14623,159 @@ _BOARD_LABELS = (("subs", "YouTube subscribers"), ("views28", "YouTube views (28
                  ("site_views7", "Website page views (7 days)"), ("site_visits7", "Website visits (7 days)"),
                  ("g_imp", "Google impressions (28 days)"), ("g_clicks", "Google clicks (28 days)"), ("g_ch_imp", "YouTube videos in Google search (impressions, 28 days)"), ("ig_reach28", "Instagram accounts reached (28 days)"),
                  ("shorts_linked", "Shorts that point to a long video"))
+
+
+# ---------------- v10.260: /month = all numbers from the 1st to today, against the same days last month ----------------
+def _month_ranges():
+    t = datetime.date.today()
+    a = t.replace(day=1)
+    pe = a - datetime.timedelta(days=1)
+    pa = pe.replace(day=1)
+    pb = min(pa + datetime.timedelta(days=t.day - 1), pe)
+    return a, t, pa, pb
+
+
+def _chg(a, b):
+    if not b:
+        return ""
+    d = (a - b) * 100 / b
+    return " (%s%d%%)" % ("+" if d >= 0 else "", round(d))
+
+
+def _an_range(tok, metrics, a, b, dims=None, sort=None, limit=None):
+    p = {"ids": "channel==MINE", "startDate": a.isoformat(), "endDate": b.isoformat(), "metrics": metrics}
+    if dims:
+        p["dimensions"] = dims
+    if sort:
+        p["sort"] = sort
+    if limit:
+        p["maxResults"] = limit
+    r = S.get(f"{YTA}/v2/reports", params=p, headers={"Authorization": f"Bearer {tok}"}, timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"Analytics HTTP {r.status_code}")
+    rows = r.json().get("rows") or []
+    if dims:
+        return rows
+    n = len(metrics.split(","))
+    row = rows[0] if rows else [0] * n
+    return [v if isinstance(v, (int, float)) else 0 for v in row]
+
+
+def _web_range(a, b):
+    cfg = cf_cfg()
+    tag = cf_site_tag()
+    f = lambda d, end: d.isoformat() + ("T23:59:59Z" if end else "T00:00:00Z")
+    d = cf_graphql(WEB_Q, {"acc": cfg["account"], "tag": tag, "since": f(a, 0), "until": f(b, 1)})
+    acc = ((d.get("viewer") or {}).get("accounts") or [{}])[0]
+    tot = (acc.get("total") or [{}])[0] if acc.get("total") else {}
+    refs = {}
+    for g in acc.get("refs") or []:
+        k = ref_kind((g.get("dimensions") or {}).get("refererHost", ""))
+        refs[k] = refs.get(k, 0) + int(g.get("count", 0))
+    pages = [((g.get("dimensions") or {}).get("requestPath", "?"), int(g.get("count", 0))) for g in (acc.get("pages") or [])]
+    return int(tot.get("count", 0) or 0), int(((tot.get("sum") or {}).get("visits", 0)) or 0), pages, sorted(refs.items(), key=lambda kv: -kv[1])
+
+
+def _gsc_range(a, b):
+    ok, g = gsc_sync()
+    if not ok:
+        raise RuntimeError(g)
+    site = g["site"]
+    H = {"Authorization": "Bearer " + yt_token()}
+    def q(x, y):
+        rr = S.post("https://www.googleapis.com/webmasters/v3/sites/" + urllib.parse.quote(site, safe="") + "/searchAnalytics/query",
+                    headers=H, json={"startDate": x.isoformat(), "endDate": y.isoformat()}, timeout=60)
+        rr.raise_for_status()
+        rows = rr.json().get("rows", [])
+        return (int(rows[0].get("clicks", 0)), int(rows[0].get("impressions", 0))) if rows else (0, 0)
+    return q
+
+
+def _follow_delta(lst, a):
+    """Followers now and growth since the 1st (uses the last saved number before the 1st, else the first one of this month)."""
+    if not lst:
+        return None
+    t0 = time.mktime(a.timetuple())
+    before = [x for x in lst if x[0] < t0]
+    base = before[-1][1] if before else lst[0][1]
+    return int(lst[-1][1]), int(lst[-1][1]) - int(base), bool(before)
+
+
+def cmd_month(st):
+    a, t, pa, pb = _month_ranges()
+    name = a.strftime("%B")
+    out = ["📅 %s 1–%d so far (vs %s 1–%d)" % (name, t.day, pa.strftime("%B"), pb.day)]
+    try:
+        tok = yt_token()
+        v, mn, g, l = _an_range(tok, "views,estimatedMinutesWatched,subscribersGained,subscribersLost", a, t)
+        v0, mn0, g0, l0 = _an_range(tok, "views,estimatedMinutesWatched,subscribersGained,subscribersLost", pa, pb)
+        out.append("\n▶️ YouTube\nViews %s%s\nWatch hours %s%s\nSubscribers +%s gained, -%s lost = net %+d%s" % (
+            f"{int(v):,}", _chg(v, v0), f"{mn/60:,.0f}", _chg(mn, mn0), int(g), int(l), int(g - l), (" (last month %+d)" % int(g0 - l0))))
+        try:
+            rows = _an_range(tok, "views", a, t, dims="video", sort="-views", limit=3)
+            if rows:
+                ids = ",".join(r[0] for r in rows)
+                its = yt_get("videos", tok, part="snippet", id=ids).get("items", [])
+                tt = {i["id"]: i["snippet"]["title"] for i in its}
+                out.append("Top: " + "; ".join("%s (%s)" % (tt.get(r[0], r[0])[:45], f"{int(r[1]):,}") for r in rows))
+        except Exception as e:
+            print("month top:", clean(e)[:80])
+        try:
+            n = yt_get("channels", tok, part="statistics", mine="true")["items"][0]["statistics"].get("subscriberCount")
+            out.append("Subscribers now: %s" % f"{int(n):,}")
+        except Exception:
+            pass
+    except Exception as e:
+        out.append("\n▶️ YouTube: not readable now (%s)" % clean(e)[:80])
+    try:
+        if not cf_cfg():
+            raise RuntimeError("Cloudflare is not connected (/cfsetup)")
+        w, vi, pages, refs = _web_range(a, t)
+        w0, vi0, _, _ = _web_range(pa, pb)
+        out.append("\n🌐 Website\nPage views %s%s, visits %s%s" % (f"{w:,}", _chg(w, w0), f"{vi:,}", _chg(vi, vi0)))
+        pg = [(p, c) for p, c in pages if p not in ("/", "") ][:3]
+        if pg:
+            out.append("Top pages: " + "; ".join("%s (%d)" % (p.strip("/")[:40], c) for p, c in pg))
+        if refs:
+            out.append("From: " + ", ".join("%s %d" % (k[:22], c) for k, c in refs[:4]))
+    except Exception as e:
+        out.append("\n🌐 Website: not readable now (%s)" % clean(e)[:80])
+    try:
+        q = _gsc_range(a, t - datetime.timedelta(days=2))
+        e2 = t - datetime.timedelta(days=2)
+        if e2 < a:
+            out.append("\n🔎 Google: data is 2 days behind, check again from the 3rd")
+        else:
+            c, i = q(a, e2)
+            c0, i0 = q(pa, min(pb, pa + datetime.timedelta(days=(e2 - a).days)))
+            out.append("\n🔎 Google (to %s)\nImpressions %s%s, clicks %s%s" % (e2.strftime("%d %b"), f"{i:,}", _chg(i, i0), f"{c:,}", _chg(c, c0)))
+    except Exception as e:
+        out.append("\n🔎 Google: not readable now (%s)" % clean(e)[:80])
+    m = mem()
+    soc = []
+    for p_, lst in (m.get("plat_followers") or {}).items():
+        r_ = _follow_delta(lst, a)
+        if r_:
+            soc.append("%s %s (%+d%s)" % (PLATFORM_NAMES.get(p_, p_), f"{r_[0]:,}", r_[1], "" if r_[2] else ", since first saved"))
+    if soc:
+        out.append("\n👥 Followers (growth this month)\n" + "\n".join(soc))
+    t0 = time.mktime(a.timetuple())
+    sv = {}
+    for e in m.get("plat") or []:
+        if e.get("ts", 0) >= t0:
+            d = sv.setdefault(e["p"], {})
+            for k in ("views", "likes", "comments", "shares"):
+                if e.get(k):
+                    d[k] = d.get(k, 0) + int(e[k])
+    if sv:
+        out.append("\n✍️ Logged by you (/log)\n" + "\n".join("%s: %s" % (PLATFORM_NAMES.get(p, p), ", ".join("%s %s" % (f"{v:,}", k) for k, v in d.items())) for p, d in sv.items()))
+    try:
+        ir = ((m.get("ig_ins") or {}).get("tot") or {}).get("reach") or {}
+        if ir.get("d28") is not None:
+            out.append("Instagram reach, last 28 days: %s" % f"{int(ir['d28']):,}")
+    except Exception:
+        pass
+    send("\n".join(out)[:3900])
 
 
 def cmd_scoreboard(st, auto=False):
@@ -17470,6 +17625,7 @@ def main():
             {"command": "sublines", "description": "Test subscribe wording"},
             {"command": "learnexport", "description": "Send what I learned as a file"},
             {"command": "chapters", "description": "Add timestamps to long videos"},
+            {"command": "month", "description": "All numbers, 1st of month to today"},
             {"command": "fbviews", "description": "Facebook views vs YouTube"},
             {"command": "fbcomments", "description": "Reply to Facebook comments"},
             {"command": "flow", "description": "Google Flow prompts for a Short"},
