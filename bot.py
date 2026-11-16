@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.268"
+BOT_VERSION = "v10.271"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -1207,7 +1207,8 @@ def guide_line(src="yt"):
     """v10.249: one line pointing to the free guide page. Empty when switched off (/guideoff)."""
     if mem().get("guide_promo") is False:
         return ""
-    return "📘 Free guide, Ancient Egypt: Myth vs Evidence: " + src_tag(SITE_BASE + "/guide/", src)
+    return ("📘 Free guide, Ancient Egypt: Myth vs Evidence: " + src_tag(SITE_BASE + "/guide/", src)
+            + "\n📖 The complete book on Kindle: " + GUIDE_PAID_URL)   # v10.270
 
 
 def with_guide(text, limit=4900, src="yt"):
@@ -15172,21 +15173,21 @@ def ensure_guide_page(root):
     if min(i, j, k) < 0:
         return False
     url = f"{SITE_BASE}/guide/"
-    desc = "A free guide from Kemet: ten popular claims about ancient Egypt checked against the evidence, with sources."
+    desc = "A free sample from Kemet: three chapters of Ancient Egypt, Myth vs Evidence, checking popular claims against the evidence, with sources."
     img = f"{SITE_BASE}/guide/cover.webp"
     head = (t[:i] + f"<title>Free guide: Ancient Egypt, Myth vs Evidence | Kemet</title><meta content=\"{desc}\" name=\"description\"/><link href=\"{url}\" rel=\"canonical\"/>"
             f"<meta content=\"Free guide: Ancient Egypt, Myth vs Evidence\" property=\"og:title\"/><meta content=\"{desc}\" property=\"og:description\"/><meta content=\"{img}\" property=\"og:image\"/><meta content=\"{url}\" property=\"og:url\"/>"
             "<link href=\"/brand-mark.svg\" rel=\"icon\" type=\"image/svg+xml\"/><link href=\"/styles.css\" rel=\"stylesheet\"/></head>\n<body>\n")
     body = t[t.find("<body>") + 7:j] if "<body>" in t[:j] else ""
-    paid = (f"<h2>Want the whole book?</h2><p>The complete edition has 20 chapters and 155 pages, with the full text and the sources after every chapter.</p>"
+    paid = (f"<h2>Want the whole book?</h2><p>The complete edition has 20 chapters, with the full text and the sources after every chapter.</p>"
             f"<p><a class=\"button button-quiet\" href=\"{GUIDE_PAID_URL}\" rel=\"noopener\" target=\"_blank\">Get the complete edition on Kindle, $9.99</a></p>") if GUIDE_PAID_URL else ""
     main = ("<main id=\"main-content\">\n<header class=\"article-hero\"><div class=\"section-shell\"><div class=\"article-meta\"><span>Kemet / Free guide</span></div>"
-            "<h1>Ancient Egypt:<br/><em>Myth vs Evidence</em></h1><p class=\"article-deck\">A free 36-page guide that checks ten popular claims about ancient Egypt against what archaeologists and scientists actually say.</p></div></header>\n"
+            "<h1>Ancient Egypt:<br/><em>Myth vs Evidence</em></h1><p class=\"article-deck\">A free 12-page sample with three chapters from the complete book. It checks popular claims about ancient Egypt against what archaeologists and scientists actually say.</p></div></header>\n"
             "<div class=\"section-shell article-layout\"><article class=\"article-body\">\n"
             "<figure><img src=\"/guide/cover.webp\" alt=\"Cover of the Kemet guide: Ancient Egypt, Myth vs Evidence\" width=\"800\" height=\"450\" loading=\"lazy\" style=\"max-width:100%;height:auto;border-radius:8px\"/></figure>"
-            "<h2>What is inside?</h2><ul><li>The pharaoh's curse</li><li>How the pyramids were really built</li><li>The logbooks of Merer</li><li>Did the Egyptians cut granite with sound?</li><li>Mummification and the Herodotus claim</li><li>The face of Cleopatra</li><li>Tutankhamun's dagger from the sky</li><li>The Orion correlation theory</li><li>The Sphinx: erosion, salt and secrets</li><li>Did Egyptians reach America?</li></ul>"
+            "<h2>What is inside?</h2><ul><li>The pharaoh's curse</li><li>How the pyramids were really built</li><li>The logbooks of Merer</li><li><em>The complete edition has 20 chapters in full.</em></li></ul>"
             "<h2>How does it work?</h2><p>Every chapter is a short version of a Kemet article, with its sources. Where scholars disagree, the guide says so and never presents a guess as a fact.</p>"
-            f"<p><a class=\"button button-primary\" href=\"{GUIDE_FREE_URL}\" rel=\"noopener\" target=\"_blank\">Get the free guide</a></p><p><small>Free. A PDF delivered to your email, 36 pages.</small></p>" + paid +
+            f"<p><a class=\"button button-primary\" href=\"{GUIDE_FREE_URL}\" rel=\"noopener\" target=\"_blank\">Get the free sample</a></p><p><small>Free. A 12-page PDF delivered to your email.</small></p>" + paid +
             "\n<a class=\"article-back\" href=\"/\">← Home</a></article></div>\n</main>\n")
     page = head + body + main + t[k:]
     d = root / "guide"
@@ -15229,7 +15230,7 @@ def ensure_home_funnel(root):
                             '<div class="follow-actions"><a class="button button-primary" href="/guide/">Get the free Myth vs Evidence guide <span aria-hidden="true">→</span></a>', 1)
         tail = tail.replace('<a class="button button-primary" href="https://www.youtube.com/@Kemet-ssh"', '<a class="button button-quiet" href="https://www.youtube.com/@Kemet-ssh"', 1)
         tail = tail.replace("<p>New films, field notes, and historical curiosities from the banks of the Nile.</p>",
-                            "<p>Get the free 36-page guide to ten popular claims about ancient Egypt, checked against the evidence. Then explore new films and field notes from the banks of the Nile.</p>", 1)
+                            "<p>Get the free 12-page sample of our book on popular claims about ancient Egypt, checked against the evidence. Then explore new films and field notes from the banks of the Nile.</p>", 1)
         t = head_ + tail
     # 2. 'Start here'
     slugs = mem().get("start_here") or START_HERE
@@ -15300,9 +15301,9 @@ def ensure_pdf_offer(root):
     free, paid = src_tag(GUIDE_FREE_URL, "pf"), GUIDE_PAID_URL   # v10.268: the complete edition is on Amazon (no tracking tag)
     block = ('<!--kemet-pdf--><section class="pdf-offer" aria-labelledby="pdf-offer-title"><div class="pdf-offer-in">'
              '<p class="pdf-kicker">Free PDF guide</p><h2 id="pdf-offer-title">Ancient Egypt: Myth vs Evidence</h2>'
-             '<p>Ten popular claims about ancient Egypt, checked against the evidence. Take the free 36-page guide, or the complete 155-page edition with every source.</p>'
+             '<p>Popular claims about ancient Egypt, checked against the evidence. Take the free 12-page sample, or the complete 20-chapter edition with every source.</p>'
              f'<div class="pdf-buttons"><a class="button button-primary" href="{free}" rel="noopener" target="_blank">Get the free PDF</a>'
-             f'<a class="button button-quiet" href="{paid}" rel="noopener" target="_blank">Complete edition on Kindle (155 pages)</a></div>'
+             f'<a class="button button-quiet" href="{paid}" rel="noopener" target="_blank">Complete edition on Kindle (20 chapters)</a></div>'
              '<p class="pdf-note">The free guide needs no payment.</p></div></section><!--/kemet-pdf-->')
     n = 0
     for f in root.rglob("*.html"):                         # v10.254: the Gumroad account moved; any old address is rewritten everywhere
