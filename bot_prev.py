@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.261"
+BOT_VERSION = "v10.263"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -14927,8 +14927,15 @@ def cmd_searchcheck(st):
             try:
                 tr = _bing_call("GetRankAndTrafficStats", siteUrl=site) or []
                 if tr:
-                    last = tr[-14:]
-                    out.append("Bing last %d days: %d impressions, %d clicks" % (len(last), sum(int(x.get("Impressions", 0) or 0) for x in last), sum(int(x.get("Clicks", 0) or 0) for x in last)))
+                    ds = [(_bing_date(x.get("Date")), x) for x in tr]
+                    ds = [(d_, x) for d_, x in ds if d_]
+                    ds.sort(key=lambda t: t[0])
+                    last = ds[-30:]
+                    if last:
+                        out.append("Bing %s to %s: %d impressions, %d clicks (days with data only: %d)" % (last[0][0], last[-1][0],
+                                   sum(int(x.get("Impressions", 0) or 0) for _, x in last), sum(int(x.get("Clicks", 0) or 0) for _, x in last), len(last)))
+                else:
+                    out.append("Bing traffic: no impressions recorded yet")
             except Exception as e:
                 print("bing traffic:", clean(e)[:60])
         except Exception as e:
@@ -16217,6 +16224,12 @@ def pack_site(root, d, caption):
         seo_fix(root)             # FAQ markup on every new article, automatically
     except Exception as e:
         print("faq markup:", clean(e)[:120])
+    try:
+        sm_ = root / "sitemap.xml"   # v10.263: same list under a second name, so Google gets a second, fresh submission
+        if sm_.exists():
+            (root / "sitemap-articles.xml").write_text(sm_.read_text(encoding="utf-8"), encoding="utf-8")
+    except Exception as e:
+        print("second sitemap:", clean(e)[:120])
     if mem().get("ask_on"):
         try:
             apply_ask(root)       # keeps the question box on new articles too
