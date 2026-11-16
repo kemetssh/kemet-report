@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.263"
+BOT_VERSION = "v10.264"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -14837,11 +14837,73 @@ def _sc_urls():
     return urls
 
 
+def _access_check():
+    """Can Googlebot reach the site? Reads robots.txt, the homepage and both sitemaps with a Googlebot name and with a normal name. Returns (lines, problems)."""
+    GB = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+    NB = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148"
+    lines, bad = [], []
+    def get(path, ua):
+        try:
+            return S.get(SITE_BASE + path, headers={"User-Agent": ua}, timeout=25, allow_redirects=False)
+        except Exception as e:
+            return clean(e)[:50]
+    rb = get("/robots.txt", GB)
+    if isinstance(rb, str):
+        lines.append("robots.txt: not reachable (%s)" % rb)
+        bad.append("robots.txt unreachable")
+    else:
+        txt = rb.text if rb.status_code == 200 else ""
+        if rb.status_code == 404:
+            lines.append("robots.txt: none (that is fine, everything is allowed)")
+        elif rb.status_code == 200 and "<html" in txt[:300].lower():
+            lines.append("robots.txt: returns a web page instead of rules (Google may treat that as an error)")
+            bad.append("robots.txt returns HTML: add a plain robots.txt")
+        elif rb.status_code == 200:
+            blocks = [l for l in txt.splitlines() if re.match(r"\s*disallow:\s*/\s*$", l, re.I)]
+            lines.append("robots.txt: found, %s" % ("BLOCKS the whole site" if blocks else "allows crawling"))
+            if blocks:
+                bad.append("robots.txt blocks everything")
+            if "sitemap" not in txt.lower():
+                lines.append("  it does not name the sitemap (optional)")
+        else:
+            lines.append("robots.txt: HTTP %s (Google treats 5xx as 'cannot crawl')" % rb.status_code)
+            if rb.status_code >= 500:
+                bad.append("robots.txt gives a server error")
+    for path in ("/", "/sitemap.xml", "/sitemap-articles.xml"):
+        a, b = get(path, GB), get(path, NB)
+        if isinstance(a, str) or isinstance(b, str):
+            lines.append("%s: not reachable (%s)" % (path, a if isinstance(a, str) else b))
+            bad.append(path + " unreachable")
+            continue
+        note = ""
+        xr = a.headers.get("X-Robots-Tag", "")
+        if "noindex" in xr.lower() or "none" in xr.lower():
+            note += ", X-Robots-Tag: " + xr[:30]
+            bad.append(path + " has a noindex header")
+        if "xml" in path and "xml" not in a.headers.get("Content-Type", "").lower():
+            note += ", type %s (should be xml)" % a.headers.get("Content-Type", "?")[:25]
+            bad.append(path + " has the wrong content type")
+        if a.status_code != b.status_code:
+            note += ", normal visitor gets %s" % b.status_code
+            bad.append("Googlebot is treated differently on " + path)
+        lines.append("%s: Googlebot gets HTTP %s%s" % (path, a.status_code, note))
+        if a.status_code in (301, 302, 307, 308) and "xml" in path:
+            bad.append(path + " redirects: Google wants the sitemap at its own address")
+    return lines, bad
+
+
 def cmd_searchcheck(st):
     send("🔎 Asking Google and Bing…")
     urls = _sc_urls()
     out = ["🔎 Search check (%d pages)" % len(urls)]
     todo = []
+    try:
+        al, ab = _access_check()
+        out.append("\nCan Google reach the site?\n" + "\n".join(al))
+        out.append("→ " + ("PROBLEM: " + "; ".join(ab[:3]) if ab else "no blocking found on my side"))
+        todo += ab[:2]
+    except Exception as e:
+        out.append("\nAccess check failed: " + clean(e)[:70])
     # ---- Google
     try:
         ok, g = gsc_sync()
