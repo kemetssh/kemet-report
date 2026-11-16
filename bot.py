@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.273"
+BOT_VERSION = "v10.275"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -6074,6 +6074,10 @@ def housekeeping(st):
         daily_idea_taps(st)
     except Exception as e:
         print("daily ideas:", clean(e)[:120])
+    try:
+        daily_kindle(st)
+    except Exception as e:
+        print("daily kindle:", clean(e)[:120])
     g0 = time.gmtime()
     if "last_brief" not in m:
         m["last_brief"] = now
@@ -11893,6 +11897,8 @@ def on_message(msg, st):
         cmd_scoreboard(st)
     elif text == "/month" or text.startswith("/month@"):
         cmd_month(st)
+    elif text.startswith("/kindleline"):
+        cmd_kindleline(st, raw)
     elif text.startswith("/searchcheck"):
         cmd_searchcheck(st)
     elif text.startswith("/bingkey"):
@@ -15015,6 +15021,83 @@ def cmd_searchcheck(st):
     send("\n".join(out)[:3900])
 
 
+# ---------------- v10.275: the Kindle line goes into old descriptions automatically, 5 a day from 10:00 Cairo, most-viewed first ----------------
+KINDLE_LINE = "📖 The complete book on Kindle: "
+KINDLE_PER_DAY = 5
+
+
+def kindle_line():
+    return KINDLE_LINE + GUIDE_PAID_URL
+
+
+def daily_kindle(st, force=False):
+    m = mem()
+    k = m.setdefault("kindle_line", {})
+    if k.get("off") and not force:
+        return
+    now_c = datetime.datetime.now(cairo_zone())
+    day = now_c.strftime("%Y-%m-%d")
+    if not force and (now_c.hour < 10 or k.get("day") == day or time.time() - k.get("try", 0) < 1800):
+        return
+    k["try"] = time.time()
+    k["day"] = day
+    tok = yt_token()
+    vids = all_videos(tok)
+    vids.sort(key=lambda v: -int((v.get("statistics") or {}).get("viewCount", 0) or 0))
+    line = kindle_line()
+    todo = [v for v in vids if GUIDE_PAID_URL not in (v.get("snippet", {}).get("description", "") or "")]
+    k["left"] = len(todo)
+    if not todo:
+        if not k.get("finished"):
+            k["finished"] = True
+            send("📖 The Kindle line is now in every video description. Done.")
+        return
+    done, errs, quota = [], [], False
+    for v in todo[:KINDLE_PER_DAY]:
+        sn = v["snippet"]
+        d = (sn.get("description", "") or "").rstrip()
+        if len(d) + 2 + len(line) > 4900:
+            errs.append(sn.get("title", v["id"])[:30] + ": description too long")
+            continue
+        try:
+            res = put_description(tok, v["id"], sn, (d + "\n\n" + line).strip())
+        except Exception as e:
+            res = clean(e)[:60]
+        if res == "ok":
+            done.append(sn.get("title", v["id"])[:34])
+        elif res == "quota":
+            quota = True
+            break
+        else:
+            errs.append(sn.get("title", v["id"])[:30] + ": " + str(res))
+    k["left"] = max(0, len(todo) - len(done))
+    k["total"] = k.get("total", 0) + len(done)
+    msg = ["📖 Kindle line added to %d video description(s) today, %d left." % (len(done), k["left"])]
+    if done:
+        msg.append("Top today: " + "; ".join(done[:3]))
+    if quota:
+        msg.append("YouTube's daily quota ran out; I continue tomorrow.")
+    if errs:
+        msg.append("Skipped: " + "; ".join(errs[:3]))
+    send("\n".join(msg))
+
+
+def cmd_kindleline(st, raw):
+    k = mem().setdefault("kindle_line", {})
+    a = (raw.split() + [""])[1].lower()
+    if a == "off":
+        k["off"] = True
+        return send("Paused: no more automatic Kindle lines. Send /kindleline on to continue.")
+    if a == "on":
+        k.pop("off", None)
+        k.pop("finished", None)
+        return send("On: 5 videos a day from 10:00 Cairo, most-viewed first.")
+    if a == "now":
+        return daily_kindle(st, force=True)
+    send("📖 Kindle line in old descriptions: %s. Added so far: %d. Left: %s. Runs daily from 10:00 Cairo, %d videos, most-viewed first.\n/kindleline off | on | now" % (
+        "PAUSED" if k.get("off") else "on", k.get("total", 0), k.get("left", "not counted yet"), KINDLE_PER_DAY))
+
+
 def cmd_scoreboard(st, auto=False):
     send("📋 Putting this week's numbers together...")
     snap = board_snapshot()
@@ -15180,7 +15263,7 @@ def ensure_guide_page(root):
             "<link href=\"/brand-mark.svg\" rel=\"icon\" type=\"image/svg+xml\"/><link href=\"/styles.css\" rel=\"stylesheet\"/></head>\n<body>\n")
     body = t[t.find("<body>") + 7:j] if "<body>" in t[:j] else ""
     paid = (f"<h2>Want the whole book?</h2><p>The complete edition has 20 chapters, with the full text and the sources after every chapter.</p>"
-            f"<p><a class=\"button button-quiet\" href=\"{GUIDE_PAID_URL}\" rel=\"noopener\" target=\"_blank\">Get the complete edition on Kindle, $4.99</a></p>") if GUIDE_PAID_URL else ""
+            f"<p><a class=\"button button-quiet\" href=\"{GUIDE_PAID_URL}\" rel=\"noopener\" target=\"_blank\">Get the complete edition on Kindle, $4.99</a></p><p><small>On the Amazon page you can also tap \"Read a free sample\" to read the first pages for free.</small></p>") if GUIDE_PAID_URL else ""
     main = ("<main id=\"main-content\">\n<header class=\"article-hero\"><div class=\"section-shell\"><div class=\"article-meta\"><span>Kemet / Free guide</span></div>"
             "<h1>Ancient Egypt:<br/><em>Myth vs Evidence</em></h1><p class=\"article-deck\">A free 12-page sample with three chapters from the complete book. It checks popular claims about ancient Egypt against what archaeologists and scientists actually say.</p></div></header>\n"
             "<div class=\"section-shell article-layout\"><article class=\"article-body\">\n"
@@ -17900,6 +17983,7 @@ def main():
             {"command": "learnexport", "description": "Send what I learned as a file"},
             {"command": "chapters", "description": "Add timestamps to long videos"},
             {"command": "month", "description": "All numbers, 1st of month to today"},
+            {"command": "kindleline", "description": "Kindle line in old descriptions, 5 a day"},
             {"command": "searchcheck", "description": "Google and Bing: sitemap and indexed pages"},
             {"command": "fbviews", "description": "Facebook views vs YouTube"},
             {"command": "fbcomments", "description": "Reply to Facebook comments"},
