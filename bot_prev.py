@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.265"
+BOT_VERSION = "v10.266"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -16294,6 +16294,14 @@ def pack_site(root, d, caption):
         seo_fix(root)             # FAQ markup on every new article, automatically
     except Exception as e:
         print("faq markup:", clean(e)[:120])
+    try:
+        # v10.266: Google asks for /favicon.ico by default and got 404; serve the logo mark there (static rewrite, no extra file)
+        rd = root / "_redirects"
+        cur = rd.read_text(encoding="utf-8") if rd.exists() else ""
+        if "/favicon.ico" not in cur and (root / "brand-mark.svg").exists():
+            rd.write_text(cur.rstrip("\n") + ("\n" if cur.strip() else "") + "/favicon.ico /brand-mark.svg 200\n", encoding="utf-8")
+    except Exception as e:
+        print("favicon redirect:", clean(e)[:120])
     try:
         sm_ = root / "sitemap.xml"   # v10.263: same list under a second name, so Google gets a second, fresh submission
         if sm_.exists():
