@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.266"
+BOT_VERSION = "v10.267"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -16294,6 +16294,29 @@ def pack_site(root, d, caption):
         seo_fix(root)             # FAQ markup on every new article, automatically
     except Exception as e:
         print("faq markup:", clean(e)[:120])
+    try:
+        # v10.267: the homepage tells Google the short site name "Kemet" (what Google shows above the address)
+        hp = root / "index.html"
+        if hp.exists():
+            ht = hp.read_text(encoding="utf-8")
+            def _fix(m):
+                try:
+                    j = json.loads(m.group(2))
+                except Exception:
+                    return m.group(0)
+                nodes = j.get("@graph") if isinstance(j, dict) and "@graph" in j else [j]
+                hit = False
+                for n in nodes:
+                    if isinstance(n, dict) and n.get("@type") == "WebSite":
+                        n["name"] = "Kemet"
+                        n["alternateName"] = ["Kemet Stories", "Kemet \u2014 Stories from the Black Land"]
+                        hit = True
+                return (m.group(1) + json.dumps(j, indent=2, ensure_ascii=False) + m.group(3)) if hit else m.group(0)
+            ht2 = re.sub(r'(<script type="application/ld\+json">)(.*?)(</script>)', _fix, ht, flags=re.S)
+            if ht2 != ht:
+                hp.write_text(ht2, encoding="utf-8")
+    except Exception as e:
+        print("site name:", clean(e)[:120])
     try:
         # v10.266: Google asks for /favicon.ico by default and got 404; serve the logo mark there (static rewrite, no extra file)
         rd = root / "_redirects"
