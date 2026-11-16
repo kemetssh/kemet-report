@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.264"
+BOT_VERSION = "v10.265"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -14925,7 +14925,14 @@ def cmd_searchcheck(st):
                 out.append("\nGoogle sitemap %s: last read %s, %s, %d errors, %d warnings, %d URLs found" % (
                     x.get("path", "")[-30:], (x.get("lastDownloaded") or "never")[:10], "processing" if x.get("isPending") else "done", errs, warns, sub))
                 if not x.get("lastDownloaded") or errs:
-                    todo.append("Google cannot read the sitemap: remove and re-add it once in Search Console")
+                    try:
+                        age = (datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat((x.get("lastSubmitted") or "").replace("Z", "+00:00"))).days
+                    except Exception:
+                        age = 99
+                    if age < 3:
+                        todo.append("Google has not read the sitemap yet but it was submitted %s day(s) ago: wait, do not resubmit" % age if age else "Google has not read the sitemap yet (submitted today): wait 2 to 3 days, do not resubmit")
+                    else:
+                        todo.append("Google has not read the sitemap for %d days: remove and re-add it once in Search Console" % age)
         except Exception as e:
             out.append("\nGoogle sitemap: not readable (%s)" % clean(e)[:70])
         res = []
@@ -15002,6 +15009,7 @@ def cmd_searchcheck(st):
                 print("bing traffic:", clean(e)[:60])
         except Exception as e:
             out.append("\nBing: %s. Send /bingkey again." % clean(e)[:70])
+    todo = list(dict.fromkeys(todo))
     out.append("\nNext: " + ("; ".join(todo[:3]) if todo else "nothing to fix, keep publishing"))
     send("\n".join(out)[:3900])
 
