@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.275"
+BOT_VERSION = "v10.276"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -3560,12 +3560,41 @@ def cmd_comments(st, full=False):
     pending = {p.get("parent") for p in st.get("props", {}).values() if p.get("type") == "comment"}
     skip_ids = (dismissed | pending) if full else (seen | dismissed)
     items = []
-    for v in vids:
-        try:
-            threads = yt_get("commentThreads", tok, part="snippet", videoId=v["id"],
-                             maxResults=50 if full else 15, order="time")["items"]
-        except Exception:
-            continue  # comments off on this video
+    # v10.276: read the newest comments of the WHOLE channel (older videos were missed before: only the 8 or 20 newest videos were looked at)
+    groups = []
+    try:
+        allt, page = [], None
+        for _ in range(3 if full else 1):
+            kw = {"pageToken": page} if page else {}
+            r = yt_get("commentThreads", tok, part="snippet", allThreadsRelatedToChannelId=chid, maxResults=100, order="time", **kw)
+            allt += r.get("items", [])
+            page = r.get("nextPageToken")
+            if not page:
+                break
+        titles = {v["id"]: v["snippet"]["title"] for v in vids}
+        miss = {t["snippet"].get("videoId") for t in allt if t["snippet"].get("videoId") not in titles} - {None}
+        if miss:
+            try:
+                for vid_, sn_ in snippets_of(tok, miss).items():
+                    titles[vid_] = sn_.get("title", "")
+            except Exception as e:
+                print("comment titles:", clean(e)[:80])
+        by_v = {}
+        for t in allt:
+            by_v.setdefault(t["snippet"].get("videoId"), []).append(t)
+        groups = [({"id": k, "snippet": {"title": titles.get(k, "a video")}}, ts) for k, ts in by_v.items() if k]
+    except Exception as e:
+        print("channel comments:", clean(e)[:100])
+        groups = []
+    if not groups:
+        for v in vids:
+            try:
+                threads = yt_get("commentThreads", tok, part="snippet", videoId=v["id"],
+                                 maxResults=50 if full else 15, order="time")["items"]
+            except Exception:
+                continue  # comments off on this video
+            groups.append((v, threads))
+    for v, threads in groups:
         for t in threads:
             top = t["snippet"]["topLevelComment"]
             cid = top["id"]
