@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.278"
+BOT_VERSION = "v10.279"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -10171,7 +10171,7 @@ def ref_kind(host):
         return "TikTok"
     if "google" in h or "bing" in h or "duckduckgo" in h or "yahoo" in h:
         return "search engines"
-    if "pages.dev" in h:
+    if "pages.dev" in h or "kemetstories.com" in h:
         return "your own site"
     return h
 
@@ -12778,7 +12778,8 @@ def send_factcheck_notes(prop, a, segs, srcs):
 
 
 # ---------------- website articles (kemet-stories.pages.dev) ----------------
-SITE_BASE = os.getenv("SITE_BASE", "https://kemet-stories.pages.dev")
+OLD_SITE_BASE = "https://kemet-stories.pages.dev"
+SITE_BASE = os.getenv("SITE_BASE", "https://kemetstories.com")
 SEED_CARDS = {
     "egyptian-gods-and-goddesses": ("gods", "☼", "DIVINE POWERS", "Gods &amp;<br/><em>goddesses</em>", "Sun, storm, death, rebirth — meet the forces that made sense of the universe.", "Enter the pantheon"),
     "pharaohs-living-gods": ("rulers", "𓋹", "POWER &amp; LEGACY", "Pharaohs<br/><em>&amp; living gods</em>", "Ambition, diplomacy, ritual, and the people who carried a kingdom forward.", "Meet the rulers"),
@@ -13615,6 +13616,9 @@ def gsc_sync(force=False):
     host = urllib.parse.urlparse(SITE_BASE).netloc
     sites = [x.get("siteUrl", "") for x in r.json().get("siteEntry", [])]
     site = next((x for x in sites if x.rstrip("/").endswith(host) and x.startswith("http")), None) or next((x for x in sites if x == f"sc-domain:{host}"), None)
+    if not site:
+        oh = urllib.parse.urlparse(OLD_SITE_BASE).netloc
+        site = next((x for x in sites if x.rstrip("/").endswith(oh) and x.startswith("http")), None)
     if not site:
         return False, "Your Google account does not list " + host + " in Search Console. Add and verify it there first (you did, so check it is the same Google account as the YouTube login)."
     end = datetime.date.today() - datetime.timedelta(days=2)
@@ -15333,7 +15337,7 @@ def cmd_ypp(st):
 
 
 PRIVACY_BODY = """<h2>Who we are.</h2>
-<p>Kemet is an independent Ancient Egypt history channel and website (kemet-stories.pages.dev). This page explains what information the website and the tools behind it handle, in plain words.</p>
+<p>Kemet is an independent Ancient Egypt history channel and website (kemetstories.com). This page explains what information the website and the tools behind it handle, in plain words.</p>
 <h2>This website.</h2>
 <ul>
 <li>The site has no accounts, no advertising and no tracking cookies of our own.</li>
@@ -16571,6 +16575,18 @@ def pack_site(root, d, caption):
             print("ask box:", clean(e)[:120])
     if cf_cfg():
         caption = re.sub(r"Unzip and upload the CONTENTS to Cloudflare Pages( as Production)?\.", "Tap 🚀 Publish below to put it live.", caption)
+    try:
+        # v10.279: the site now lives at its own domain; every old pages.dev address inside the files is rewritten
+        for fp in root.rglob("*"):
+            if fp.is_file() and fp.suffix.lower() in (".html", ".xml", ".txt", ".json", ".svg", ".js", ".webmanifest", ".xsl"):
+                try:
+                    t0 = fp.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+                if OLD_SITE_BASE in t0:
+                    fp.write_text(t0.replace(OLD_SITE_BASE, SITE_BASE), encoding="utf-8")
+    except Exception as e:
+        print("domain rewrite:", clean(e)[:120])
     import zipfile
     zp = Path(d) / f"kemet-site-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
     with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as zf:
