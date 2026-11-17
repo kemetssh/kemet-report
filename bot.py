@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.276"
+BOT_VERSION = "v10.278"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -6107,6 +6107,14 @@ def housekeeping(st):
         daily_kindle(st)
     except Exception as e:
         print("daily kindle:", clean(e)[:120])
+    try:
+        bookcomment_new(st)
+    except Exception as e:
+        print("bookcomment new:", clean(e)[:120])
+    try:
+        daily_bookcomment(st)
+    except Exception as e:
+        print("daily bookcomment:", clean(e)[:120])
     g0 = time.gmtime()
     if "last_brief" not in m:
         m["last_brief"] = now
@@ -11928,6 +11936,8 @@ def on_message(msg, st):
         cmd_month(st)
     elif text.startswith("/kindleline"):
         cmd_kindleline(st, raw)
+    elif text.startswith("/bookcomment"):
+        cmd_bookcomment(st, raw)
     elif text.startswith("/searchcheck"):
         cmd_searchcheck(st)
     elif text.startswith("/bingkey"):
@@ -15127,6 +15137,116 @@ def cmd_kindleline(st, raw):
         "PAUSED" if k.get("off") else "on", k.get("total", 0), k.get("left", "not counted yet"), KINDLE_PER_DAY))
 
 
+# ---------------- v10.277: book comment on the top videos, 5 a day from 10:30 Cairo (pinning is manual: the API cannot pin) ----------------
+BOOKCOMMENT_PER_DAY = 5
+BOOKCOMMENT_TOP = 30
+BOOKCOMMENT_TEXTS = [
+    "\U0001F4D6 Every claim in this video is checked against what archaeologists have actually found. The same approach, applied to 20 of the most-asked questions about ancient Egypt, is now a book: \"Ancient Egypt: Myth vs Evidence\". Every chapter lists its sources. Kindle: ",
+    "\U0001F4D6 Want the full evidence behind videos like this one? The channel's book, \"Ancient Egypt: Myth vs Evidence\", checks 20 popular claims against what scholars actually say, with sources for each chapter. Kindle: ",
+    "\U0001F4D6 This video is part of a bigger project: a book that tests 20 popular ancient Egypt claims against the evidence, from the pharaoh's curse to the pyramid ramps. \"Ancient Egypt: Myth vs Evidence\", on Kindle: ",
+    "\U0001F4D6 If you like claims checked against the evidence, the channel now has a book: \"Ancient Egypt: Myth vs Evidence\". Twenty questions, sources in every chapter. Kindle: ",
+]
+
+
+def daily_bookcomment(st, force=False):
+    m = mem()
+    k = m.setdefault("bookcomment", {})
+    if k.get("off") and not force:
+        return
+    now_c = datetime.datetime.now(cairo_zone())
+    day = now_c.strftime("%Y-%m-%d")
+    if not force and (now_c.hour < 10 or (now_c.hour == 10 and now_c.minute < 30) or k.get("day") == day or time.time() - k.get("try", 0) < 1800):
+        return
+    k["try"] = time.time()
+    k["day"] = day
+    tok = yt_token()
+    vids = all_videos(tok)
+    vids.sort(key=lambda v: -int((v.get("statistics") or {}).get("viewCount", 0) or 0))
+    posted = k.setdefault("ids", [])
+    todo = [v for v in vids[:BOOKCOMMENT_TOP] if v["id"] not in posted]
+    if not todo:
+        if not k.get("finished"):
+            k["finished"] = True
+            send("\U0001F4AC Book comment is now on the top %d videos. Done." % BOOKCOMMENT_TOP)
+        return
+    lines, errs = [], []
+    for v in todo[:BOOKCOMMENT_PER_DAY]:
+        title = v["snippet"].get("title", v["id"])[:40]
+        txt = BOOKCOMMENT_TEXTS[len(posted) % len(BOOKCOMMENT_TEXTS)] + GUIDE_PAID_URL
+        try:
+            post_top_comment(v["id"], txt)
+            posted.append(v["id"])
+            lines.append("• %s\nhttps://youtu.be/%s" % (title, v["id"]))
+        except Exception as e:
+            errs.append(title + ": " + clean(e)[:60])
+            if "quota" in str(e).lower():
+                break
+    k["total"] = len(posted)
+    msg = ["\U0001F4AC Book comment posted on %d video(s) today, %d left of the top %d." % (len(lines), max(0, len(todo) - len(lines)), BOOKCOMMENT_TOP)]
+    if lines:
+        msg.append("Please PIN it (open the video, tap the comment's three dots, Pin):\n" + "\n".join(lines))
+    if errs:
+        msg.append("Skipped: " + "; ".join(errs[:3]))
+    send("\n".join(msg)[:3900])
+
+
+# ---------------- v10.278: a new upload gets the book comment and the Amazon line in its description automatically ----------------
+def bookcomment_new(st):
+    m = mem()
+    k = m.setdefault("bookcomment", {})
+    if k.get("off_new") or time.time() - k.get("new_try", 0) < 1200:
+        return
+    k["new_try"] = time.time()
+    tok = yt_token()
+    vids = all_videos(tok)
+    posted = k.setdefault("ids", [])
+    fails = k.setdefault("fails", {})
+    cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=5)
+    for v in vids:
+        sn = v.get("snippet", {})
+        try:
+            pub = datetime.datetime.strptime((sn.get("publishedAt") or "")[:19], "%Y-%m-%dT%H:%M:%S")
+        except Exception:
+            continue
+        if pub < cutoff or v["id"] in posted or fails.get(v["id"], 0) >= 6:
+            continue
+        title = sn.get("title", v["id"])[:50]
+        out = ["\U0001F4D6 New video: " + title]
+        d = (sn.get("description", "") or "").rstrip()
+        if GUIDE_PAID_URL not in d and len(d) + 2 + len(kindle_line()) <= 4900:
+            try:
+                res = put_description(tok, v["id"], sn, (d + "\n\n" + kindle_line()).strip())
+                out.append("Kindle line added to the description." if res == "ok" else "Description: " + str(res)[:40])
+            except Exception as e:
+                out.append("Description: " + clean(e)[:50])
+        try:
+            post_top_comment(v["id"], BOOKCOMMENT_TEXTS[len(posted) % len(BOOKCOMMENT_TEXTS)] + GUIDE_PAID_URL)
+            posted.append(v["id"])
+            out.append("Book comment posted. Please PIN it:\nhttps://youtu.be/" + v["id"])
+            send("\n".join(out))
+        except Exception as e:
+            fails[v["id"]] = fails.get(v["id"], 0) + 1
+            if fails[v["id"]] >= 6:
+                send("\U0001F4D6 I could not post the book comment on '%s' (%s). Post it by hand." % (title, clean(e)[:60]))
+        return
+
+
+def cmd_bookcomment(st, raw):
+    k = mem().setdefault("bookcomment", {})
+    a = (raw.split() + [""])[1].lower()
+    if a == "off":
+        k["off"] = True
+        return send("Paused: no more automatic book comments. /bookcomment on to continue.")
+    if a == "on":
+        k.pop("off", None)
+        k.pop("finished", None)
+        return send("On: %d videos a day from 10:30 Cairo, top %d by views." % (BOOKCOMMENT_PER_DAY, BOOKCOMMENT_TOP))
+    if a == "now":
+        return daily_bookcomment(st, force=True)
+    send("\U0001F4AC Book comment on top videos: %s. Posted so far: %d of %d. %d a day from 10:30 Cairo. Pinning is manual; I send you the links.\n/bookcomment off | on | now" % (
+        "PAUSED" if k.get("off") else "on", len(k.get("ids", [])), BOOKCOMMENT_TOP, BOOKCOMMENT_PER_DAY))
+
+
 def cmd_scoreboard(st, auto=False):
     send("📋 Putting this week's numbers together...")
     snap = board_snapshot()
@@ -18012,6 +18132,7 @@ def main():
             {"command": "learnexport", "description": "Send what I learned as a file"},
             {"command": "chapters", "description": "Add timestamps to long videos"},
             {"command": "month", "description": "All numbers, 1st of month to today"},
+            {"command": "bookcomment", "description": "Book comment on top videos, 5 a day"},
             {"command": "kindleline", "description": "Kindle line in old descriptions, 5 a day"},
             {"command": "searchcheck", "description": "Google and Bing: sitemap and indexed pages"},
             {"command": "fbviews", "description": "Facebook views vs YouTube"},
