@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.279"
+BOT_VERSION = "v10.281"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -15352,7 +15352,9 @@ PRIVACY_BODY = """<h2>Who we are.</h2>
 <li>It is not offered to other people and no one else can log in through it.</li>
 </ul>
 <h2>Deleting your information.</h2>
-<p>A comment you wrote is deleted by you or by us on the platform where you wrote it (YouTube, Facebook or Instagram), and the assistant then no longer sees it. To ask us to remove something you sent through the website’s question box, or to ask what we hold about you, write to us through the question box on the home page or a message to the Kemet YouTube channel. We will answer and remove it.</p>
+<p>A comment you wrote is deleted by you or by us on the platform where you wrote it (YouTube, Facebook or Instagram), and the assistant then no longer sees it. To ask us to remove something you sent through the website’s question box, or to ask what we hold about you, write to us at <a href="mailto:kemet@kemetstories.com">kemet@kemetstories.com</a>, through the question box on the home page or by a message to the Kemet YouTube channel. We will answer and remove it.</p>
+<h2>Contact.</h2>
+<p>Questions about the website, the channel or the book: <a href="mailto:kemet@kemetstories.com">kemet@kemetstories.com</a>.</p>
 <h2>Changes.</h2>
 <p>If this page changes, the new version replaces this one at the same address.</p>"""
 
@@ -16583,8 +16585,12 @@ def pack_site(root, d, caption):
                     t0 = fp.read_text(encoding="utf-8")
                 except Exception:
                     continue
-                if OLD_SITE_BASE in t0:
-                    fp.write_text(t0.replace(OLD_SITE_BASE, SITE_BASE), encoding="utf-8")
+                t1 = t0.replace(OLD_SITE_BASE, SITE_BASE) if OLD_SITE_BASE in t0 else t0
+                if fp.suffix.lower() == ".html" and "mailto:kemet@kemetstories.com" not in t1 and 'class="footer-links"' in t1:
+                    # v10.281: a Contact link in the footer of every page
+                    t1 = re.sub(r'(<div class="footer-links">.*?)(</div>)', lambda m: m.group(1) + '<a href="mailto:kemet@kemetstories.com">Contact</a>' + m.group(2), t1, count=1, flags=re.S)
+                if t1 != t0:
+                    fp.write_text(t1, encoding="utf-8")
     except Exception as e:
         print("domain rewrite:", clean(e)[:120])
     import zipfile
