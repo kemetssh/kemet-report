@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.283"
+BOT_VERSION = "v10.284"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -17627,8 +17627,10 @@ def site_article_map():
 
 def article_desc(desc, line, url):
     """New description with the article line first. Returns (new, removed_old_line); new is None when the link is already there or the result would be too long."""
+    orig_ = desc
+    desc = desc.replace(OLD_SITE_BASE, SITE_BASE)      # v10.284: old pages.dev addresses anywhere in the description become kemetstories.com
     if url in desc:
-        return None, ""
+        return (desc if desc != orig_ and len(desc) <= 4990 else None), ""
     old_ = re.search(r"^📖 Read the full article: " + re.escape(SITE_BASE) + r"/articles/[^\s]*\n*", desc)
     removed = old_.group(0).strip() if old_ else ""
     rest = desc[old_.end():] if old_ else desc
@@ -17685,7 +17687,7 @@ def cmd_linksall(st):
         if not live[url]:
             notlive.append(a["title"])
             continue
-        if url in sn.get("description", ""):
+        if url in sn.get("description", "") and OLD_SITE_BASE not in sn.get("description", ""):
             have += 1
             continue
         if a.get("text") and not film_fits(a["text"], sn.get("title", "")):
