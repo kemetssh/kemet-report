@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.282"
+BOT_VERSION = "v10.283"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -11680,6 +11680,11 @@ def on_message(msg, st):
         return store_site_zip(msg, st)
     if msg.get("video") or str(doc.get("mime_type", "")).startswith("video/") or \
             str(doc.get("file_name", "")).lower().endswith((".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".3gp")):
+        if mem().get("bookshorts", {}).get("on"):
+            if book_short_number(msg):
+                return book_short_upload(msg, st)
+            return send("Book mode is ON, but I cannot read the number in this file's name (it should look like ..._evidence_4_granite.mp4). "
+                        "Send it as a FILE, not a video, or turn book mode off with /bookshorts off.")
         return start_job(msg, st)       # a video sent "as a file" often has an odd mime type, so the name counts too
     if msg.get("photo") or doc:
         return handle_attachment(msg, st)
@@ -11938,6 +11943,8 @@ def on_message(msg, st):
         cmd_kindleline(st, raw)
     elif text.startswith("/bookcomment"):
         cmd_bookcomment(st, raw)
+    elif text.startswith("/bookshorts"):
+        cmd_bookshorts(st, raw)
     elif text.startswith("/searchcheck"):
         cmd_searchcheck(st)
     elif text.startswith("/bingkey"):
@@ -15277,6 +15284,184 @@ def cmd_bookcomment(st, raw):
         "PAUSED" if k.get("off") else "on", len(k.get("ids", [])), BOOKCOMMENT_TOP, BOOKCOMMENT_PER_DAY))
 
 
+# ---------------- v10.283: the 19 "Myth vs Evidence" Shorts: upload privately, build the book playlist, publish all at once ----------------
+BS_TOTAL = 19
+BS_PL_TITLE = "Ancient Egypt: Myth vs Evidence"
+BS_PL_DESC = ("Twenty questions about ancient Egypt, each one checked against the evidence. One short film per chapter of the book "
+              "Ancient Egypt: Myth vs Evidence. Kindle: https://www.amazon.com/dp/B0HRV7779Y")
+BOOKSHORTS = {
+    1: ("The pharaoh's curse: did it really kill them?", "Lord Carnarvon died months after Tutankhamun's tomb was opened, and newspapers invented a curse. What does the evidence say?"),
+    2: ("Who really built the pyramids?", "Near Giza, archaeologists found the town where the builders lived: bakeries, breweries, tombs beside the pyramids. What the evidence shows about the workforce."),
+    3: ("The logbook of Merer: a diary from the Great Pyramid", "In 2013, papyri about 4,500 years old were found at Wadi al-Jarf. One is the logbook of a crew leader moving limestone to Giza for Khufu."),
+    4: ("Did Egyptians cut granite with sound?", "The marks on unfinished granite at Aswan show dolerite pounders and copper saws with sand. No sound machine, no trace of one."),
+    5: ("Mummification: what Herodotus got right", "A Greek historian described mummification 2,400 years ago. Chemical analysis of embalming vessels at Saqqara tells how much he got right."),
+    6: ("The real face of Cleopatra", "Her coins show strong features, and an ancient writer says her charm and conversation mattered more than her looks."),
+    7: ("Tutankhamun's dagger from space", "Its iron blade was analysed without being cut. The nickel and cobalt match meteorites."),
+    8: ("Do the pyramids copy Orion's belt?", "The Orion correlation is a striking idea, but the pyramids were built over several reigns and the match needs a flipped map."),
+    9: ("Is the Sphinx older than Egypt?", "A theory blames ancient rain. Geologists point to limestone layers of different hardness, wind, sand and salt."),
+    10: ("Did the Egyptians reach America?", "A 1992 study claimed plant drugs from the Americas in mummies. Other labs could not repeat it, and no Egyptian object has been found there."),
+    11: ("How precise is the Great Pyramid?", "Its sides differ by only a few centimetres and it faces true north within a fraction of a degree. Ropes, plumb lines and the sky, not secret machines."),
+    12: ("The Abydos 'helicopter' explained", "A carving in Seti I's temple looks like a helicopter. It is two inscriptions, re-carved over plaster, overlapping."),
+    13: ("The lost colours of Dendera", "Egyptian temples were painted. At Dendera, vivid blues and golds survive on the ceilings."),
+    14: ("The sacred cat mummy business", "Millions of cat mummies were offered at temples. Scans show many were young animals, and some wrappings hold little or no cat."),
+    15: ("Why do people in Egyptian paintings wear cones?", "Banquet scenes show guests with small cones on their heads. Scholars still debate whether they melted into perfume or were symbolic."),
+    16: ("Did Egyptians drill skulls? Trepanation", "The Edwin Smith Papyrus describes injuries with practical treatment. Skull surgery in Egypt is rare and debated."),
+    17: ("AI pharaohs: are those faces real?", "Statues idealise and skull reconstructions are estimates. An AI image adds guesses on top of guesses."),
+    18: ("What does ancient Egyptian DNA say?", "Recent studies show mostly local North African ancestry with some from the Near East, and the results keep growing."),
+    19: ("The Dendera 'light bulb': what is it?", "A relief at Dendera shows a lotus with a serpent inside. It fits Egyptian creation myths, with no wires and no soot."),
+}
+
+
+def _bs():
+    return mem().setdefault("bookshorts", {"items": {}})
+
+
+def book_short_number(msg):
+    v = msg.get("video") or msg.get("document") or {}
+    m = re.search(r"evidence[_\- ]+(\d{1,2})(?!\d)", str(v.get("file_name", "")).lower())
+    n = int(m.group(1)) if m else 0
+    return n if 1 <= n <= BS_TOTAL else 0
+
+
+def _bs_quota(e):
+    t = (str(e) + " " + str(getattr(getattr(e, "response", None), "text", ""))).lower()
+    return "quota" in t or "daily limit" in t
+
+
+def _bs_playlist(tok, bs):
+    if bs.get("pl"):
+        return bs["pl"]
+    r = S.post(f"{YT}/youtube/v3/playlists?part=snippet,status", headers={"Authorization": f"Bearer {tok}"}, timeout=60,
+               json={"snippet": {"title": BS_PL_TITLE, "description": BS_PL_DESC}, "status": {"privacyStatus": "public"}})
+    r.raise_for_status()
+    bs["pl"] = r.json()["id"]
+    return bs["pl"]
+
+
+def book_short_upload(msg, st):
+    v = msg.get("video") or msg.get("document") or {}
+    n = book_short_number(msg)
+    bs = _bs()
+    if str(n) in bs["items"]:
+        return send(f"#{n} is already uploaded (https://youtu.be/{bs['items'][str(n)]}). I did not upload it twice.")
+    if int(v.get("file_size") or 0) > 19 * 1024 * 1024:
+        return send(f"#{n} is over 19 MB, which is more than a Telegram bot can receive.")
+    title_, blurb = BOOKSHORTS[n]
+    title = f"Myth vs Evidence #{n}: {title_}"[:100]
+    desc = (f"{blurb}\n\nPart {n} of {BS_TOTAL} in the Myth vs Evidence series, from the book Ancient Egypt: Myth vs Evidence.\n\n"
+            "#AncientEgypt #Shorts #MythVsEvidence")
+    tags = ["ancient egypt", "egypt history", "myth vs evidence", "kemet", "shorts", "egyptology"]
+    send(f"⬆️ #{n} received. Uploading privately...")
+    try:
+        tok = yt_token()
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "v.mp4"
+            tg_download(v["file_id"], p)
+            vid, label_ok = yt_upload(str(p), title, desc, tags, tok, ai=True)
+    except Exception as e:
+        if _bs_quota(e):
+            return send(f"⏳ YouTube's daily upload limit is used up (about 5 uploads a day). #{n} was not uploaded. "
+                        f"Send it again after the reset ({quota_reset_text()}).")
+        return send(f"I could not upload #{n}: {clean(e)[:120]}. Send it again.")
+    bs["items"][str(n)] = vid
+    note = ""
+    try:
+        pl = _bs_playlist(tok, bs)
+        pos = sum(1 for k in bs["items"] if int(k) < n)
+        r = S.post(f"{YT}/youtube/v3/playlistItems?part=snippet", headers={"Authorization": f"Bearer {tok}"}, timeout=60,
+                   json={"snippet": {"playlistId": pl, "position": pos, "resourceId": {"kind": "youtube#video", "videoId": vid}}})
+        if r.status_code >= 400:
+            note = "\n⚠️ It is uploaded, but the playlist add failed. /bookshorts fix will retry."
+            bs.setdefault("pending_pl", []).append(n)
+    except Exception as e:
+        note = "\n⚠️ It is uploaded, but the playlist add failed (" + clean(e)[:50] + "). /bookshorts fix will retry."
+        bs.setdefault("pending_pl", []).append(n)
+    if not label_ok:
+        note += "\n⚠️ YouTube did not accept the AI label for this one. Check it in Studio before publishing."
+    left = BS_TOTAL - len(bs["items"])
+    send(f"✅ #{n} uploaded as private and added to the playlist \"{BS_PL_TITLE}\". {len(bs['items'])} of {BS_TOTAL} done, {left} to go." + note)
+
+
+def _bs_set_public(vid, tok):
+    h = {"Authorization": f"Bearer {tok}"}
+    for syn in (True, None):
+        body = {"id": vid, "status": {"privacyStatus": "public", "selfDeclaredMadeForKids": False}}
+        if syn:
+            body["status"]["containsSyntheticMedia"] = True
+        r = S.put(f"{YT}/youtube/v3/videos?part=status", headers=h, json=body, timeout=60)
+        if r.status_code < 400:
+            return
+        if r.status_code != 400:
+            r.raise_for_status()
+    r.raise_for_status()
+
+
+def cmd_bookshorts(st, raw):
+    bs = _bs()
+    parts = raw.lower().split()
+    a = parts[1] if len(parts) > 1 else ""
+    if a == "on":
+        bs["on"] = True
+        try:
+            _bs_playlist(yt_token(), bs)
+        except Exception as e:
+            return send("Book mode is on, but I could not create the playlist yet (" + clean(e)[:80] + "). It will be created with the first upload.")
+        return send("📚 Book mode ON. Send the Shorts one by one as FILES (long-press, Send as file, so the name with the number is kept). "
+                    "I upload each as private, add it to the playlist \"" + BS_PL_TITLE + "\" in the right order, and tell you the count. "
+                    "About 5 a day because of YouTube's limit. When all are in, send /bookshorts publish.")
+    if a == "off":
+        bs["on"] = False
+        return send("Book mode OFF. Videos you send now go through the normal flow.")
+    if a == "fix":
+        tok = yt_token()
+        done = 0
+        for n in list(bs.get("pending_pl", [])):
+            vid = bs["items"].get(str(n))
+            if not vid:
+                continue
+            try:
+                pl = _bs_playlist(tok, bs)
+                pos = sum(1 for k in bs["items"] if int(k) < n)
+                r = S.post(f"{YT}/youtube/v3/playlistItems?part=snippet", headers={"Authorization": f"Bearer {tok}"}, timeout=60,
+                           json={"snippet": {"playlistId": pl, "position": pos, "resourceId": {"kind": "youtube#video", "videoId": vid}}})
+                if r.status_code < 400 or (r.status_code == 409 and "AlreadyInPlaylist" in r.text):
+                    bs["pending_pl"].remove(n)
+                    done += 1
+            except Exception:
+                pass
+        return send(f"Playlist retry: {done} added, {len(bs.get('pending_pl', []))} still waiting.")
+    if a == "publish":
+        n_ = len(bs["items"])
+        if not n_:
+            return send("Nothing uploaded yet.")
+        missing = [i for i in range(1, BS_TOTAL + 1) if str(i) not in bs["items"]]
+        if len(parts) < 3 or parts[2] != "yes":
+            return send(f"This makes {n_} Shorts public at once." + (f" Still missing: #{', #'.join(str(i) for i in missing)}." if missing else " All {0} are in.".format(BS_TOTAL)) +
+                        "\nTo go ahead, send: /bookshorts publish yes")
+        tok = yt_token()
+        ok, bad = 0, []
+        for k in sorted(bs["items"], key=int):
+            if bs.setdefault("public", {}).get(k):
+                continue
+            try:
+                _bs_set_public(bs["items"][k], tok)
+                bs["public"][k] = True
+                ok += 1
+            except Exception as e:
+                bad.append(k)
+                if _bs_quota(e):
+                    break
+        return send(f"🚀 {ok} Short(s) are now public." + (f"\n⚠️ Not done: #{', #'.join(bad)}. Send /bookshorts publish yes again later." if bad else "") +
+                    (f"\nPlaylist: https://www.youtube.com/playlist?list={bs['pl']}" if bs.get("pl") else ""))
+    have = sorted(int(k) for k in bs["items"])
+    missing = [i for i in range(1, BS_TOTAL + 1) if i not in have]
+    send("📚 Book Shorts: " + ("ON" if bs.get("on") else "off") + f". Uploaded {len(have)} of {BS_TOTAL}"
+         + (f", public: {len(bs.get('public', {}))}" if bs.get("public") else "") + "."
+         + (f"\nMissing: #{', #'.join(str(i) for i in missing)}" if missing else "\nAll uploaded.")
+         + (f"\nPlaylist: https://www.youtube.com/playlist?list={bs['pl']}" if bs.get("pl") else "")
+         + "\n/bookshorts on | off | fix | publish")
+
+
 def cmd_scoreboard(st, auto=False):
     send("📋 Putting this week's numbers together...")
     snap = board_snapshot()
@@ -18193,6 +18378,7 @@ def main():
             {"command": "chapters", "description": "Add timestamps to long videos"},
             {"command": "month", "description": "All numbers, 1st of month to today"},
             {"command": "bookcomment", "description": "Book comment on top videos, 5 a day"},
+            {"command": "bookshorts", "description": "Upload the 19 book Shorts and build the playlist"},
             {"command": "kindleline", "description": "Kindle line in old descriptions, 5 a day"},
             {"command": "searchcheck", "description": "Google and Bing: sitemap and indexed pages"},
             {"command": "fbviews", "description": "Facebook views vs YouTube"},
