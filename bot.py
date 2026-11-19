@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.290"
+BOT_VERSION = "v10.292"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -11952,6 +11952,8 @@ def on_message(msg, st):
         cmd_kindleline(st, raw)
     elif text.startswith("/bookcomment"):
         cmd_bookcomment(st, raw)
+    elif text.startswith("/booktraffic"):
+        cmd_booktraffic(st, raw)
     elif text.startswith("/fixdomain"):
         cmd_fixdomain(st, raw)
     elif text.startswith("/bookshorts"):
@@ -15508,6 +15510,40 @@ def cmd_fixdomain(st, raw=""):
     send("\n".join(out))
 
 
+WEB_BOOK_Q = """query($acc: String!, $tag: String!, $since: Time!, $until: Time!) { viewer { accounts(filter: {accountTag: $acc}) {
+ total: rumPageloadEventsAdaptiveGroups(filter: {siteTag: $tag, requestPath: "/book/", datetime_geq: $since, datetime_leq: $until}, limit: 1) { count sum { visits } }
+ refs: rumPageloadEventsAdaptiveGroups(filter: {siteTag: $tag, requestPath: "/book/", datetime_geq: $since, datetime_leq: $until}, limit: 30, orderBy: [count_DESC]) { count dimensions { refererHost } }
+} } }"""
+
+
+def cmd_booktraffic(st, raw=""):
+    """v10.291: who is sent to the Kindle page through /book/ and from where (YouTube, X, Instagram...), from Cloudflare Web Analytics."""
+    parts = raw.split()
+    days = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 7
+    days = max(1, min(days, 90))
+    if not cf_cfg():
+        return send("Cloudflare is not connected yet (/cfsetup).")
+    try:
+        cfg = cf_cfg()
+        tag = cf_site_tag()
+        now = time.time()
+        fmt = lambda t: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+        d = cf_graphql(WEB_BOOK_Q, {"acc": cfg["account"], "tag": tag, "since": fmt(now - days * 86400), "until": fmt(now)})
+    except Exception as e:
+        return send("I could not read the numbers: " + clean(e)[:140])
+    acc = ((d.get("viewer") or {}).get("accounts") or [{}])[0]
+    tot = (acc.get("total") or [{}])[0] if acc.get("total") else {}
+    views, visits = int(tot.get("count", 0) or 0), int(((tot.get("sum") or {}).get("visits", 0)) or 0)
+    if not views:
+        return send(f"📚 /book/: no visits in the last {days} day(s) yet. Publish the site, then use kemetstories.com/book/ in your links.")
+    refs = {}
+    for g in acc.get("refs") or []:
+        k = ref_kind((g.get("dimensions") or {}).get("refererHost", ""))
+        refs[k] = refs.get(k, 0) + int(g.get("count", 0))
+    top = ", ".join(f"{k} {v}" for k, v in sorted(refs.items(), key=lambda kv: -kv[1])[:6])
+    send(f"📚 Visitors sent to the Kindle page (last {days} day(s)): {views} page views, {visits} visits.\nFrom: {top}.\n"
+         "\"Direct or app links\" is usually Instagram, TikTok or X opened inside their apps. Your own tests are included. Amazon's side (sales) is in KDP Reports. /booktraffic 30 for a month.")
+
 def cmd_scoreboard(st, auto=False):
     send("📋 Putting this week's numbers together...")
     snap = board_snapshot()
@@ -15857,7 +15893,7 @@ def ensure_book_page(root):
     if min(i, j, k) < 0:
         return False
     head = (t[:i] + "<title>Ancient Egypt: Myth vs Evidence on Kindle | Kemet</title><meta content=\"noindex,follow\" name=\"robots\"/>"
-            f"<link href=\"{SITE_BASE}/guide/\" rel=\"canonical\"/><link href=\"/brand-mark.svg\" rel=\"icon\" type=\"image/svg+xml\"/><link href=\"/styles.css\" rel=\"stylesheet\"/></head>\n<body>\n")
+            f"<meta content=\"Ancient Egypt: Myth vs Evidence, the book from Kemet, on Kindle. This page forwards you to Amazon.\" name=\"description\"/><link href=\"{SITE_BASE}/book/\" rel=\"canonical\"/><link href=\"/brand-mark.svg\" rel=\"icon\" type=\"image/svg+xml\"/><link href=\"/styles.css\" rel=\"stylesheet\"/></head>\n<body>\n")
     body = t[t.find("<body>") + 7:j] if "<body>" in t[:j] else ""
     main = ("<main id=\"main-content\">\n<header class=\"article-hero\"><div class=\"section-shell\"><div class=\"article-meta\"><span>Kemet / The book</span></div>"
             "<h1>Ancient Egypt:<br/><em>Myth vs Evidence</em></h1><p class=\"article-deck\">Taking you to the Kindle page...</p></div></header>\n"
@@ -18546,6 +18582,7 @@ def main():
             {"command": "chapters", "description": "Add timestamps to long videos"},
             {"command": "month", "description": "All numbers, 1st of month to today"},
             {"command": "bookcomment", "description": "Book comment on top videos, 5 a day"},
+            {"command": "booktraffic", "description": "Who clicks through to the Kindle page"},
             {"command": "fixdomain", "description": "Replace old pages.dev links in all video descriptions"},
             {"command": "bookshorts", "description": "Upload the 19 book Shorts and build the playlist"},
             {"command": "kindleline", "description": "Kindle line in old descriptions, 5 a day"},
