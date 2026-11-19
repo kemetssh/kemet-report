@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.296"
+BOT_VERSION = "v10.297"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -8267,8 +8267,11 @@ def cmd_fbconnect(msg, st, raw):
                     "I deleted your message. Send it again, or /fbsetup for the steps.")
     send("Connecting to Facebook...")
     try:
-        lt = fb_call("GET", "oauth/access_token", params={"grant_type": "fb_exchange_token", "client_id": app_id,
-                                                          "client_secret": secret, "fb_exchange_token": token})["access_token"]
+        try:
+            lt = fb_call("GET", "oauth/access_token", params={"grant_type": "fb_exchange_token", "client_id": app_id,
+                                                              "client_secret": secret, "fb_exchange_token": token})["access_token"]
+        except Exception:
+            lt = token          # a business system-user token never expires and cannot be exchanged: use it as it is
         pages = fb_find_pages(lt)
     except Exception as e:
         return send("Facebook did not accept that. " + clean(e)[:200] + "\nThe token lasts only about an hour: generate a fresh one in the "
