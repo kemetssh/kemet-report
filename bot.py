@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.292"
+BOT_VERSION = "v10.294"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -11954,6 +11954,8 @@ def on_message(msg, st):
         cmd_bookcomment(st, raw)
     elif text.startswith("/booktraffic"):
         cmd_booktraffic(st, raw)
+    elif text.startswith("/fixcomments"):
+        cmd_fixcomments(st, raw)
     elif text.startswith("/fixdomain"):
         cmd_fixdomain(st, raw)
     elif text.startswith("/bookshorts"):
@@ -15425,6 +15427,45 @@ def cmd_bookshorts(st, raw):
     if a == "off":
         bs["on"] = False
         return send("Book mode OFF. Videos you send now go through the normal flow.")
+    if a == "add":
+        m_ = re.search(r"(?:shorts/|youtu\.be/|v=|^)([A-Za-z0-9_-]{11})(?![A-Za-z0-9_-])", " ".join(raw.split()[2:]).strip() if len(raw.split()) > 2 else "")
+        if not m_:
+            return send("Send it like this: /bookshorts add https://youtube.com/shorts/VIDEOID")
+        vid = m_.group(1)
+        try:
+            tok = yt_token()
+            h = {"Authorization": f"Bearer {tok}"}
+            pl = _bs_playlist(tok, bs)
+            removed = []
+            pls, page = [], None
+            while True:
+                kw = {"pageToken": page} if page else {}
+                r = yt_get("playlists", tok, part="snippet", mine="true", maxResults=50, **kw)
+                pls += [(x["id"], x["snippet"]["title"]) for x in r.get("items", [])]
+                page = r.get("nextPageToken")
+                if not page:
+                    break
+            for pid_, ptitle in pls:
+                if pid_ == pl:
+                    continue
+                items = yt_get("playlistItems", tok, part="id", playlistId=pid_, videoId=vid, maxResults=5).get("items", [])
+                for it in items:
+                    d_ = S.delete(f"{YT}/youtube/v3/playlistItems?id={it['id']}", headers=h, timeout=60)
+                    if d_.status_code < 400:
+                        removed.append(ptitle)
+            r = S.post(f"{YT}/youtube/v3/playlistItems?part=snippet", headers=h, timeout=60,
+                       json={"snippet": {"playlistId": pl, "position": 0, "resourceId": {"kind": "youtube#video", "videoId": vid}}})
+            if r.status_code >= 400 and not (r.status_code == 409 and "AlreadyInPlaylist" in r.text):
+                if r.status_code == 403 and "quota" in r.text.lower():
+                    return send("⏳ YouTube's daily limit is used up. Send the same command after 10:00 Cairo time." + (f" (Already removed from: {', '.join(removed)}.)" if removed else ""))
+                return send(f"I could not add it to the book playlist (HTTP {r.status_code}).")
+        except Exception as e:
+            if _bs_quota(e):
+                return send("⏳ YouTube's daily limit is used up. Send the same command after 10:00 Cairo time.")
+            return send("I could not do that: " + clean(e)[:120])
+        bs["intro"] = vid
+        return send("✅ Moved to the book playlist as its first video." + (f" Removed from: {', '.join(sorted(set(removed)))}." if removed else " It was not in any other playlist.")
+                    + f"\nhttps://www.youtube.com/playlist?list={pl}")
     if a == "fix":
         tok = yt_token()
         done = 0
@@ -15472,7 +15513,7 @@ def cmd_bookshorts(st, raw):
          + (f", public: {len(bs.get('public', {}))}" if bs.get("public") else "") + "."
          + (f"\nMissing: #{', #'.join(str(i) for i in missing)}" if missing else "\nAll uploaded.")
          + (f"\nPlaylist: https://www.youtube.com/playlist?list={bs['pl']}" if bs.get("pl") else "")
-         + "\n/bookshorts on | off | fix | publish")
+         + "\n/bookshorts on | off | fix | publish | add LINK")
 
 
 # ---------------- v10.285: swap every old pages.dev address in ALL video descriptions (also videos without an article) ----------------
@@ -15543,6 +15584,55 @@ def cmd_booktraffic(st, raw=""):
     top = ", ".join(f"{k} {v}" for k, v in sorted(refs.items(), key=lambda kv: -kv[1])[:6])
     send(f"📚 Visitors sent to the Kindle page (last {days} day(s)): {views} page views, {visits} visits.\nFrom: {top}.\n"
          "\"Direct or app links\" is usually Instagram, TikTok or X opened inside their apps. Your own tests are included. Amazon's side (sales) is in KDP Reports. /booktraffic 30 for a month.")
+
+def cmd_fixcomments(st, raw=""):
+    """v10.293: the bot's own old comments (source links with pages.dev, book comments with the direct Amazon link) are edited to the new links. Only comments written by the channel itself; 50 quota units each."""
+    send("Looking for my own comments with old links...")
+    try:
+        tok = yt_token()
+        chid = yt_get("channels", tok, part="id", mine="true")["items"][0]["id"]
+        mine, page, pages = [], None, 0
+        while pages < 60:
+            kw = {"pageToken": page} if page else {}
+            r = yt_get("commentThreads", tok, part="snippet", allThreadsRelatedToChannelId=chid, maxResults=100, **kw)
+            for it in r.get("items", []):
+                sn = (it.get("snippet") or {}).get("topLevelComment", {}).get("snippet", {})
+                if (sn.get("authorChannelId") or {}).get("value") != chid:
+                    continue
+                txt = sn.get("textOriginal") or ""
+                new = txt.replace(OLD_SITE_BASE, SITE_BASE).replace(GUIDE_PAID_URL, BOOK_LINK)
+                if new != txt:
+                    mine.append((it["snippet"]["topLevelComment"]["id"], new))
+            page = r.get("nextPageToken")
+            pages += 1
+            if not page:
+                break
+    except Exception as e:
+        return send("I could not read the comments: " + clean(e)[:140])
+    if not mine:
+        return send("✅ None of my comments has an old link. Nothing to change.")
+    done, errs, quota = 0, [], False
+    for cid, new in mine:
+        try:
+            r = S.put(f"{YT}/youtube/v3/comments?part=snippet", headers={"Authorization": f"Bearer {tok}"},
+                      json={"id": cid, "snippet": {"textOriginal": new[:10000]}}, timeout=60)
+        except Exception as e:
+            errs.append(clean(e)[:40])
+            continue
+        if r.status_code == 403 and "quota" in r.text.lower():
+            quota = True
+            break
+        if r.status_code >= 400:
+            errs.append(f"HTTP {r.status_code}")
+        else:
+            done += 1
+    left = len(mine) - done - len(errs)
+    out = [f"✅ {done} of my comment(s) now use the new links (found {len(mine)})."]
+    if quota:
+        out.append(f"⏸ YouTube's daily quota ran out. {left} left: send /fixcomments again after 10:00 Cairo.")
+    if errs:
+        out.append(f"⚠️ {len(errs)} failed: " + "; ".join(sorted(set(errs))[:3]))
+    send("\n".join(out))
 
 def cmd_scoreboard(st, auto=False):
     send("📋 Putting this week's numbers together...")
@@ -18583,6 +18673,7 @@ def main():
             {"command": "month", "description": "All numbers, 1st of month to today"},
             {"command": "bookcomment", "description": "Book comment on top videos, 5 a day"},
             {"command": "booktraffic", "description": "Who clicks through to the Kindle page"},
+            {"command": "fixcomments", "description": "Update old links in the bot's own comments"},
             {"command": "fixdomain", "description": "Replace old pages.dev links in all video descriptions"},
             {"command": "bookshorts", "description": "Upload the 19 book Shorts and build the playlist"},
             {"command": "kindleline", "description": "Kindle line in old descriptions, 5 a day"},
