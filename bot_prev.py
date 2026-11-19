@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.288"
+BOT_VERSION = "v10.289"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -15682,7 +15682,7 @@ def ensure_guide_page(root):
             "<div class=\"section-shell article-layout\"><article class=\"article-body\">\n"
             "<figure><img src=\"/guide/cover.webp\" alt=\"Cover of the book Ancient Egypt: Myth vs Evidence by Mohamed Amin\" width=\"800\" height=\"450\" loading=\"lazy\" style=\"max-width:100%;height:auto;border-radius:8px\"/></figure>"
             "<h2>What is inside?</h2><ul><li>The pharaoh's curse</li><li>How the pyramids were really built</li><li>The logbooks of Merer</li><li><em>The complete edition has 20 chapters in full.</em></li></ul>"
-            "<h2>How does it work?</h2><p>Every chapter is a short version of a Kemet article, with its sources. Where scholars disagree, the guide says so and never presents a guess as a fact.</p>"
+            "<p><a href=\"/myth-vs-evidence/\">Watch the 19 films that go with the book.</a></p><h2>How does it work?</h2><p>Every chapter is a short version of a Kemet article, with its sources. Where scholars disagree, the guide says so and never presents a guess as a fact.</p>"
             f"<p><a class=\"button button-primary\" href=\"{GUIDE_FREE_URL}\" rel=\"noopener\" target=\"_blank\">Get the free sample</a></p><p><small>Free. A 12-page PDF delivered to your email.</small></p>" + paid +
             "\n<a class=\"article-back\" href=\"/\">← Home</a></article></div>\n</main>\n")
     page = head + body + main + t[k:]
@@ -15870,6 +15870,74 @@ def ensure_book_page(root):
     return True
 
 
+HUB_ARTICLE_KEYS = {1: "Curse: Myth, Science", 2: "Hands That Built the Pyramids", 3: "Logbooks of Merer", 4: "Use Sound to Cut", 5: "Secrets of Mummification",
+                    6: "Face of Cleopatra", 7: "Iron from the Sky", 8: "Orion Correlation Theory", 9: "Erosion, Salt", 10: "Did Egyptians Reach America",
+                    11: "Precision of Khufu", 12: "Explaining the Helicopter", 13: "Faded Evidence of Color", 14: "Sacred Burden", 15: "Wax Cones",
+                    16: "Brain Surgery", 17: "Are AI Pharaohs", 18: "Genetic Blueprint", 19: "Dendera Light Relief"}
+
+
+def ensure_hub_page(root):
+    """v10.289: /myth-vs-evidence/ lists the 19 book Shorts in order, each with its chapter summary, a tap-to-play thumbnail and a link to the matching article. Needs the About page layout, like the guide page."""
+    import html as _h
+    root = Path(root)
+    ab = root / "about" / "index.html"
+    if not ab.exists():
+        return False
+    t = ab.read_text(encoding="utf-8")
+    i, j, k = t.find("<title>"), t.find("<main"), t.find("<footer")
+    if min(i, j, k) < 0:
+        return False
+    items = (mem().get("bookshorts") or {}).get("items") or {}
+    titles = {}
+    for f in (root / "articles").glob("*/index.html"):
+        m = re.search(r"<title>(.*?)</title>", f.read_text(encoding="utf-8", errors="ignore"), re.S)
+        if m:
+            titles[f.parent.name] = _h.unescape(m.group(1)).replace("\u2019", "'")
+    url = f"{SITE_BASE}/myth-vs-evidence/"
+    desc = "Nineteen short films from the book Ancient Egypt: Myth vs Evidence. Each one checks a popular claim against what archaeologists found, with the full article for each."
+    img = f"{SITE_BASE}/guide/cover.webp"
+    head = (t[:i] + f"<title>Myth vs Evidence: the 19 films | Kemet</title><meta content=\"{desc}\" name=\"description\"/><link href=\"{url}\" rel=\"canonical\"/>"
+            f"<meta content=\"Myth vs Evidence: the 19 films\" property=\"og:title\"/><meta content=\"{desc}\" property=\"og:description\"/><meta content=\"{img}\" property=\"og:image\"/><meta content=\"{url}\" property=\"og:url\"/>"
+            "<link href=\"/brand-mark.svg\" rel=\"icon\" type=\"image/svg+xml\"/><link href=\"/styles.css\" rel=\"stylesheet\"/></head>\n<body>\n")
+    body = t[t.find("<body>") + 7:j] if "<body>" in t[:j] else ""
+    rows = []
+    for n in range(1, BS_TOTAL + 1):
+        ttl, blurb = BOOKSHORTS[n]
+        vid = items.get(str(n))
+        slug = ""
+        key = HUB_ARTICLE_KEYS.get(n, "").replace("\u2019", "'")
+        if key:
+            for sl, tt in titles.items():
+                if key in tt:
+                    slug = sl
+                    break
+        thumb = (f"<a href=\"https://youtu.be/{vid}\" rel=\"noopener\" target=\"_blank\" aria-label=\"Watch Short {n} on YouTube\">"
+                 f"<img src=\"https://i.ytimg.com/vi/{vid}/hqdefault.jpg\" alt=\"Short {n}: {_h.escape(ttl)}\" width=\"160\" height=\"120\" loading=\"lazy\" style=\"border-radius:8px;object-fit:cover;max-width:100%\"/></a>") if vid else ""
+        art = f" <a href=\"/articles/{slug}/\">Read the full article</a>." if slug else ""
+        watch = f" <a href=\"https://youtu.be/{vid}\" rel=\"noopener\" target=\"_blank\">Watch the Short</a>." if vid else ""
+        rows.append(f"<section style=\"display:flex;gap:16px;align-items:flex-start;margin:0 0 24px\"><div style=\"flex:0 0 160px\">{thumb}</div>"
+                    f"<div><h3>{n}. {_h.escape(ttl)}</h3><p>{_h.escape(blurb)}{watch}{art}</p></div></section>")
+    main = ("<main id=\"main-content\">\n<header class=\"article-hero\"><div class=\"section-shell\"><div class=\"article-meta\"><span>Kemet / The book</span></div>"
+            "<h1>Myth vs Evidence:<br/><em>the 19 films</em></h1><p class=\"article-deck\">One short film for each chapter of the book Ancient Egypt: Myth vs Evidence. Every film takes a popular claim and checks it against what archaeologists have actually found.</p></div></header>\n"
+            "<div class=\"section-shell article-layout\"><article class=\"article-body\">\n"
+            f"<p><a class=\"button button-primary\" href=\"{BOOK_LINK}\" rel=\"noopener\" target=\"_blank\">Get the book on Kindle</a> &nbsp; <a class=\"button button-quiet\" href=\"/guide/\">Free sample</a></p>\n"
+            + "\n".join(rows) +
+            f"\n<h2>Want every source?</h2><p>The book gives the full evidence and sources for each of these claims.</p><p><a class=\"button button-primary\" href=\"{BOOK_LINK}\" rel=\"noopener\" target=\"_blank\">Get the book on Kindle</a></p>"
+            "\n<a class=\"article-back\" href=\"/\">\u2190 Home</a></article></div>\n</main>\n")
+    page = head + body + main + t[k:]
+    d = root / "myth-vs-evidence"
+    d.mkdir(exist_ok=True)
+    f = d / "index.html"
+    if not f.exists() or f.read_text(encoding="utf-8") != page:
+        f.write_text(page, encoding="utf-8")
+    sm = root / "sitemap.xml"
+    if sm.exists():
+        x = sm.read_text(encoding="utf-8")
+        if "/myth-vs-evidence/" not in x and "</urlset>" in x:
+            sm.write_text(x.replace("</urlset>", f"<url><loc>{url}</loc></url>\n</urlset>", 1), encoding="utf-8")
+    return True
+
+
 def ensure_latest_page(root):
     """v10.225: /latest/ always opens the newest article, so the link in your Instagram bio never has to change. Returns the slug (or "")."""
     root = Path(root)
@@ -15885,6 +15953,10 @@ def ensure_latest_page(root):
         ensure_book_page(root)
     except Exception as e:
         print("book page:", clean(e)[:100])
+    try:
+        ensure_hub_page(root)
+    except Exception as e:
+        print("hub page:", clean(e)[:100])
     try:
         ensure_home_funnel(root)
     except Exception as e:
@@ -16872,6 +16944,11 @@ def pack_site(root, d, caption):
             print("ask box:", clean(e)[:120])
     if cf_cfg():
         caption = re.sub(r"Unzip and upload the CONTENTS to Cloudflare Pages( as Production)?\.", "Tap 🚀 Publish below to put it live.", caption)
+    for _fn in (ensure_book_page, ensure_hub_page):
+        try:
+            _fn(root)        # v10.289: the /book/ redirect and the 19-films page are part of every site build
+        except Exception as e:
+            print(_fn.__name__, clean(e)[:100])
     try:
         # v10.279: the site now lives at its own domain; every old pages.dev address inside the files is rewritten
         for fp in root.rglob("*"):
