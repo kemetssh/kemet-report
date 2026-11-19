@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.284"
+BOT_VERSION = "v10.285"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -11943,6 +11943,8 @@ def on_message(msg, st):
         cmd_kindleline(st, raw)
     elif text.startswith("/bookcomment"):
         cmd_bookcomment(st, raw)
+    elif text.startswith("/fixdomain"):
+        cmd_fixdomain(st, raw)
     elif text.startswith("/bookshorts"):
         cmd_bookshorts(st, raw)
     elif text.startswith("/searchcheck"):
@@ -15462,6 +15464,41 @@ def cmd_bookshorts(st, raw):
          + "\n/bookshorts on | off | fix | publish")
 
 
+# ---------------- v10.285: swap every old pages.dev address in ALL video descriptions (also videos without an article) ----------------
+def cmd_fixdomain(st, raw=""):
+    send("Scanning every video description for the old pages.dev address...")
+    try:
+        tok = yt_token()
+        vids = all_videos(tok)
+    except Exception as e:
+        return send("I could not read your videos: " + clean(e)[:120])
+    todo = [v for v in vids if OLD_SITE_BASE in (v.get("snippet", {}).get("description", "") or "")]
+    if not todo:
+        return send(f"✅ None of your {len(vids)} videos has the old address. Nothing to change.")
+    done, errs, quota = 0, [], False
+    for v in todo:
+        sn = v["snippet"]
+        new = sn.get("description", "").replace(OLD_SITE_BASE, SITE_BASE)
+        try:
+            res = put_description(tok, v["id"], sn, new)
+        except Exception as e:
+            res = clean(e)[:60]
+        if res == "ok":
+            done += 1
+        elif res == "quota":
+            quota = True
+            break
+        else:
+            errs.append(sn.get("title", v["id"])[:30] + ": " + str(res))
+    left = len(todo) - done - len(errs)
+    out = [f"✅ {done} description(s) now point to {SITE_BASE.split('//')[-1]}. Found {len(todo)} with the old address."]
+    if quota:
+        out.append(f"⏸ YouTube's daily quota ran out. {left} left: send /fixdomain again after 10:00 Cairo.")
+    if errs:
+        out.append(f"⚠️ {len(errs)} failed: " + "; ".join(errs[:3]))
+    send("\n".join(out))
+
+
 def cmd_scoreboard(st, auto=False):
     send("📋 Putting this week's numbers together...")
     snap = board_snapshot()
@@ -18380,6 +18417,7 @@ def main():
             {"command": "chapters", "description": "Add timestamps to long videos"},
             {"command": "month", "description": "All numbers, 1st of month to today"},
             {"command": "bookcomment", "description": "Book comment on top videos, 5 a day"},
+            {"command": "fixdomain", "description": "Replace old pages.dev links in all video descriptions"},
             {"command": "bookshorts", "description": "Upload the 19 book Shorts and build the playlist"},
             {"command": "kindleline", "description": "Kindle line in old descriptions, 5 a day"},
             {"command": "searchcheck", "description": "Google and Bing: sitemap and indexed pages"},
