@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.289"
+BOT_VERSION = "v10.290"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -9737,6 +9737,11 @@ def sync_tracked(vids):
     return added
 
 
+def book_short_ids():
+    """v10.290: video ids of the book Shorts. They belong to the book page, not to articles, so the counts treat them as their own group."""
+    return {v for v in ((mem().get("bookshorts") or {}).get("items") or {}).values() if v}
+
+
 def numbers_report(tok=None, fix=True):
     """One set of numbers that always add up: YouTube videos, website articles, films, bot notes. Returns (lines, problems)."""
     tok = tok or yt_token()
@@ -9764,10 +9769,14 @@ def numbers_report(tok=None, fix=True):
             arts = sum(len(a) for a in by.values()) + len(none)
             sharing = sum(len(a) - 1 for a in by.values() if len(a) > 1)
             orphan = [x for x in by if x not in ids]
-            noart = [v for v in vids if v["id"] not in by]
+            bk = book_short_ids() & ids
+            book_n = len(bk - set(by))
+            noart = [v for v in vids if v["id"] not in by and v["id"] not in bk]
             own = arts - sharing - len(none)
             lines.append(f"📰 Website: {arts} articles = {own} with their own film + {sharing} sharing a film + {len(none)} with no film")
             lines.append(f"🔗 Films used by articles: {len(by) - len(orphan)} of {c['total']} videos")
+            if book_n:
+                lines.append(f"📚 {book_n} film(s) are the book Shorts. They sit on the 19-films page (/myth-vs-evidence/), not in articles.")
             if noart:
                 lines.append(f"✍️ {len(noart)} video(s) have no article yet (send /articles): " + "; ".join(v["snippet"]["title"][:38] for v in noart[:4]) + ("…" if len(noart) > 4 else ""))
             if sharing or none:
@@ -9778,7 +9787,7 @@ def numbers_report(tok=None, fix=True):
             if len(noart) != sharing + len(none) and not orphan:
                 lines.append(f"ℹ️ Why {c['total']} videos but {arts} articles: {len(by) - len(orphan)} films are used by articles, {sharing + len(none)} article(s) have no film of their own, and {len(noart)} video(s) are used by no article. Attaching each unused video to the article that lacks a film (/articles, then tap Attach) makes them match.")
             else:
-                lines.append(f"✓ It adds up: {c['total']} videos = {len(by) - len(orphan)} with an article + {len(noart)} without. {arts} articles = {len(by)} films + {sharing + len(none)} that still need their own film.")
+                lines.append(f"✓ It adds up: {c['total']} videos = {len(by) - len(orphan)} with an article" + (f" + {book_n} on the book page" if book_n else "") + f" + {len(noart)} without. {arts} articles = {len(by)} films + {sharing + len(none)} that still need their own film.")
         except Exception as e:
             lines.append("✗ Website numbers: " + clean(e)[:80])
             problems.append("website numbers: " + clean(e)[:80])
@@ -17863,7 +17872,7 @@ def cmd_linksall(st):
     if toolong:
         msg.append(f"Description too long for a new line: {len(toolong)}")
     try:
-        none_ = [v for v in all_videos(tok) if v["id"] not in arts]
+        none_ = [v for v in all_videos(tok) if v["id"] not in arts and v["id"] not in book_short_ids()]
         if none_:
             msg.append(f"📝 {len(none_)} film(s) have no article at all (send /articles)")
     except Exception as e:
@@ -18019,7 +18028,7 @@ def cmd_articlelinks(st):
         msg.append(f"⚠️ {len(odd)} film(s) do not match the article the site pairs them with, so I did NOT touch their descriptions:\n" + "\n".join(f"• film \"{a[:55]}\" ≠ article \"{b[:55]}\"" for a, b in odd[:6])
                    + "\nFix: send /fixvideos, or /articles to give the film its own article.")
     try:                                                    # v10.252: films that have no article at all
-        none_ = [v for v in all_videos(tok) if v["id"] not in arts]
+        none_ = [v for v in all_videos(tok) if v["id"] not in arts and v["id"] not in book_short_ids()]
         if none_:
             msg.append(f"📝 {len(none_)} of your films have no article yet" + (": " + "; ".join(v["snippet"]["title"][:40] for v in none_[:4]) + ("…" if len(none_) > 4 else "") if none_ else "") + ". Send /articles to write them.")
     except Exception as e:
