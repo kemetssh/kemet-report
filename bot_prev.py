@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.297"
+BOT_VERSION = "v10.298"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -4026,6 +4026,40 @@ def on_prop(jid, act, st):
         st["props"].pop(jid, None)
         cfg = fb_cfg()
         return send("✅ Posted to your Facebook Page " + cfg.get("page_name", "") + ".\nhttps://www.facebook.com/" + str(pid_ or cfg.get("page_id", "")))
+    if act == "ip" and kind == "igpost":
+        rec = mem()["videos"].get(prop["video_id"]) or {}
+        file_id = str(rec.get("file_id") or "").strip()
+        if not file_id:
+            st["props"].pop(jid, None)
+            return send("This record has no Telegram video file, so there is no one-tap upload. Copy the caption and post by hand.")
+        fp = _remote_fingerprint("instagram_reel", prop["video_id"], prop.get("caption", ""), file_id)
+        ops = mem().setdefault("remote_ops", {})
+        known = ops.get(fp) or {}
+        if known.get("status") == "confirmed":
+            st["props"].pop(jid, None)
+            return send("✅ Instagram already has this Reel.\n" + str(known.get("remote_id") or ""))
+        if known.get("status") == "pending" and time.time() - known.get("ts", 0) < 3600:
+            return send("⚠️ An Instagram upload of this video started less than an hour ago and its result is unknown. "
+                        "Check your Instagram profile before trying again, so it is not posted twice.")
+        ops[fp] = {"kind": "instagram_reel", "status": "pending", "ts": time.time()}
+        if not _persist_remote_marker(st):
+            ops.pop(fp, None)
+            return send("I could not save the pending Instagram operation, so I did not upload anything. Try again later.")
+        send("Posting your Reel to Instagram (usually 1-3 minutes)...")
+        try:
+            link = ig_post_reel(prop["caption"], file_id)
+        except Exception as e:
+            if _remote_uncertain(e) or isinstance(e, TimeoutError):
+                _persist_remote_marker(st)
+                return send("⚠️ Instagram's result is unknown (" + clean(e)[:120] + "). Check your profile before trying again; I will not post a second copy for an hour.")
+            ops.pop(fp, None)
+            _persist_remote_marker(st)
+            return send("Instagram did not post it: " + clean(e)[:240] + "\nYou can still copy the caption and post by hand. "
+                        "If it mentions permissions or the key, tell me the exact words.")
+        ops[fp] = {"kind": "instagram_reel", "status": "confirmed", "remote_id": link or "posted", "ts": time.time()}
+        _persist_remote_marker(st)
+        st["props"].pop(jid, None)
+        return send("✅ Posted to Instagram as a Reel." + ("\n" + link if link else " Open your profile to see it."))
     if act == "cp" and kind == "sitepub":
         return do_site_publish(prop, st)
     if act == "va" and kind == "attach":
@@ -8347,6 +8381,68 @@ def fb_post_video(caption, file_id):
     return j.get("id") or j.get("post_id") or ""
 
 
+def ig_account(cfg):
+    """Instagram professional account linked to the connected Facebook Page: (id, username)."""
+    j = fb_call("GET", cfg["page_id"], params={"fields": "instagram_business_account{id,username}", "access_token": cfg["token"]})
+    a = j.get("instagram_business_account") or {}
+    if not a.get("id"):
+        raise RuntimeError("this Facebook Page has no Instagram account linked (Instagram must be a Business or Creator account linked to the Kemet Page)")
+    return a["id"], a.get("username", "")
+
+
+def ig_post_reel(caption, file_id):
+    """Upload a Telegram video straight to Instagram as a Reel (resumable upload, no public hosting needed). Returns the post link."""
+    cfg = fb_cfg()
+    if not cfg:
+        raise RuntimeError("Facebook is not connected. Send /fbsetup.")
+    igid, _un = ig_account(cfg)
+    tok = cfg["token"]
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "v.mp4"
+        tg_download(file_id, p)
+        size = p.stat().st_size
+        j = fb_call("POST", f"{igid}/media", data={"media_type": "REELS", "upload_type": "resumable", "caption": caption[:2200],
+                                                  "access_token": tok})
+        cid = j["id"]
+        uri = j.get("uri") or f"https://rupload.facebook.com/ig-api-upload/{FB_VER}/{cid}"
+        with open(p, "rb") as f:
+            r = S.post(uri, headers={"Authorization": "OAuth " + tok, "offset": "0", "file_size": str(size)}, data=f, timeout=900)
+    try:
+        rj = r.json()
+    except Exception:
+        rj = {}
+    if not r.ok or rj.get("success") is False:
+        raise RuntimeError("Instagram upload failed: " + clean(str(rj.get("debug_info") or rj.get("error") or r.status_code))[:160])
+    status = ""
+    for _ in range(40):                                     # up to ~6 minutes of processing
+        time.sleep(9)
+        sj = fb_call("GET", cid, params={"fields": "status_code,status", "access_token": tok})
+        status = sj.get("status_code", "")
+        if status == "FINISHED":
+            break
+        if status in ("ERROR", "EXPIRED"):
+            raise RuntimeError("Instagram could not process the video: " + clean(str(sj.get("status", status)))[:160])
+    if status != "FINISHED":
+        raise TimeoutError("Instagram is still processing the video")
+    pub = fb_call("POST", f"{igid}/media_publish", data={"creation_id": cid, "access_token": tok})
+    mid = pub.get("id", "")
+    try:
+        return fb_call("GET", mid, params={"fields": "permalink", "access_token": tok}).get("permalink") or ""
+    except Exception:
+        return ""
+
+
+def cmd_igtest(st):
+    cfg = fb_cfg()
+    if not cfg:
+        return send("Facebook is not connected yet. Send /fbsetup.")
+    try:
+        igid, un = ig_account(cfg)
+    except Exception as e:
+        return send("Instagram check failed: " + clean(e)[:250])
+    send(f"✅ Instagram is linked: @{un or igid}. Under each Instagram caption in /crosspost you now get a button to post the Reel.")
+
+
 def cmd_searchkey(msg, st, raw):
     parts = raw.split()
     forget_message(msg)
@@ -8930,6 +9026,11 @@ def cmd_crosspost(st, video_id=None):
                 body = with_guide(body, 1900, "fb")
                 st["props"][pid] = {"type": "fbpost", "video_id": vid, "caption": body, "created": time.time()}
                 send(body, [[btn("📘 Post this to my Facebook Page", pid, "fp")]])
+            elif key == "reels" and fb and file_id:
+                pid = new_pid(st)
+                body = body[:2200]
+                st["props"][pid] = {"type": "igpost", "video_id": vid, "caption": body, "created": time.time()}
+                send(body, [[btn("📸 Post this Reel to my Instagram", pid, "ip")]])
             else:
                 send(body)
     if fb and not file_id:
@@ -11838,6 +11939,8 @@ def on_message(msg, st):
         cmd_fbsetup(st)
     elif text.startswith("/fbconnect"):
         cmd_fbconnect(msg, st, raw)
+    elif text == "/igtest":
+        cmd_igtest(st)
     elif text == "/fboff":
         cmd_fboff(st)
     elif text.startswith("/searchkey"):
@@ -12061,7 +12164,7 @@ def on_callback(cb, st):
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
     if jid == "q" and act in ("qa", "qi"):
         return ask_callback(cb, act, st)
-    if act in ("ta", "ts", "tu", "ca", "cs", "fbr", "fbn", "chp", "chs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr", "fy", "fz", "lk", "lu", "mw"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "fbr", "fbn", "chp", "chs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "ip", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr", "fy", "fz", "lk", "lu", "mw"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
