@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.294"
+BOT_VERSION = "v10.296"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -16011,6 +16011,11 @@ HUB_ARTICLE_KEYS = {1: "Curse: Myth, Science", 2: "Hands That Built the Pyramids
                     16: "Brain Surgery", 17: "Are AI Pharaohs", 18: "Genetic Blueprint", 19: "Dendera Light Relief"}
 
 
+HUB_INTRO_VIDEO = "Pswuc_QL4_w"
+HUB_INTRO_TITLE = "Beyond Aliens: How Khufu\u2019s Bureaucrats Built the Great Pyramid"
+HUB_INTRO_KEY = "Beyond Aliens"
+
+
 def ensure_hub_page(root):
     """v10.289: /myth-vs-evidence/ lists the 19 book Shorts in order, each with its chapter summary, a tap-to-play thumbnail and a link to the matching article. Needs the About page layout, like the guide page."""
     import html as _h
@@ -16036,6 +16041,13 @@ def ensure_hub_page(root):
             "<link href=\"/brand-mark.svg\" rel=\"icon\" type=\"image/svg+xml\"/><link href=\"/styles.css\" rel=\"stylesheet\"/></head>\n<body>\n")
     body = t[t.find("<body>") + 7:j] if "<body>" in t[:j] else ""
     rows = []
+    intro_vid = HUB_INTRO_VIDEO
+    if intro_vid:
+        isl = next((sl for sl, tt in titles.items() if HUB_INTRO_KEY in tt), "")
+        iart = f" <a href=\"/articles/{isl}/\">Read the full article</a>." if isl else ""
+        rows.append(f"<section style=\"display:flex;gap:16px;align-items:flex-start;margin:0 0 32px\"><div style=\"flex:0 0 160px\"><a href=\"https://youtu.be/{intro_vid}\" rel=\"noopener\" target=\"_blank\" aria-label=\"Watch the film on YouTube\">"
+                    f"<img src=\"https://i.ytimg.com/vi/{intro_vid}/hqdefault.jpg\" alt=\"{_h.escape(HUB_INTRO_TITLE)}\" width=\"160\" height=\"120\" loading=\"lazy\" style=\"border-radius:8px;object-fit:cover;max-width:100%\"/></a></div>"
+                    f"<div><h3>Start here: {_h.escape(HUB_INTRO_TITLE)}</h3><p>The general film behind the book, on how the state organised the building of the Great Pyramid. <a href=\"https://youtu.be/{intro_vid}\" rel=\"noopener\" target=\"_blank\">Watch the Short</a>.{iart}</p></div></section>")
     for n in range(1, BS_TOTAL + 1):
         ttl, blurb = BOOKSHORTS[n]
         vid = items.get(str(n))
@@ -17079,7 +17091,7 @@ def pack_site(root, d, caption):
             print("ask box:", clean(e)[:120])
     if cf_cfg():
         caption = re.sub(r"Unzip and upload the CONTENTS to Cloudflare Pages( as Production)?\.", "Tap 🚀 Publish below to put it live.", caption)
-    for _fn in (ensure_book_page, ensure_hub_page):
+    for _fn in (ensure_privacy_page, ensure_book_page, ensure_hub_page):
         try:
             _fn(root)        # v10.289: the /book/ redirect and the 19-films page are part of every site build
         except Exception as e:
@@ -17101,6 +17113,9 @@ def pack_site(root, d, caption):
                 if fp.suffix.lower() == ".html" and "/articles/" in fp.as_posix() and fp.parent.name != "articles" and "book-box" not in t1 and '<div class="article-related">' in t1:
                     # v10.282: a book box at the end of every article
                     t1 = t1.replace('<div class="article-related">', BOOK_BOX + '\n<div class="article-related">', 1)
+                if fp.suffix.lower() == ".html" and "mailto:kemet@kemetstories.com" not in t1 and 'class="footer-bottom"' in t1 and "</div></footer>" in t1:
+                    # v10.296: the real footer is <div class="footer-bottom">; the Contact link goes at its end on every page
+                    t1 = t1.replace("</div></footer>", '<a href="mailto:kemet@kemetstories.com">Contact</a></div></footer>', 1)
                 if fp.suffix.lower() == ".html" and "mailto:kemet@kemetstories.com" not in t1 and 'class="footer-links"' in t1:
                     # v10.281: a Contact link in the footer of every page
                     t1 = re.sub(r'(<div class="footer-links">.*?)(</div>)', lambda m: m.group(1) + '<a href="mailto:kemet@kemetstories.com">Contact</a>' + m.group(2), t1, count=1, flags=re.S)
