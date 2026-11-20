@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.302"
+BOT_VERSION = "v10.303"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -10492,6 +10492,63 @@ def cmd_viral(st):
     send("\n".join(lines)[:3900], [[btn("📣 Boost my newest video", pid, "gb"), btn("💡 New ideas", pid, "gi")]])
 
 
+def book_traffic_line(days=7):
+    """v10.303: one line for /health: visits to the /book/ links in the last days, split by app link. Never raises."""
+    try:
+        if not cf_cfg():
+            return "📚 Book link visits: Cloudflare not connected (/cfsetup)."
+        cfg, tag, now = cf_cfg(), cf_site_tag(), time.time()
+        fmt = lambda t: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+        var = {"acc": cfg["account"], "tag": tag, "since": fmt(now - days * 86400), "until": fmt(now)}
+        paths = ["/book/"] + ["/book/" + x_ + "/" for x_ in BOOK_SOURCES]
+        q_ = ("query($acc: String!, $tag: String!, $since: Time!, $until: Time!) { viewer { accounts(filter: {accountTag: $acc}) {"
+              " p: rumPageloadEventsAdaptiveGroups(filter: {siteTag: $tag, requestPath_in: " + json.dumps(paths) +
+              ", datetime_geq: $since, datetime_leq: $until}, limit: 30, orderBy: [count_DESC]) { count dimensions { requestPath } } } } }")
+        d = cf_graphql(q_, var)
+        rows = ((((d.get("viewer") or {}).get("accounts") or [{}])[0]).get("p")) or []
+        got = {}
+        for g in rows:
+            k = (g.get("dimensions") or {}).get("requestPath", "").strip("/").split("/")[-1]
+            got[k if k != "book" else "no app tag"] = got.get(k if k != "book" else "no app tag", 0) + int(g.get("count", 0))
+        if not got:
+            return f"📚 Book link visits, last {days} days: 0 so far (your own tests count too). /booktraffic has the details."
+        tot = sum(got.values())
+        return (f"📚 Book link visits, last {days} days: {tot} (" + ", ".join(f"{k} {v}" for k, v in sorted(got.items(), key=lambda kv: -kv[1])) +
+                "). Your own tests count. /booktraffic has the details.")
+    except Exception as e:
+        return "📚 Book link visits: could not read (" + clean(e)[:70] + ")."
+
+
+def social_numbers_lines():
+    """v10.303: Facebook and Instagram 28-day numbers for /health (cached 12 h by fb_insights / ig_insights). Never raises."""
+    out = []
+    if not fb_cfg():
+        return out
+    try:
+        c = fb_insights()
+        t = c.get("tot") or {}
+        if t:
+            nm = (("views", "views"), ("reach", "reached"), ("engage", "engagement"), ("visits", "page visits"), ("gained", "new followers"))
+            out.append("📘 Facebook, 28 days: " + ", ".join(f"{lb} {t[k]['d28']:,}" for k, lb in nm if k in t) + ".")
+        else:
+            out.append("📘 Facebook numbers: not readable yet" + (f" ({(c.get('err') or [''])[0][:70]})" if c.get("err") else "") +
+                       ". The key needs read_insights: make a new token with it and send /fbconnect again.")
+    except Exception as e:
+        out.append("📘 Facebook numbers: " + clean(e)[:80])
+    try:
+        c = ig_insights()
+        t = c.get("tot") or {}
+        if t:
+            nm = (("reach", "reached"), ("views", "views"), ("profile", "profile visits"), ("taps", "link taps"), ("interactions", "interactions"), ("gained", "net follows"))
+            out.append("📸 Instagram, 28 days: " + ", ".join(f"{lb} {t[k].get('d28', '?')}" for k, lb in nm if k in t) + ".")
+        else:
+            out.append("📸 Instagram numbers: not readable yet" + (f" ({(c.get('err') or [''])[0][:70]})" if c.get("err") else "") +
+                       ". The key needs instagram_manage_insights: make a new token with it and send /fbconnect again.")
+    except Exception as e:
+        out.append("📸 Instagram numbers: " + clean(e)[:80])
+    return out
+
+
 def cmd_health(st):
     lines = ["🩺 Health check", f"Bot version {BOT_VERSION}"]
     tok = {}
@@ -10570,6 +10627,8 @@ def cmd_health(st):
     lines.append("Autopilot: " + ("PAUSED (/resume to restart)" if st.get("paused") else "on"))
     if fb_cfg():
         lines.append("Facebook Page: connected (" + fb_cfg().get("page_name", "") + ")")
+    lines.append(book_traffic_line())
+    lines += social_numbers_lines()
     lines.append("If a line shows ✗, copy it to me and I will fix it.")
     send("\n".join(lines))
 
