@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.301"
+BOT_VERSION = "v10.302"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -17258,7 +17258,7 @@ def pack_site(root, d, caption):
                 _oh = OLD_SITE_BASE.split("//")[-1]
                 if _oh in t1:
                     t1 = t1.replace(_oh, SITE_BASE.split("//")[-1])      # v10.288: bare host names in visible text ("First published on ...")
-                if fp.suffix.lower() == ".html" and fp.parent.name != "book" and GUIDE_PAID_URL in t1:
+                if fp.suffix.lower() == ".html" and fp.relative_to(root).parts[0] != "book" and GUIDE_PAID_URL in t1:
                     t1 = t1.replace(GUIDE_PAID_URL, BOOK_LINK)      # v10.287: every book button on the site goes through the counted /book/ page
                 if fp.suffix.lower() == ".html" and "/articles/" in fp.as_posix() and fp.parent.name != "articles" and "book-box" not in t1 and '<div class="article-related">' in t1:
                     # v10.282: a book box at the end of every article
