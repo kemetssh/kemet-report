@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.300"
+BOT_VERSION = "v10.301"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -15701,14 +15701,29 @@ def cmd_booktraffic(st, raw=""):
     acc = ((d.get("viewer") or {}).get("accounts") or [{}])[0]
     tot = (acc.get("total") or [{}])[0] if acc.get("total") else {}
     views, visits = int(tot.get("count", 0) or 0), int(((tot.get("sum") or {}).get("visits", 0)) or 0)
-    if not views:
+    if not views and False:
         return send(f"📚 /book/: no visits in the last {days} day(s) yet. Publish the site, then use kemetstories.com/book/ in your links.")
     refs = {}
     for g in acc.get("refs") or []:
         k = ref_kind((g.get("dimensions") or {}).get("refererHost", ""))
         refs[k] = refs.get(k, 0) + int(g.get("count", 0))
     top = ", ".join(f"{k} {v}" for k, v in sorted(refs.items(), key=lambda kv: -kv[1])[:6])
-    send(f"📚 Visitors sent to the Kindle page (last {days} day(s)): {views} page views, {visits} visits.\nFrom: {top}.\n"
+    per = ""
+    try:                                                    # v10.301: each app's own link (/book/x/ ...)
+        paths = ["/book/" + x_ + "/" for x_ in BOOK_SOURCES]
+        q_ = ("query($acc: String!, $tag: String!, $since: Time!, $until: Time!) { viewer { accounts(filter: {accountTag: $acc}) {"
+              " p: rumPageloadEventsAdaptiveGroups(filter: {siteTag: $tag, requestPath_in: " + json.dumps(paths) +
+              ", datetime_geq: $since, datetime_leq: $until}, limit: 30, orderBy: [count_DESC]) { count sum { visits } dimensions { requestPath } } } } }")
+        d2 = cf_graphql(q_, {"acc": cfg["account"], "tag": tag, "since": fmt(now - days * 86400), "until": fmt(now)})
+        rows_ = ((((d2.get("viewer") or {}).get("accounts") or [{}])[0]).get("p")) or []
+        got = {(g.get("dimensions") or {}).get("requestPath", "").strip("/").split("/")[-1]: int(g.get("count", 0)) for g in rows_}
+        if got:
+            per = "\nBy app link: " + ", ".join(f"{k} {v}" for k, v in sorted(got.items(), key=lambda kv: -kv[1])) + ". (The plain /book/ number above is links with no app tag.)"
+        else:
+            per = "\nBy app link: none yet. Use kemetstories.com/book/x/ , /book/instagram/ , /book/tiktok/ , /book/linkedin/ , /book/facebook/ , /book/youtube/ , /book/reddit/ , /book/quora/ (publish the site first)."
+    except Exception as e:
+        print("booktraffic per-source:", clean(e)[:100])
+    send(f"📚 Visitors sent to the Kindle page (last {days} day(s)): {views} page views, {visits} visits.\nFrom: {top}.{per}\n"
          "\"Direct or app links\" is usually Instagram, TikTok or X opened inside their apps. Your own tests are included. Amazon's side (sales) is in KDP Reports. /booktraffic 30 for a month.")
 
 def cmd_fixcomments(st, raw=""):
@@ -16128,7 +16143,16 @@ def ensure_book_page(root):
     f = d / "index.html"
     if not f.exists() or f.read_text(encoding="utf-8") != page:
         f.write_text(page, encoding="utf-8")
+    for src_ in BOOK_SOURCES:                               # v10.301: /book/x/, /book/tiktok/ ... the same page, so each app's visitors are counted apart
+        sd = d / src_
+        sd.mkdir(exist_ok=True)
+        sf = sd / "index.html"
+        if not sf.exists() or sf.read_text(encoding="utf-8") != page:
+            sf.write_text(page, encoding="utf-8")
     return True
+
+
+BOOK_SOURCES = ("x", "instagram", "tiktok", "linkedin", "facebook", "youtube", "reddit", "quora")
 
 
 HUB_ARTICLE_KEYS = {1: "Curse: Myth, Science", 2: "Hands That Built the Pyramids", 3: "Logbooks of Merer", 4: "Use Sound to Cut", 5: "Secrets of Mummification",
