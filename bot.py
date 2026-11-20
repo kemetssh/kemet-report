@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.299"
+BOT_VERSION = "v10.300"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -12082,6 +12082,8 @@ def on_message(msg, st):
         cmd_fixcomments(st, raw)
     elif text.startswith("/fixdomain"):
         cmd_fixdomain(st, raw)
+    elif text.startswith("/bookarticle"):
+        cmd_bookarticle(st, raw)
     elif text.startswith("/bookshorts"):
         cmd_bookshorts(st, raw)
     elif text.startswith("/searchcheck"):
@@ -18308,6 +18310,23 @@ def cmd_articlelinks(st):
         send("\n".join(msg))
 
 
+def cmd_bookarticle(st, raw):
+    """/bookarticle 9 : give book Short number 9 an article of its own (the weekly list no longer suggests the book Shorts)."""
+    m_ = re.search(r"\d+", raw or "")
+    items = (mem().get("bookshorts") or {}).get("items") or {}
+    if not m_ or m_.group(0) not in items:
+        return send("Send the number of the book Short, for example /bookarticle 9 (numbers 1 to 19).")
+    vid = items[m_.group(0)]
+    v = next((x for x in all_videos(yt_token()) if x["id"] == vid), None)
+    if not v:
+        return send("I could not find that film on the channel.")
+    t_ = v["snippet"]["title"]
+    pid_ = new_pid(st)
+    st["props"][pid_] = {"type": "afterart", "c": {"id": vid, "title": t_, "avoid": ""}, "created": time.time()}
+    send(f"✍️ Book Short {m_.group(0)}: \"{t_[:80]}\". I research it, write about 2,000 words, check every claim against sources, and send you the updated site. "
+         "Nothing goes public until you upload it.", [[btn("✍️ Write its article", pid_, "gw")], [btn("Cancel", pid_, "cs")]])
+
+
 def cmd_articles(st):
     sz = mem().get("site_zip")
     if not sz:
@@ -18337,8 +18356,9 @@ def cmd_articles(st):
             return True
         return False
     cands = []
+    bk_ = book_short_ids()                                  # v10.300: the 19 book Shorts live on the 19-films page, not in article suggestions
     for v in vids:
-        if v["id"] in done or has_similar(v["snippet"]["title"]):
+        if v["id"] in done or v["id"] in bk_ or has_similar(v["snippet"]["title"]):
             continue
         cands.append({"id": v["id"], "title": v["snippet"]["title"], "views": int(v.get("statistics", {}).get("viewCount", 0))})
     cands.sort(key=lambda c: -c["views"])
@@ -18347,6 +18367,8 @@ def cmd_articles(st):
     try:
         for pl in site_playlists(tok)[:6]:
             for it_ in pl["items"]:
+                if it_["id"] in bk_:
+                    continue
                 if it_["id"] not in done:
                     if not any(c["id"] == it_["id"] for c in cands + nxt) and not has_similar(it_["title"]):
                         nxt.append({"id": it_["id"], "title": it_["title"], "views": 0, "series": pl["title"]})
@@ -18354,7 +18376,7 @@ def cmd_articles(st):
     except Exception as e:
         print("next in series:", clean(e)[:100])
     if not cands and not nxt:
-        unused = [v for v in vids if v["id"] not in groups_]       # videos no article shows as its film (the same list /health counts)
+        unused = [v for v in vids if v["id"] not in groups_ and v["id"] not in bk_]       # videos no article shows as its film (the same list /health counts)
         if not unused:
             return send("Every video has an article and every article has its own film. 🎉")
         send(f"No NEW article is needed, but {len(unused)} video(s) are not the film of any article (this is the same count /health shows):")
