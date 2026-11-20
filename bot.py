@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.303"
+BOT_VERSION = "v10.304"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -8362,6 +8362,8 @@ def fb_find_pages(token):
 
 def fb_save(page):
     mem()["fb"] = {"page_id": page["id"], "page_name": page.get("name", ""), "token": page["access_token"], "ts": time.time()}
+    mem().pop("fb_ins", None)                               # v10.304: a new key must not be judged by numbers read with the old one
+    mem().pop("ig_ins", None)
     send(f"✅ Connected to your Facebook Page: {page.get('name', page['id'])}. Your message with the keys is deleted and the Page key is kept encrypted.\n"
          "Try it: send /crosspost. Under each Facebook caption you will see a button to post your video to the Page.")
 
@@ -8838,6 +8840,7 @@ def fb_insights(force=False):
     for key, metrics in (("views", ("page_media_view", "page_impressions")), ("reach", ("page_total_media_view_unique", "page_impressions_unique")),
                          ("engage", ("page_post_engagements",)), ("visits", ("page_views_total",)),
                          ("gained", ("page_daily_follows_unique", "page_fan_adds_unique")), ("lost", ("page_daily_unfollows_unique", "page_fan_removes_unique"))):
+        tried = []
         for metric in metrics:
             try:
                 vals = [v.get("value") for v in series(metric)]
@@ -8845,10 +8848,11 @@ def fb_insights(force=False):
                 if nums:
                     new["tot"][key] = {"d28": int(sum(nums)), "d7": int(sum(nums[-7:]))}
                     break
+                tried.append(metric + ": no data")
             except Exception as e:
-                last = clean(e)[:70]
+                tried.append(metric + ": " + clean(e)[:60])
         else:
-            new["err"].append(key + ": " + last)
+            new["err"].append(key + " (" + "; ".join(tried)[:150] + ")")
     for metric in ("page_follows_country", "page_fans_country"):
         try:
             vals = series(metric)
@@ -10525,25 +10529,25 @@ def social_numbers_lines():
     if not fb_cfg():
         return out
     try:
-        c = fb_insights()
+        c = fb_insights(force=True)
         t = c.get("tot") or {}
         if t:
             nm = (("views", "views"), ("reach", "reached"), ("engage", "engagement"), ("visits", "page visits"), ("gained", "new followers"))
             out.append("📘 Facebook, 28 days: " + ", ".join(f"{lb} {t[k]['d28']:,}" for k, lb in nm if k in t) + ".")
         else:
-            out.append("📘 Facebook numbers: not readable yet" + (f" ({(c.get('err') or [''])[0][:70]})" if c.get("err") else "") +
-                       ". The key needs read_insights: make a new token with it and send /fbconnect again.")
+            out.append("📘 Facebook numbers: not readable yet" + (f" ({' | '.join(c.get('err') or [])[:260]})" if c.get("err") else "") +
+                       ". If the words say permission, the key needs read_insights: make a new token with it and send /fbconnect again.")
     except Exception as e:
         out.append("📘 Facebook numbers: " + clean(e)[:80])
     try:
-        c = ig_insights()
+        c = ig_insights(force=True)
         t = c.get("tot") or {}
         if t:
             nm = (("reach", "reached"), ("views", "views"), ("profile", "profile visits"), ("taps", "link taps"), ("interactions", "interactions"), ("gained", "net follows"))
             out.append("📸 Instagram, 28 days: " + ", ".join(f"{lb} {t[k].get('d28', '?')}" for k, lb in nm if k in t) + ".")
         else:
-            out.append("📸 Instagram numbers: not readable yet" + (f" ({(c.get('err') or [''])[0][:70]})" if c.get("err") else "") +
-                       ". The key needs instagram_manage_insights: make a new token with it and send /fbconnect again.")
+            out.append("📸 Instagram numbers: not readable yet" + (f" ({' | '.join(c.get('err') or [])[:260]})" if c.get("err") else "") +
+                       ". If the words say permission, the key needs instagram_manage_insights: make a new token with it and send /fbconnect again.")
     except Exception as e:
         out.append("📸 Instagram numbers: " + clean(e)[:80])
     return out
