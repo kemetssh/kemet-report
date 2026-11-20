@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.298"
+BOT_VERSION = "v10.299"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -8397,22 +8397,40 @@ def ig_post_reel(caption, file_id):
         raise RuntimeError("Facebook is not connected. Send /fbsetup.")
     igid, _un = ig_account(cfg)
     tok = cfg["token"]
+    cid, last, info = "", "", ""
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "v.mp4"
         tg_download(file_id, p)
         size = p.stat().st_size
-        j = fb_call("POST", f"{igid}/media", data={"media_type": "REELS", "upload_type": "resumable", "caption": caption[:2200],
-                                                  "access_token": tok})
-        cid = j["id"]
-        uri = j.get("uri") or f"https://rupload.facebook.com/ig-api-upload/{FB_VER}/{cid}"
-        with open(p, "rb") as f:
-            r = S.post(uri, headers={"Authorization": "OAuth " + tok, "offset": "0", "file_size": str(size)}, data=f, timeout=900)
-    try:
-        rj = r.json()
-    except Exception:
-        rj = {}
-    if not r.ok or rj.get("success") is False:
-        raise RuntimeError("Instagram upload failed: " + clean(str(rj.get("debug_info") or rj.get("error") or r.status_code))[:160])
+        try:
+            pr = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name,width,height,r_frame_rate:format=duration,format_name",
+                                 "-of", "compact=p=0", str(p)], capture_output=True, text=True, timeout=30)
+            info = " ".join(pr.stdout.split())[:200]
+        except Exception:
+            info = ""
+        data = p.read_bytes()
+        for attempt in (1, 2, 3):
+            j = fb_call("POST", f"{igid}/media", data={"media_type": "REELS", "upload_type": "resumable", "caption": caption[:2200],
+                                                      "access_token": tok})
+            cid = j["id"]
+            uri = j.get("uri") or f"https://rupload.facebook.com/ig-api-upload/{FB_VER}/{cid}"
+            if attempt == 3:
+                uri = f"https://rupload.facebook.com/ig-api-upload/{FB_VER}/{cid}"
+            hdr = {"Authorization": "OAuth " + tok, "offset": "0", "file_size": str(size)}
+            if attempt >= 2:
+                hdr["Content-Type"] = "application/octet-stream"
+            r = S.post(uri, headers=hdr, data=data, timeout=900)
+            try:
+                rj = r.json()
+            except Exception:
+                rj = {}
+            if r.ok and rj.get("success") is not False:
+                last = ""
+                break
+            last = f"HTTP {r.status_code} {str(rj or r.text)[:200]}"
+            time.sleep(3)
+    if last:
+        raise RuntimeError(f"Instagram upload failed after 3 tries: {clean(last)} | file {size // 1024} KB {info}")
     status = ""
     for _ in range(40):                                     # up to ~6 minutes of processing
         time.sleep(9)
