@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.304"
+BOT_VERSION = "v10.305"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -8411,7 +8411,7 @@ def ig_post_reel(caption, file_id):
         except Exception:
             info = ""
         data = p.read_bytes()
-        for attempt in (1, 2, 3):
+        for attempt in (1, 2):
             j = fb_call("POST", f"{igid}/media", data={"media_type": "REELS", "upload_type": "resumable", "caption": caption[:2200],
                                                       "access_token": tok})
             cid = j["id"]
@@ -8431,8 +8431,18 @@ def ig_post_reel(caption, file_id):
                 break
             last = f"HTTP {r.status_code} {str(rj or r.text)[:200]}"
             time.sleep(3)
-    if last:
-        raise RuntimeError(f"Instagram upload failed after 3 tries: {clean(last)} | file {size // 1024} KB {info}")
+    if last:                                                # v10.305: Instagram refused the direct upload: give it a temporary public link to the video instead
+        try:
+            r2 = S.post("https://litterbox.catbox.moe/resources/internals/api.php", data={"reqtype": "fileupload", "time": "1h"},
+                        files={"fileToUpload": ("kemet.mp4", data, "video/mp4")}, timeout=600)
+            url = (r2.text or "").strip()
+            if not url.startswith("https://"):
+                raise RuntimeError("the temporary file host said: " + url[:100])
+            j = fb_call("POST", f"{igid}/media", data={"media_type": "REELS", "video_url": url, "caption": caption[:2200],
+                                                      "share_to_feed": "true", "access_token": tok})
+            cid = j["id"]
+        except Exception as e2:
+            raise RuntimeError(f"Instagram refused the video both ways. Direct upload: {clean(last)[:160]} | By link: {clean(e2)[:220]} | file {size // 1024} KB {info[:120]}")
     status = ""
     for _ in range(40):                                     # up to ~6 minutes of processing
         time.sleep(9)
