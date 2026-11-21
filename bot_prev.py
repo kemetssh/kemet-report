@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.312"
+BOT_VERSION = "v10.314"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -4068,10 +4068,12 @@ def on_prop(jid, act, st):
         ops[fp] = {"kind": "tiktok_video", "status": "confirmed", "remote_id": zurl or zid or "posted", "ts": time.time()}
         _persist_remote_marker(st)
         st["props"].pop(jid, None)
-        if zn_is_draft():
-            return send(f"✅ Sent to TikTok as a DRAFT ({zst or 'accepted'}). Open the TikTok app, look in your Inbox or drafts, check it and tap Post. "
-                        "Send /zernio public when you want the bot to publish directly." + ("\n" + zurl if zurl else ""))
-        return send(f"✅ Sent to TikTok ({zst or 'accepted'}), visibility: PUBLIC." + ("\n" + zurl if zurl else ""))
+        pub_ = "publish" in (zst or "")
+        if zn_is_draft() and not pub_:
+            return send(f"✅ Sent to TikTok as a DRAFT ({zst or 'accepted'}). Open the TikTok app, look in your Inbox or drafts, check it and tap Post." + ("\n" + zurl if zurl else ""))
+        if zn_is_draft() and pub_:
+            return send("✅ Zernio reports this video as PUBLISHED on TikTok (it ignored the draft request). Check your profile." + ("\n" + zurl if zurl else ""))
+        return send(f"✅ Posted to TikTok ({zst or 'accepted'}), public." + ("\n" + zurl if zurl else "") + "\nIt can take a minute to show on your profile.")
     if act == "ip" and kind == "igpost":
         rec = mem()["videos"].get(prop["video_id"]) or {}
         file_id = str(rec.get("file_id") or "").strip()
@@ -8474,7 +8476,7 @@ ZN_SETUP_HELP = (
     "2. In the dashboard open Settings → API keys → create a key. Copy it.\n"
     "3. Send me ONE message (I delete it at once):\n/zernio YOUR_API_KEY\n\n"
     "I keep the key encrypted, find your TikTok account, and tell you. /zerniotest checks it. /zerniooff removes it.\n"
-    "At first, TikTok posts go to your TikTok app as drafts so you can check one safely. When you are happy, send /zernio public."
+    "TikTok posts go out public, straight from the tap button. If you prefer drafts, send /zernio draft (TikTok may still publish them)."
 )
 
 
@@ -8495,7 +8497,7 @@ def cmd_zernio(msg, st, raw):
         return send("I need your key in the same message: /zernio YOUR_API_KEY. I deleted what you sent. Send /zerniosetup for the steps.")
     key = parts[1]
     old = mem().get("zernio")
-    mem()["zernio"] = {"key": key, "ts": time.time(), "privacy": (old or {}).get("privacy", "DRAFT")}
+    mem()["zernio"] = {"key": key, "ts": time.time(), "privacy": (old or {}).get("privacy", "PUBLIC_TO_EVERYONE")}
     send("Connecting to Zernio...")
     try:
         accs = zn_accounts()
@@ -8517,7 +8519,7 @@ def cmd_zernio(msg, st, raw):
     lines = ["✅ Zernio key saved (your message is deleted)."]
     lines.append("🎵 TikTok: " + (("@" + tk[0]["name"]) if tk else "not connected yet. Connect TikTok in the Zernio dashboard, then send /zernio again."))
     lines.append("𝕏: " + ("connected in Zernio. I do not post or read X through it, because X charges per call." if xs else "not connected (fine)."))
-    lines.append("Try /zerniotest. TikTok posts start as drafts in your TikTok app.")
+    lines.append("Try /zerniotest. TikTok posts go out public when you tap the button.")
     send("\n".join(lines))
 
 
@@ -8528,7 +8530,7 @@ def cmd_zerniooff(st):
 
 
 def zn_is_draft():
-    return (zn_cfg().get("privacy") or "DRAFT") != "PUBLIC_TO_EVERYONE"
+    return (zn_cfg().get("privacy") or "") == "DRAFT"           # v10.313: direct public posting is the default; /zernio draft asks for a draft
 
 
 def zn_upload_video(file_id):
@@ -8656,7 +8658,7 @@ def cmd_zerniotest(st):
         out.extend(zn_numbers_lines(force=False))
         for e in (c.get("err") or [])[:3]:
             out.append("   ⚠ " + e)
-        out.append("Posting mode: " + ("PUBLIC" if cfg.get("privacy") == "PUBLIC_TO_EVERYONE" else "DRAFT (goes to your TikTok app)") + ". Change it with /zernio public or /zernio draft.")
+        out.append("Posting mode: " + ("DRAFT requested (TikTok may still publish)" if cfg.get("privacy") == "DRAFT" else "PUBLIC") + ". Change it with /zernio public or /zernio draft.")
         out.append("To test a post: send /crosspost and tap the TikTok button under a TikTok caption.")
     send("\n".join(out))
 
@@ -16606,6 +16608,24 @@ HUB_INTRO_TITLE = "Beyond Aliens: How Khufu\u2019s Bureaucrats Built the Great P
 HUB_INTRO_KEY = "Beyond Aliens"
 
 
+ABOUT_OLD = ("Kemet is made by a small editorial team. A person on the team approves every film and article before it is published, "
+             "and the team answers corrections itself.")
+ABOUT_NEW = ("Kemet is founded and run by Mohamed Amin, from Sharm El Sheikh, Egypt. Every film and article is checked against its sources "
+             "and approved by him before it is published, and he answers corrections himself.")
+
+
+def ensure_about_credit(root):
+    """v10.314: the About page names the founder instead of 'a small editorial team'. Safe to run on every build: it only changes the old sentence."""
+    f = Path(root) / "about" / "index.html"
+    if not f.exists():
+        return False
+    t = f.read_text(encoding="utf-8")
+    if ABOUT_OLD not in t:
+        return False
+    f.write_text(t.replace(ABOUT_OLD, ABOUT_NEW, 1), encoding="utf-8")
+    return True
+
+
 def ensure_hub_page(root):
     """v10.289: /myth-vs-evidence/ lists the 19 book Shorts in order, each with its chapter summary, a tap-to-play thumbnail and a link to the matching article. Needs the About page layout, like the guide page."""
     import html as _h
@@ -16694,6 +16714,10 @@ def ensure_latest_page(root):
         ensure_hub_page(root)
     except Exception as e:
         print("hub page:", clean(e)[:100])
+    try:
+        ensure_about_credit(root)
+    except Exception as e:
+        print("about credit:", clean(e)[:100])
     try:
         ensure_home_funnel(root)
     except Exception as e:
