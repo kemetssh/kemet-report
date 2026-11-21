@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.308"
+BOT_VERSION = "v10.309"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2992,8 +2992,9 @@ The aim is to grow followers and watch time so each account can earn: x invites 
 - x: at most 160 characters, at most 1 emoji.
 - facebook: 2 to 3 short sentences for a Page post. Open with a "how" or "why" question about everyday Egyptian life or a myth when the story truly is about that. End with a question that invites comments. The article link goes under the post, so you may say the full evidence is below. Do not ask for follows.
 - instagram: a caption of 3 to 5 short lines. Open with a "how" or "why" question about everyday Egyptian life or a myth when the story truly is about that. End with one question that invites a comment and one short line inviting a follow for the next piece of evidence. Never say "save this post". Do not mention a link or the bio (I add them).
+- linkedin: 3 to 4 short sentences for a LinkedIn post by a professional who values evidence. Open with a "how" or "why" question or a surprising fact the story truly shows. Say what the evidence shows, plainly, and end with one question that invites a comment. No emoji, no hype, no hashtags, no link (I add them). Under 600 characters.
 - tiktok: one punchy line under 120 characters. Open with a "how" or "why" question when the story truly is about that, and use the main phrase people would type into TikTok search (for example "hieroglyphic numbers"). Do not add a follow line or a link (I add them).
-Return JSON only: {{"x": "...", "facebook": "...", "instagram": "...", "tiktok": "..."}}"""
+Return JSON only: {{"x": "...", "facebook": "...", "instagram": "...", "tiktok": "...", "linkedin": "..."}}"""
 
 
 def x_intent(text, link):
@@ -3052,7 +3053,7 @@ def share_pack(title, blurb):
         print("share pack:", clean(e)[:100])
         d = {}
     out = {}
-    for k, cap in (("x", 170), ("facebook", 600), ("instagram", 800), ("tiktok", 150)):
+    for k, cap in (("x", 170), ("facebook", 600), ("instagram", 800), ("tiktok", 150), ("linkedin", 700)):
         t = re.sub(r"https?://\S+", "", str(d.get(k, ""))).strip()
         t = re.sub(r"(?:(?<=\s)|^)#\w+", "", t).strip()                  # the model must not add its own hashtags: only checked ones go in
         out[k] = t[:cap] or title[:200]
@@ -3072,11 +3073,12 @@ def share_pack(title, blurb):
     ig = re.sub(r"\s*Link in bio\.?\s*$", "", ig, flags=re.I).strip()
     out["instagram"] = ig + "\n\n" + " ".join(tags[:5])          # Instagram allows 5 hashtags per post since December 2025; the article link is added when sending (v10.196)
     out["tiktok"] = (out["tiktok"] + " " + " ".join(tags[:5])).strip()
+    out["linkedin"] = (out["linkedin"] + "\n\n" + " ".join(tags[:5])).strip()       # v10.309: LinkedIn post (3,000 characters allowed, 3 to 5 hashtags work best)
     return out
 
 
 def send_share(title, blurb, link, st=None):
-    """Ready posts for X, Facebook, Instagram and TikTok. Free: buttons open each app; the owner taps Post. Nothing is posted by the bot."""
+    """Ready posts for X, Facebook, LinkedIn, Instagram and TikTok. Free: buttons open each app; the owner taps Post. Nothing is posted by the bot."""
     p = share_pack(title, blurb)
     tg_ = p.get("tags", [])
     try:
@@ -3084,7 +3086,7 @@ def send_share(title, blurb, link, st=None):
     except Exception as e:
         print("social log:", clean(e)[:80])
     send("🏷 Hashtags checked against your channel's trending list and the story itself (nothing unrelated), within each platform's limit:\n"
-         f"• X: {' '.join(tg_[:5])}\n• Facebook: {' '.join(tg_[:5])}\n• Instagram (limit 5): {' '.join(tg_[:5])}\n• TikTok: {' '.join(tg_[:5])}")
+         f"• X: {' '.join(tg_[:5])}\n• Facebook: {' '.join(tg_[:5])}\n• LinkedIn: {' '.join(tg_[:5])}\n• Instagram (limit 5): {' '.join(tg_[:5])}\n• TikTok: {' '.join(tg_[:5])}")
     send(f"📣 {title}\n\n🐦 X:\n{p['x']}\n{link}", [[{"text": "🐦 Open in X (text filled in)", "url": x_intent(p["x"], link)}]])
     if fb_cfg() and st is not None:
         pid = new_pid(st)
@@ -3094,6 +3096,8 @@ def send_share(title, blurb, link, st=None):
     else:
         send(f"📘 Facebook Page:\n{p['facebook']}\n{link}\n\n(Send /fbsetup to link your Page and post with one tap.)",
              [[{"text": "📘 Share on Facebook", "url": fb_share(link)}]])
+    send(f"💼 LinkedIn (press and hold to copy, then paste into a new post):\n{p['linkedin']}\n{link}",
+         [[{"text": "💼 Open LinkedIn (link filled in)", "url": "https://www.linkedin.com/sharing/share-offsite/?" + urllib.parse.urlencode({"url": link})}]])
     send(f"📸 Instagram caption (press and hold to copy):\n{p['instagram']}\n\n📖 Full evidence and sources: link in bio (latest article)\n{title}\n\n(Instagram captions cannot be clicked, so I point to your bio. Put {SITE_BASE}/latest/ in your bio once and it always opens your newest article.)",
          [[{"text": "📸 Open Instagram", "url": "https://www.instagram.com/"}]])
     send(f"🎵 TikTok caption (press and hold to copy):\n{p['tiktok']}\n\nFollow for the next piece of evidence.\n\n(TikTok captions cannot be clicked. If your bio has a link, use {SITE_BASE}/latest/ there. Article: {link})",
@@ -3106,7 +3110,7 @@ def send_share(title, blurb, link, st=None):
 def cmd_xpost(st, arg=""):
     m_ = re.search(r"\d+", arg or "")
     n = max(1, min(3, int(m_.group()))) if m_ else 1
-    send("Writing posts for your latest video" + ("s" if n > 1 else "") + " (X, Facebook, Instagram, TikTok)...")
+    send("Writing posts for your latest video" + ("s" if n > 1 else "") + " (X, Facebook, LinkedIn, Instagram, TikTok)...")
     tok = yt_token()
     vids, _ = latest_vids(tok, 30)
     vids = [v for v in vids if (v.get("status") or {}).get("privacyStatus", "public") == "public"]
@@ -5698,7 +5702,7 @@ def first_hour(vid, rec, job=None, st=None):
     steps = ["📌 Pin a question comment (tap below)"]
     if has_site:
         steps += ["📂 Add it to its playlist (I propose, you tap)", "🗂 Build its website series page (not live yet)", "✍️ Write its article into the same site copy", "🚀 Publish the site ONCE: series page and article go live together",
-                  "📣 Posts for X, Facebook, Instagram and TikTok with the article link (never the YouTube link)"]
+                  "📣 Posts for X, Facebook, LinkedIn, Instagram and TikTok with the article link (never the YouTube link)"]
     txt = ("🚀 Your video is PUBLIC: https://youtu.be/" + vid + "\n\nWhat happens next, in this order:\n" +
            "\n".join(f"{i + 1}. {x}" for i, x in enumerate(steps)) + "\nI send each step when the one before it is done. Replies to viewers: /comments.")
     rows = []
@@ -10254,7 +10258,7 @@ def vel_scan(st, force=False):
             pid = new_pid(st)
             st["props"][pid] = {"type": "boost", "vid": vid, "created": now}
             send(f"🔥 \"{t[:70]}\" is taking off: +{r[0]} views since I last looked (about {r[1]:.0f} a day, your usual is about {base:.0f}).\n"
-                 "The first 48 hours decide how far YouTube pushes it. Tap now and I prepare the posts for X, Facebook, Instagram and TikTok.", [[btn("📣 Ride it: prepare the posts", pid, "gb"), btn("Skip", pid, "gx")]])
+                 "The first 48 hours decide how far YouTube pushes it. Tap now and I prepare the posts for X, Facebook, LinkedIn, Instagram and TikTok.", [[btn("📣 Ride it: prepare the posts", pid, "gb"), btn("Skip", pid, "gx")]])
             return
         if 2 <= age <= 5 and life_med >= 10 and views / max(age, 1) < 0.25 * life_med:
             v_["alerted"][vid] = now
@@ -14467,13 +14471,13 @@ def offer_article_after_site(st):
 
 
 def offer_article_share(st):
-    """Articles written since the last publish are now live: offer ready posts for X, Facebook, Instagram and TikTok with the article link."""
+    """Articles written since the last publish are now live: offer ready posts for X, Facebook, LinkedIn, Instagram and TikTok with the article link."""
     pend = [x for x in (mem().get("share_pending") or []) if time.time() - x.get("ts", 0) < 14 * 86400]
     if not pend:
         return
     pid = new_pid(st)
     st["props"][pid] = {"type": "artshare", "items": pend, "created": time.time()}
-    send("📣 " + ("This article is" if len(pend) == 1 else f"These {len(pend)} articles are") + " live. Want ready posts for X, Facebook, Instagram and TikTok, with the article link and checked hashtags? Nothing is posted until you tap.",
+    send("📣 " + ("This article is" if len(pend) == 1 else f"These {len(pend)} articles are") + " live. Want ready posts for X, Facebook, LinkedIn, Instagram and TikTok, with the article link and checked hashtags? Nothing is posted until you tap.",
          [[btn(("📣 Posts for: " + x["title"])[:60], pid, "sx", str(i))] for i, x in enumerate(pend[:5])] + [[btn("Not now", pid, "cs")]])
     mem()["share_pending"] = []
 
@@ -19121,7 +19125,7 @@ def main():
             {"command": "articles", "description": "Long website articles from my top videos"},
             {"command": "articlecheck", "description": "Check article length, deepen short ones"},
             {"command": "proof", "description": "Fingerprint and archive articles"},
-            {"command": "xpost", "description": "Posts for X, Facebook, Instagram, TikTok"},
+            {"command": "xpost", "description": "Posts for X, Facebook, LinkedIn, Instagram, TikTok"},
             {"command": "fixvideos", "description": "Give shared-film articles their own film"},
             {"command": "articlevideos", "description": "Which video each article uses"},
             {"command": "linksall", "description": "Fix article links in ALL video descriptions"},
