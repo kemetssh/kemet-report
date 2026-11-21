@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.314"
+BOT_VERSION = "v10.315"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -13779,6 +13779,18 @@ def refresh_home_reads(root, extra):
         hp.write_text(s2, encoding="utf-8")
 
 
+CORE_SITEMAP_PAGES = ["/privacy/", "/guide/", "/myth-vs-evidence/"]
+
+
+def add_core_sitemap_urls(root, urls):
+    """v10.315: build_listing rewrites the sitemap from scratch, which dropped /guide/ (and could drop /privacy/ and the 19-films page). Keep every core page that exists."""
+    root = Path(root)
+    for u in CORE_SITEMAP_PAGES:
+        if u not in urls and (root / u.strip("/") / "index.html").exists():
+            urls.append(u)
+    return urls
+
+
 def build_listing(root, cat):
     """Regenerate the archive page cards and the sitemap from every article found in the site folder."""
     cards, seeded, extra = [], [c for c in cat if c["slug"] in SEED_CARDS], [c for c in cat if c["slug"] not in SEED_CARDS]
@@ -13817,6 +13829,7 @@ def build_listing(root, cat):
         if not _keep and (root / "playlists").is_dir():
             _keep = ["/playlists/"] + [f"/playlists/{d.name}/" for d in sorted((root / "playlists").iterdir()) if d.is_dir() and (d / "index.html").exists()]
         urls += [u for u in dict.fromkeys(_keep) if u not in urls]
+        add_core_sitemap_urls(root, urls)
     except Exception as e:
         print("sitemap keep:", clean(e)[:120])
     sm = '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' + "".join(
