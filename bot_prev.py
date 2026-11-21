@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.309"
+BOT_VERSION = "v10.310"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -4037,6 +4037,39 @@ def on_prop(jid, act, st):
         st["props"].pop(jid, None)
         cfg = fb_cfg()
         return send("✅ Posted to your Facebook Page " + cfg.get("page_name", "") + ".\nhttps://www.facebook.com/" + str(pid_ or cfg.get("page_id", "")))
+    if act == "tp" and kind == "tkpost":
+        rec = mem()["videos"].get(prop["video_id"]) or {}
+        file_id = str(rec.get("file_id") or "").strip()
+        if not file_id:
+            st["props"].pop(jid, None)
+            return send("This record has no Telegram video file, so there is no one-tap upload. Copy the caption and post by hand.")
+        fp = _remote_fingerprint("tiktok_video", prop["video_id"], prop.get("caption", ""), file_id)
+        ops = mem().setdefault("remote_ops", {})
+        known = ops.get(fp) or {}
+        if known.get("status") == "confirmed":
+            st["props"].pop(jid, None)
+            return send("✅ TikTok already has this video.\n" + str(known.get("remote_id") or ""))
+        if known.get("status") == "pending" and time.time() - known.get("ts", 0) < 3600:
+            return send("⚠️ A TikTok upload of this video started less than an hour ago and its result is unknown. Check your TikTok profile or drafts before trying again.")
+        ops[fp] = {"kind": "tiktok_video", "status": "pending", "ts": time.time()}
+        if not _persist_remote_marker(st):
+            ops.pop(fp, None)
+            return send("I could not save the pending TikTok operation, so I did not upload anything. Try again later.")
+        send("Sending your video to TikTok through Zernio (1-3 minutes)...")
+        try:
+            zid, zurl, zst = zn_post_tiktok(prop["caption"], file_id)
+        except Exception as e:
+            if _remote_uncertain(e) or isinstance(e, TimeoutError):
+                _persist_remote_marker(st)
+                return send("⚠️ TikTok's result is unknown (" + clean(e)[:120] + "). Check your TikTok profile before trying again; I will not post a second copy for an hour.")
+            ops.pop(fp, None)
+            _persist_remote_marker(st)
+            return send("TikTok did not post it: " + clean(e)[:240] + "\nYou can still copy the caption and post by hand. Send /zerniotest to check the connection.")
+        ops[fp] = {"kind": "tiktok_video", "status": "confirmed", "remote_id": zurl or zid or "posted", "ts": time.time()}
+        _persist_remote_marker(st)
+        st["props"].pop(jid, None)
+        mode = "PUBLIC" if zn_cfg().get("privacy") == "PUBLIC_TO_EVERYONE" else "'only me' (private). Check it on your phone, then /zernio public for public posts"
+        return send(f"✅ Sent to TikTok ({zst or 'accepted'}), visibility: {mode}." + ("\n" + zurl if zurl else ""))
     if act == "ip" and kind == "igpost":
         rec = mem()["videos"].get(prop["video_id"]) or {}
         file_id = str(rec.get("file_id") or "").strip()
@@ -8394,6 +8427,232 @@ def fb_post_video(caption, file_id):
     return j.get("id") or j.get("post_id") or ""
 
 
+ZN_BASE = "https://zernio.com/api/v1"
+
+
+def zn_cfg():
+    return mem().get("zernio") or {}
+
+
+def zn_call(method, path, **kw):
+    cfg = zn_cfg()
+    if not cfg.get("key"):
+        raise RuntimeError("Zernio is not connected. Send /zerniosetup.")
+    h = {"Authorization": "Bearer " + cfg["key"]}
+    r = S.request(method, ZN_BASE + "/" + path.lstrip("/"), headers=h, timeout=kw.pop("timeout", 60), **kw)
+    try:
+        j = r.json()
+    except Exception:
+        j = {}
+    if not r.ok:
+        e = j.get("error") if isinstance(j, dict) else None
+        msg = (e.get("message") if isinstance(e, dict) else e) or (j.get("message") if isinstance(j, dict) else "") or ("HTTP " + str(r.status_code))
+        raise RuntimeError(f"Zernio said: {str(msg)[:200]} (code {r.status_code})")
+    return j
+
+
+def zn_accounts():
+    """[{id, platform, name}] from Zernio, whatever shape the list comes in."""
+    j = zn_call("GET", "accounts")
+    items = j if isinstance(j, list) else (j.get("accounts") or j.get("data") or j.get("items") or [])
+    out = []
+    for a in items:
+        if not isinstance(a, dict):
+            continue
+        aid = a.get("_id") or a.get("id") or a.get("accountId")
+        if aid:
+            out.append({"id": str(aid), "platform": str(a.get("platform", "")).lower(),
+                        "name": str(a.get("username") or a.get("displayName") or a.get("name") or "")})
+    return out
+
+
+ZN_SETUP_HELP = (
+    "🎵 Connect TikTok through Zernio (free for 2 accounts, no card)\n"
+    "1. On your iPhone open zernio.com, sign up, and in the dashboard connect your TikTok account (and X if you want it listed).\n"
+    "2. In the dashboard open Settings → API keys → create a key. Copy it.\n"
+    "3. Send me ONE message (I delete it at once):\n/zernio YOUR_API_KEY\n\n"
+    "I keep the key encrypted, find your TikTok account, and tell you. /zerniotest checks it. /zerniooff removes it.\n"
+    "At first, TikTok posts are 'only me' so you can check one safely. When you are happy, send /zernio public."
+)
+
+
+def cmd_zerniosetup(st):
+    send(ZN_SETUP_HELP)
+
+
+def cmd_zernio(msg, st, raw):
+    parts = raw.split()
+    if len(parts) >= 2 and parts[1].lower() in ("public", "private"):
+        cfg = mem().setdefault("zernio", {})
+        if not cfg.get("key"):
+            return send("Zernio is not connected yet. Send /zerniosetup.")
+        cfg["privacy"] = "PUBLIC_TO_EVERYONE" if parts[1].lower() == "public" else "SELF_ONLY"
+        return send("✅ TikTok posts will be " + ("PUBLIC to everyone." if parts[1].lower() == "public" else "'only me' (private) so you can check them first."))
+    forget_message(msg)
+    if len(parts) < 2 or len(parts[1]) < 20:
+        return send("I need your key in the same message: /zernio YOUR_API_KEY. I deleted what you sent. Send /zerniosetup for the steps.")
+    key = parts[1]
+    old = mem().get("zernio")
+    mem()["zernio"] = {"key": key, "ts": time.time(), "privacy": (old or {}).get("privacy", "SELF_ONLY")}
+    send("Connecting to Zernio...")
+    try:
+        accs = zn_accounts()
+    except Exception as e:
+        mem().pop("zernio", None)
+        if old:
+            mem()["zernio"] = old
+        return send("Zernio did not accept that key. " + clean(e)[:200] + "\nCreate a new key in the dashboard and send /zernio again.")
+    tk = [a for a in accs if "tiktok" in a["platform"]]
+    xs = [a for a in accs if a["platform"] in ("twitter", "x")]
+    cfg = mem()["zernio"]
+    cfg["accounts"] = accs[:12]
+    if tk:
+        cfg["tiktok"] = tk[0]["id"]
+        cfg["tiktok_name"] = tk[0]["name"]
+    if xs:
+        cfg["x"] = xs[0]["id"]
+    mem().pop("zn_ins", None)
+    lines = ["✅ Zernio key saved (your message is deleted)."]
+    lines.append("🎵 TikTok: " + (("@" + tk[0]["name"]) if tk else "not connected yet. Connect TikTok in the Zernio dashboard, then send /zernio again."))
+    lines.append("𝕏: " + ("connected in Zernio. I do not post or read X through it, because X charges per call." if xs else "not connected (fine)."))
+    lines.append("Try /zerniotest. TikTok posts start as 'only me'.")
+    send("\n".join(lines))
+
+
+def cmd_zerniooff(st):
+    mem().pop("zernio", None)
+    mem().pop("zn_ins", None)
+    send("Zernio is disconnected and the key is deleted from my notes. To remove the access fully, delete the API key in the Zernio dashboard.")
+
+
+def zn_upload_video(file_id):
+    """Telegram video -> Zernio storage; returns the public URL."""
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "v.mp4"
+        tg_download(file_id, p)
+        size = p.stat().st_size
+        j = zn_call("POST", "media/presign", json={"filename": "kemet.mp4", "contentType": "video/mp4", "size": size})
+        up, pub = j.get("uploadUrl"), j.get("publicUrl")
+        if not up or not pub:
+            raise RuntimeError("Zernio gave no upload address")
+        with open(p, "rb") as f:
+            r = requests.put(up, data=f, headers={"Content-Type": "video/mp4"}, timeout=900)
+        if not r.ok:
+            raise RuntimeError(f"upload to Zernio storage failed (HTTP {r.status_code})")
+    return pub
+
+
+def zn_post_tiktok(caption, file_id):
+    cfg = zn_cfg()
+    if not cfg.get("key") or not cfg.get("tiktok"):
+        raise RuntimeError("TikTok is not connected through Zernio. Send /zerniosetup.")
+    if not str(file_id or "").strip():
+        raise RuntimeError("There is no Telegram video file for this record. Copy the caption and upload manually.")
+    url = zn_upload_video(file_id)
+    body = {"content": caption[:2200], "mediaItems": [{"type": "video", "url": url}],
+            "platforms": [{"platform": "tiktok", "accountId": cfg["tiktok"]}],
+            "tiktokSettings": {"privacy_level": cfg.get("privacy") or "SELF_ONLY", "allow_comment": True, "allow_duet": False, "allow_stitch": False,
+                               "content_preview_confirmed": True, "express_consent_given": True},
+            "publishNow": True}
+    j = zn_call("POST", "posts", json=body, timeout=300)
+    post = j.get("post") if isinstance(j.get("post"), dict) else j
+    pl = (post.get("platforms") or [{}])[0] if isinstance(post, dict) else {}
+    st_ = str(pl.get("status") or post.get("status") or "").lower()
+    if st_ in ("failed", "error"):
+        raise RuntimeError("TikTok refused it: " + str(pl.get("errorMessage") or pl.get("error") or j)[:200])
+    return str(post.get("_id") or post.get("id") or ""), (pl.get("platformPostUrl") or post.get("platformPostUrl") or ""), st_
+
+
+def zn_insights(force=False):
+    """TikTok numbers through Zernio: profile counters (followers, likes, videos) and views, likes, comments, shares of recent posts. Cached 12 h. Never raises."""
+    m = mem()
+    c = m.get("zn_ins") or {}
+    if not force and c.get("ts") and time.time() - c["ts"] < 12 * 3600:
+        return c
+    cfg = zn_cfg()
+    if not cfg.get("key") or not cfg.get("tiktok"):
+        return c
+    new = {"ts": time.time(), "acct": {}, "posts": {}, "err": []}
+    try:
+        j = zn_call("GET", "analytics/tiktok/account-insights", params={"accountId": cfg["tiktok"], "metrics": "follower_count,likes_count,video_count"})
+        for k, v in (j.get("metrics") or {}).items():
+            if isinstance(v, dict) and isinstance(v.get("total"), (int, float)):
+                new["acct"][k] = int(v["total"])
+        for u in (j.get("unavailableMetrics") or [])[:3]:
+            new["err"].append(str(u.get("metric")) + ": " + str(u.get("message") or u.get("reason"))[:60])
+    except Exception as e:
+        new["err"].append("profile: " + clean(e)[:90])
+    try:
+        j = zn_call("GET", "analytics", params={"platform": "tiktok", "accountId": cfg["tiktok"], "limit": 50, "fromDate": time.strftime("%Y-%m-%d", time.gmtime(time.time() - 85 * 86400))})
+        posts = j.get("posts") if isinstance(j, dict) else []
+        tot = {"views": 0, "likes": 0, "comments": 0, "shares": 0}
+        n = 0
+        for p_ in posts or []:
+            a = p_.get("analytics") or {}
+            if not a:
+                for pa in p_.get("platformAnalytics") or []:
+                    if "tiktok" in str(pa.get("platform", "")).lower():
+                        a = pa.get("analytics") or {}
+                        break
+            if a:
+                n += 1
+                for k in tot:
+                    v = a.get(k)
+                    if isinstance(v, (int, float)):
+                        tot[k] += int(v)
+        if n:
+            new["posts"] = dict(tot, n=n)
+    except Exception as e:
+        new["err"].append("posts: " + clean(e)[:90])
+    m["zn_ins"] = new
+    return new
+
+
+def zn_numbers_lines(force=True):
+    if not zn_cfg().get("key"):
+        return []
+    try:
+        c = zn_insights(force=force)
+        a, p_ = c.get("acct") or {}, c.get("posts") or {}
+        bits = []
+        for k, lb in (("follower_count", "followers"), ("likes_count", "likes in total"), ("video_count", "videos")):
+            if k in a:
+                bits.append(f"{lb} {a[k]:,}")
+        if p_:
+            bits.append(f"posted through Zernio ({p_['n']}): views {p_['views']:,}, likes {p_['likes']:,}, comments {p_['comments']:,}, shares {p_['shares']:,}")
+        if bits:
+            return ["🎵 TikTok: " + ", ".join(bits) + "."]
+        return ["🎵 TikTok numbers: not readable yet" + (" (" + " | ".join(c.get("err") or [])[:240] + ")" if c.get("err") else "") + ". Send /zerniotest."]
+    except Exception as e:
+        return ["🎵 TikTok numbers: " + clean(e)[:80]]
+
+
+def cmd_zerniotest(st):
+    cfg = zn_cfg()
+    if not cfg.get("key"):
+        return send("Zernio is not connected. Send /zerniosetup.")
+    send("Testing Zernio...")
+    out = []
+    try:
+        accs = zn_accounts()
+        out.append("✓ Key works. Accounts in Zernio: " + (", ".join(f"{a['platform']} {a['name']}" for a in accs) or "none yet"))
+        tk = [a for a in accs if "tiktok" in a["platform"]]
+        if tk:
+            cfg["tiktok"], cfg["tiktok_name"] = tk[0]["id"], tk[0]["name"]
+        else:
+            out.append("✗ No TikTok account in Zernio. Connect it in the dashboard, then send /zerniotest again.")
+    except Exception as e:
+        return send("✗ " + clean(e)[:220])
+    if cfg.get("tiktok"):
+        c = zn_insights(force=True)
+        out.extend(zn_numbers_lines(force=False))
+        for e in (c.get("err") or [])[:3]:
+            out.append("   ⚠ " + e)
+        out.append("Posting mode: " + ("PUBLIC" if cfg.get("privacy") == "PUBLIC_TO_EVERYONE" else "'only me' (private)") + ". Change it with /zernio public or /zernio private.")
+        out.append("To test a post: send /crosspost and tap the TikTok button under a TikTok caption.")
+    send("\n".join(out))
+
+
 def ig_account(cfg):
     """Instagram professional account linked to the connected Facebook Page: (id, username)."""
     j = fb_call("GET", cfg["page_id"], params={"fields": "instagram_business_account{id,username}", "access_token": cfg["token"]})
@@ -9092,6 +9351,11 @@ def cmd_crosspost(st, video_id=None, auto_fb=False):
                         send("⚠️ Autopost to Facebook did not work: " + clean(e_)[:200] + "\nThe tap button below still works.")
                 st["props"][pid] = {"type": "fbpost", "video_id": vid, "caption": body, "created": time.time()}
                 send(body, [[btn("📘 Post this to my Facebook Page", pid, "fp")]])
+            elif key == "tiktok" and zn_cfg().get("tiktok") and file_id:
+                pid = new_pid(st)
+                body = body[:2200]
+                st["props"][pid] = {"type": "tkpost", "video_id": vid, "caption": body, "created": time.time()}
+                send(body, [[btn("🎵 Post this to my TikTok", pid, "tp")]])
             elif key == "reels" and fb and file_id:
                 pid = new_pid(st)
                 body = body[:2200]
@@ -10568,10 +10832,11 @@ def book_traffic_line(days=7):
 
 
 def social_numbers_lines():
-    """v10.303: Facebook and Instagram 28-day numbers for /health (cached 12 h by fb_insights / ig_insights). Never raises."""
+    """v10.303: Facebook and Instagram 28-day numbers for /health (cached 12 h by fb_insights / ig_insights). Never raises.
+    v10.310: TikTok numbers through Zernio come last."""
     out = []
     if not fb_cfg():
-        return out
+        return zn_numbers_lines()
     try:
         c = fb_insights(force=True)
         t = c.get("tot") or {}
@@ -10594,6 +10859,7 @@ def social_numbers_lines():
                        ". If the words say permission, the key needs instagram_manage_insights: make a new token with it and send /fbconnect again.")
     except Exception as e:
         out.append("📸 Instagram numbers: " + clean(e)[:80])
+    out += zn_numbers_lines()
     return out
 
 
@@ -12064,6 +12330,14 @@ def on_message(msg, st):
         cmd_fbsetup(st)
     elif text.startswith("/fbconnect"):
         cmd_fbconnect(msg, st, raw)
+    elif text == "/zerniosetup":
+        cmd_zerniosetup(st)
+    elif text.startswith("/zernio") and not text.startswith("/zerniotest") and not text.startswith("/zerniooff"):
+        cmd_zernio(msg, st, raw)
+    elif text == "/zerniotest":
+        cmd_zerniotest(st)
+    elif text == "/zerniooff":
+        cmd_zerniooff(st)
     elif text == "/igtest":
         cmd_igtest(st)
     elif text == "/fboff":
@@ -16373,7 +16647,7 @@ def ensure_hub_page(root):
         rows.append(f"<section style=\"display:flex;gap:16px;align-items:flex-start;margin:0 0 24px\"><div style=\"flex:0 0 160px\">{thumb}</div>"
                     f"<div><h3>{n}. {_h.escape(ttl)}</h3><p>{_h.escape(blurb)}{watch}{art}</p></div></section>")
     main = ("<main id=\"main-content\">\n<header class=\"article-hero\"><div class=\"section-shell\"><div class=\"article-meta\"><span>Kemet / The book</span></div>"
-            "<h1>Myth vs Evidence:<br/><em>the 19 films</em></h1><p class=\"article-deck\">One short film for each chapter of the book Ancient Egypt: Myth vs Evidence. Every film takes a popular claim and checks it against what archaeologists have actually found.</p></div></header>\n"
+            "<h1>Myth vs Evidence:<br/><em>the 19 films</em></h1><p class=\"article-deck\">Nineteen short films, each taken from one of the 20 chapters of the book Ancient Egypt: Myth vs Evidence. Every film takes a popular claim and checks it against what archaeologists have actually found.</p></div></header>\n"
             "<div class=\"section-shell article-layout\"><article class=\"article-body\">\n"
             f"<p><a class=\"button button-primary\" href=\"{BOOK_LINK}\" rel=\"noopener\" target=\"_blank\">Get the book on Kindle</a> &nbsp; <a class=\"button button-quiet\" href=\"/guide/\">Free sample</a></p>\n"
             + "\n".join(rows) +
@@ -18497,115 +18771,115 @@ BOOKPOSTS = {int(k): v for k, v in {
 "q": "Did the pharaoh's curse really kill them?",
 "x": "Did the pharaoh's curse really kill them?\n\nCarnarvon died months after Tutankhamun's tomb opened, and the papers invented a curse.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Tutankhamun #PharaohsCurse",
 "ig": "Did the pharaoh's curse really kill them?\n\nLord Carnarvon died months after Tutankhamun's tomb was opened, and the newspapers invented a curse. What does the evidence say?\n\nShort 1 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #tutankhamun #pharaohscurse",
-"li": "Did the pharaoh's curse really kill them?\n\nLord Carnarvon died months after Tutankhamun's tomb was opened, and the newspapers invented a curse. What does the evidence say?\n\nShort 1 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Tutankhamun #PharaohsCurse"
+"li": "Did the pharaoh's curse really kill them?\n\nLord Carnarvon died months after Tutankhamun's tomb was opened, and the newspapers invented a curse. What does the evidence say?\n\nShort 1 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Tutankhamun #PharaohsCurse"
 },
 "2": {
 "q": "Who really built the pyramids?",
 "x": "Who really built the pyramids?\n\nNear Giza, archaeologists found the builders' town: bakeries, breweries, tombs beside the pyramids.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Pyramids #Giza",
 "ig": "Who really built the pyramids?\n\nNear Giza, archaeologists found the town where the builders lived: bakeries, breweries and tombs beside the pyramids. What the evidence shows about the workforce.\n\nShort 2 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #pyramids #giza",
-"li": "Who really built the pyramids?\n\nNear Giza, archaeologists found the town where the builders lived: bakeries, breweries and tombs beside the pyramids. What the evidence shows about the workforce.\n\nShort 2 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Pyramids #Giza"
+"li": "Who really built the pyramids?\n\nNear Giza, archaeologists found the town where the builders lived: bakeries, breweries and tombs beside the pyramids. What the evidence shows about the workforce.\n\nShort 2 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Pyramids #Giza"
 },
 "3": {
 "q": "What does a 4,500-year-old logbook say about the Great Pyramid?",
 "x": "What does a 4,500-year-old logbook say about the Great Pyramid?\n\nPapyri found in 2013 include a crew leader's logbook: moving limestone to Giza for Khufu.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Khufu #Papyrus",
 "ig": "What does a 4,500-year-old logbook say about the Great Pyramid?\n\nIn 2013, papyri about 4,500 years old were found at Wadi al-Jarf. One is the logbook of a crew leader moving limestone to Giza for Khufu.\n\nShort 3 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #khufu #papyrus",
-"li": "What does a 4,500-year-old logbook say about the Great Pyramid?\n\nIn 2013, papyri about 4,500 years old were found at Wadi al-Jarf. One is the logbook of a crew leader moving limestone to Giza for Khufu.\n\nShort 3 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Khufu #Papyrus"
+"li": "What does a 4,500-year-old logbook say about the Great Pyramid?\n\nIn 2013, papyri about 4,500 years old were found at Wadi al-Jarf. One is the logbook of a crew leader moving limestone to Giza for Khufu.\n\nShort 3 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Khufu #Papyrus"
 },
 "4": {
 "q": "Did the Egyptians cut granite with sound?",
 "x": "Did the Egyptians cut granite with sound?\n\nUnfinished granite at Aswan shows pounder marks and copper saws with sand. No sound machine left a trace.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Aswan #Engineering",
 "ig": "Did the Egyptians cut granite with sound?\n\nThe marks on unfinished granite at Aswan show dolerite pounders and copper saws with sand. No sound machine, no trace of one.\n\nShort 4 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #aswan #engineering",
-"li": "Did the Egyptians cut granite with sound?\n\nThe marks on unfinished granite at Aswan show dolerite pounders and copper saws with sand. No sound machine, no trace of one.\n\nShort 4 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Aswan #Engineering"
+"li": "Did the Egyptians cut granite with sound?\n\nThe marks on unfinished granite at Aswan show dolerite pounders and copper saws with sand. No sound machine, no trace of one.\n\nShort 4 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Aswan #Engineering"
 },
 "5": {
 "q": "What did Herodotus get right about mummification?",
 "x": "What did Herodotus get right about mummification?\n\nHe described it 2,400 years ago. Embalming vessels at Saqqara show how much he got right.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Mummies #Herodotus",
 "ig": "What did Herodotus get right about mummification?\n\nA Greek historian described mummification 2,400 years ago. Chemical analysis of embalming vessels at Saqqara tells how much he got right.\n\nShort 5 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #mummies #herodotus",
-"li": "What did Herodotus get right about mummification?\n\nA Greek historian described mummification 2,400 years ago. Chemical analysis of embalming vessels at Saqqara tells how much he got right.\n\nShort 5 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Mummies #Herodotus"
+"li": "What did Herodotus get right about mummification?\n\nA Greek historian described mummification 2,400 years ago. Chemical analysis of embalming vessels at Saqqara tells how much he got right.\n\nShort 5 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Mummies #Herodotus"
 },
 "6": {
 "q": "What did Cleopatra really look like?",
 "x": "What did Cleopatra really look like?\n\nHer coins show strong features, and an ancient writer says her charm mattered more than her looks.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Cleopatra #PtolemaicEgypt",
 "ig": "What did Cleopatra really look like?\n\nHer coins show strong features, and an ancient writer says her charm and conversation mattered more than her looks.\n\nShort 6 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #cleopatra #ptolemaicegypt",
-"li": "What did Cleopatra really look like?\n\nHer coins show strong features, and an ancient writer says her charm and conversation mattered more than her looks.\n\nShort 6 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Cleopatra #PtolemaicEgypt"
+"li": "What did Cleopatra really look like?\n\nHer coins show strong features, and an ancient writer says her charm and conversation mattered more than her looks.\n\nShort 6 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Cleopatra #PtolemaicEgypt"
 },
 "7": {
 "q": "Was Tutankhamun's dagger made from a meteorite?",
 "x": "Was Tutankhamun's dagger made from a meteorite?\n\nThe iron blade was analysed without being cut. Its nickel and cobalt match meteorites.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Tutankhamun #Meteorite",
 "ig": "Was Tutankhamun's dagger made from a meteorite?\n\nIts iron blade was analysed without being cut. The nickel and cobalt match meteorites.\n\nShort 7 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #tutankhamun #meteorite",
-"li": "Was Tutankhamun's dagger made from a meteorite?\n\nIts iron blade was analysed without being cut. The nickel and cobalt match meteorites.\n\nShort 7 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Tutankhamun #Meteorite"
+"li": "Was Tutankhamun's dagger made from a meteorite?\n\nIts iron blade was analysed without being cut. The nickel and cobalt match meteorites.\n\nShort 7 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Tutankhamun #Meteorite"
 },
 "8": {
 "q": "Do the pyramids copy Orion's belt?",
 "x": "Do the pyramids copy Orion's belt?\n\nA striking idea, but the pyramids were built over several reigns and the match needs a flipped map.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Orion #Giza",
 "ig": "Do the pyramids copy Orion's belt?\n\nThe Orion correlation is a striking idea, but the pyramids were built over several reigns and the match needs a flipped map.\n\nShort 8 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #orion #giza",
-"li": "Do the pyramids copy Orion's belt?\n\nThe Orion correlation is a striking idea, but the pyramids were built over several reigns and the match needs a flipped map.\n\nShort 8 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Orion #Giza"
+"li": "Do the pyramids copy Orion's belt?\n\nThe Orion correlation is a striking idea, but the pyramids were built over several reigns and the match needs a flipped map.\n\nShort 8 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Orion #Giza"
 },
 "9": {
 "q": "Is the Sphinx older than Egypt?",
 "x": "Is the Sphinx older than Egypt?\n\nOne theory blames ancient rain. Geologists point to limestone of different hardness, wind, sand and salt.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Sphinx #Giza",
 "ig": "Is the Sphinx older than Egypt?\n\nOne theory blames ancient rain. Geologists point to limestone layers of different hardness, wind, sand and salt.\n\nShort 9 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #sphinx #giza",
-"li": "Is the Sphinx older than Egypt?\n\nOne theory blames ancient rain. Geologists point to limestone layers of different hardness, wind, sand and salt.\n\nShort 9 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Sphinx #Giza"
+"li": "Is the Sphinx older than Egypt?\n\nOne theory blames ancient rain. Geologists point to limestone layers of different hardness, wind, sand and salt.\n\nShort 9 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Sphinx #Giza"
 },
 "10": {
 "q": "Did the Egyptians reach America?",
 "x": "Did the Egyptians reach America?\n\nA 1992 study claimed American plant drugs in mummies. Other labs could not repeat it.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Mummies #Archaeology",
 "ig": "Did the Egyptians reach America?\n\nA 1992 study claimed plant drugs from the Americas in mummies. Other labs could not repeat it, and no Egyptian object has been found there.\n\nShort 10 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #mummies #archaeology",
-"li": "Did the Egyptians reach America?\n\nA 1992 study claimed plant drugs from the Americas in mummies. Other labs could not repeat it, and no Egyptian object has been found there.\n\nShort 10 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Mummies #Archaeology"
+"li": "Did the Egyptians reach America?\n\nA 1992 study claimed plant drugs from the Americas in mummies. Other labs could not repeat it, and no Egyptian object has been found there.\n\nShort 10 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Mummies #Archaeology"
 },
 "11": {
 "q": "How precise is the Great Pyramid?",
 "x": "How precise is the Great Pyramid?\n\nIts sides differ by a few centimetres and it faces true north within a fraction of a degree.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #GreatPyramid #Giza",
 "ig": "How precise is the Great Pyramid?\n\nIts sides differ by only a few centimetres and it faces true north within a fraction of a degree. Ropes, plumb lines and the sky, not secret machines.\n\nShort 11 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #greatpyramid #giza",
-"li": "How precise is the Great Pyramid?\n\nIts sides differ by only a few centimetres and it faces true north within a fraction of a degree. Ropes, plumb lines and the sky, not secret machines.\n\nShort 11 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #GreatPyramid #Giza"
+"li": "How precise is the Great Pyramid?\n\nIts sides differ by only a few centimetres and it faces true north within a fraction of a degree. Ropes, plumb lines and the sky, not secret machines.\n\nShort 11 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #GreatPyramid #Giza"
 },
 "12": {
 "q": "Is that a helicopter carved at Abydos?",
 "x": "Is that a helicopter carved at Abydos?\n\nIn Seti I's temple it is two inscriptions, re-carved over plaster, overlapping.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Abydos #SetiI",
 "ig": "Is that a helicopter carved at Abydos?\n\nA carving in Seti I's temple looks like a helicopter. It is two inscriptions, re-carved over plaster, overlapping.\n\nShort 12 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #abydos #setii",
-"li": "Is that a helicopter carved at Abydos?\n\nA carving in Seti I's temple looks like a helicopter. It is two inscriptions, re-carved over plaster, overlapping.\n\nShort 12 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Abydos #SetiI"
+"li": "Is that a helicopter carved at Abydos?\n\nA carving in Seti I's temple looks like a helicopter. It is two inscriptions, re-carved over plaster, overlapping.\n\nShort 12 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Abydos #SetiI"
 },
 "13": {
 "q": "Were Egyptian temples really colourful?",
 "x": "Were Egyptian temples really colourful?\n\nTemples were painted. At Dendera, vivid blues and golds survive on the ceilings.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Dendera #Temples",
 "ig": "Were Egyptian temples really colourful?\n\nEgyptian temples were painted. At Dendera, vivid blues and golds survive on the ceilings.\n\nShort 13 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #dendera #temples",
-"li": "Were Egyptian temples really colourful?\n\nEgyptian temples were painted. At Dendera, vivid blues and golds survive on the ceilings.\n\nShort 13 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Dendera #Temples"
+"li": "Were Egyptian temples really colourful?\n\nEgyptian temples were painted. At Dendera, vivid blues and golds survive on the ceilings.\n\nShort 13 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Dendera #Temples"
 },
 "14": {
 "q": "Why are there millions of cat mummies?",
 "x": "Why are there millions of cat mummies?\n\nScans show many were young animals, and some wrappings hold little or no cat.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #CatMummies #Bastet",
 "ig": "Why are there millions of cat mummies?\n\nMillions of cat mummies were offered at temples. Scans show many were young animals, and some wrappings hold little or no cat.\n\nShort 14 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #catmummies #bastet",
-"li": "Why are there millions of cat mummies?\n\nMillions of cat mummies were offered at temples. Scans show many were young animals, and some wrappings hold little or no cat.\n\nShort 14 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #CatMummies #Bastet"
+"li": "Why are there millions of cat mummies?\n\nMillions of cat mummies were offered at temples. Scans show many were young animals, and some wrappings hold little or no cat.\n\nShort 14 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #CatMummies #Bastet"
 },
 "15": {
 "q": "Why do people in Egyptian paintings wear cones?",
 "x": "Why do people in Egyptian paintings wear cones?\n\nScholars still debate whether the cones melted into perfume or were symbolic.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #EgyptianArt #Banquet",
 "ig": "Why do people in Egyptian paintings wear cones?\n\nBanquet scenes show guests with small cones on their heads. Scholars still debate whether they melted into perfume or were symbolic.\n\nShort 15 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #egyptianart #banquet",
-"li": "Why do people in Egyptian paintings wear cones?\n\nBanquet scenes show guests with small cones on their heads. Scholars still debate whether they melted into perfume or were symbolic.\n\nShort 15 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #EgyptianArt #Banquet"
+"li": "Why do people in Egyptian paintings wear cones?\n\nBanquet scenes show guests with small cones on their heads. Scholars still debate whether they melted into perfume or were symbolic.\n\nShort 15 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #EgyptianArt #Banquet"
 },
 "16": {
 "q": "Did the Egyptians drill skulls?",
 "x": "Did the Egyptians drill skulls?\n\nThe Edwin Smith Papyrus describes injuries with practical treatment. Skull surgery in Egypt is rare.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #AncientMedicine #Papyrus",
 "ig": "Did the Egyptians drill skulls?\n\nThe Edwin Smith Papyrus describes injuries with practical treatment. Skull surgery in Egypt is rare and debated.\n\nShort 16 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #ancientmedicine #papyrus",
-"li": "Did the Egyptians drill skulls?\n\nThe Edwin Smith Papyrus describes injuries with practical treatment. Skull surgery in Egypt is rare and debated.\n\nShort 16 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #AncientMedicine #Papyrus"
+"li": "Did the Egyptians drill skulls?\n\nThe Edwin Smith Papyrus describes injuries with practical treatment. Skull surgery in Egypt is rare and debated.\n\nShort 16 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #AncientMedicine #Papyrus"
 },
 "17": {
 "q": "Are AI pharaohs real faces?",
 "x": "Are AI pharaohs real faces?\n\nStatues idealise and skull reconstructions are estimates. AI adds guesses on top of guesses.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #AI #Pharaohs",
 "ig": "Are AI pharaohs real faces?\n\nStatues idealise and skull reconstructions are estimates. An AI image adds guesses on top of guesses.\n\nShort 17 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #ai #pharaohs",
-"li": "Are AI pharaohs real faces?\n\nStatues idealise and skull reconstructions are estimates. An AI image adds guesses on top of guesses.\n\nShort 17 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #AI #Pharaohs"
+"li": "Are AI pharaohs real faces?\n\nStatues idealise and skull reconstructions are estimates. An AI image adds guesses on top of guesses.\n\nShort 17 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #AI #Pharaohs"
 },
 "18": {
 "q": "What does ancient Egyptian DNA say?",
 "x": "What does ancient Egyptian DNA say?\n\nRecent studies show mostly local North African ancestry with some from the Near East.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #AncientDNA #Genetics",
 "ig": "What does ancient Egyptian DNA say?\n\nRecent studies show mostly local North African ancestry with some from the Near East, and the results keep growing.\n\nShort 18 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #ancientdna #genetics",
-"li": "What does ancient Egyptian DNA say?\n\nRecent studies show mostly local North African ancestry with some from the Near East, and the results keep growing.\n\nShort 18 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #AncientDNA #Genetics"
+"li": "What does ancient Egyptian DNA say?\n\nRecent studies show mostly local North African ancestry with some from the Near East, and the results keep growing.\n\nShort 18 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #AncientDNA #Genetics"
 },
 "19": {
 "q": "Was there a light bulb at Dendera?",
 "x": "Was there a light bulb at Dendera?\n\nThe relief shows a lotus with a serpent inside. It fits Egyptian creation myths: no wires, no soot.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Dendera #Myth",
 "ig": "Was there a light bulb at Dendera?\n\nA relief at Dendera shows a lotus with a serpent inside. It fits Egyptian creation myths, with no wires and no soot.\n\nShort 19 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #dendera #myth",
-"li": "Was there a light bulb at Dendera?\n\nA relief at Dendera shows a lotus with a serpent inside. It fits Egyptian creation myths, with no wires and no soot.\n\nShort 19 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Dendera #Myth"
+"li": "Was there a light bulb at Dendera?\n\nA relief at Dendera shows a lotus with a serpent inside. It fits Egyptian creation myths, with no wires and no soot.\n\nShort 19 of 19 from the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Dendera #Myth"
 }
 }.items()}
 
@@ -19174,6 +19448,8 @@ def main():
             {"command": "fixcomments", "description": "Update old links in the bot's own comments"},
             {"command": "fixdomain", "description": "Replace old pages.dev links in all video descriptions"},
             {"command": "bookshorts", "description": "Upload the 19 book Shorts and build the playlist"},
+            {"command": "zerniosetup", "description": "Connect TikTok through Zernio: post and read numbers"},
+            {"command": "zerniotest", "description": "Check the TikTok connection and numbers"},
             {"command": "autopost", "description": "Auto-post new public videos to Facebook, send captions for the rest"},
             {"command": "posts", "description": "Captions for the next book Short (X, Instagram, LinkedIn, Facebook)"},
             {"command": "kindleline", "description": "Kindle line in old descriptions, 5 a day"},
