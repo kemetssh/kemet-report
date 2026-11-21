@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.305"
+BOT_VERSION = "v10.308"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -3145,6 +3145,13 @@ def do_publish(job, st=None):
         if rec_ is not None:
             rec_["public_at"] = rec_.get("public_at") or time.time()           # so the automatic public-detector does not repeat this
         first_hour(vid, rec_ or {"title": job["title"], "summary": (job.get("review") or {}).get("summary", "")}, job, st)
+        if mem().get("autopost") and st is not None:         # v10.308
+            try:
+                send("📣 Autopost is on: the video is public, so I prepare your posts for the other apps now.")
+                cmd_crosspost(st, vid, auto_fb=True)
+            except Exception as e:
+                print("autopost:", clean(e)[:120])
+                send("⚠️ Autopost could not finish: " + clean(e)[:160] + "\nSend /crosspost to do it by hand.")
     else:
         if status in ("private", "unlisted"):
             send(f"YouTube still shows this video as {status.upper()} after the publish request." + (f"\n{why}" if why else "") +
@@ -8431,27 +8438,34 @@ def ig_post_reel(caption, file_id):
                 break
             last = f"HTTP {r.status_code} {str(rj or r.text)[:200]}"
             time.sleep(3)
-    if last:                                                # v10.305: Instagram refused the direct upload: give it a temporary public link to the video instead
+    hosted = False
+    if last:                                                # v10.306: Instagram refused the direct upload: give it a public link on your own site for a few minutes
         try:
-            r2 = S.post("https://litterbox.catbox.moe/resources/internals/api.php", data={"reqtype": "fileupload", "time": "1h"},
-                        files={"fileToUpload": ("kemet.mp4", data, "video/mp4")}, timeout=600)
-            url = (r2.text or "").strip()
-            if not url.startswith("https://"):
-                raise RuntimeError("the temporary file host said: " + url[:100])
+            url = ig_host_on_site(data)
+            hosted = True
             j = fb_call("POST", f"{igid}/media", data={"media_type": "REELS", "video_url": url, "caption": caption[:2200],
                                                       "share_to_feed": "true", "access_token": tok})
             cid = j["id"]
         except Exception as e2:
-            raise RuntimeError(f"Instagram refused the video both ways. Direct upload: {clean(last)[:160]} | By link: {clean(e2)[:220]} | file {size // 1024} KB {info[:120]}")
-    status = ""
-    for _ in range(40):                                     # up to ~6 minutes of processing
-        time.sleep(9)
-        sj = fb_call("GET", cid, params={"fields": "status_code,status", "access_token": tok})
-        status = sj.get("status_code", "")
-        if status == "FINISHED":
-            break
-        if status in ("ERROR", "EXPIRED"):
-            raise RuntimeError("Instagram could not process the video: " + clean(str(sj.get("status", status)))[:160])
+            if hosted:
+                ig_unhost_site()
+            raise RuntimeError(f"Instagram refused the video both ways. Direct upload: {clean(last)[:160]} | Via your site: {clean(e2)[:240]} | file {size // 1024} KB {info[:120]}")
+    status, bad = "", ""
+    try:
+        for _ in range(40):                                 # up to ~6 minutes of processing
+            time.sleep(9)
+            sj = fb_call("GET", cid, params={"fields": "status_code,status", "access_token": tok})
+            status = sj.get("status_code", "")
+            if status == "FINISHED":
+                break
+            if status in ("ERROR", "EXPIRED"):
+                bad = "Instagram could not process the video: " + clean(str(sj.get("status", status)))[:160]
+                break
+    finally:
+        if hosted:
+            ig_unhost_site()
+    if bad:
+        raise RuntimeError(bad)
     if status != "FINISHED":
         raise TimeoutError("Instagram is still processing the video")
     pub = fb_call("POST", f"{igid}/media_publish", data={"creation_id": cid, "access_token": tok})
@@ -9029,7 +9043,7 @@ Return JSON only: {{"tiktok": [{{"caption": "max 150 chars, hook first", "hashta
 Mix 1-2 currently trending tags with evergreen ones. Never invent facts. Keep the calm, cinematic voice of the channel."""
 
 
-def cmd_crosspost(st, video_id=None):
+def cmd_crosspost(st, video_id=None, auto_fb=False):
     vids = mem()["videos"]
     if not vids:
         return send("Upload a video through me first, then I can prepare its cross-post kit.")
@@ -9042,6 +9056,7 @@ def cmd_crosspost(st, video_id=None):
     out = gemini([{"text": CROSSPOST_PROMPT.format(title=rec["title"], summary=rec.get("summary", ""), trend=trend)}])
     send("📣 Cross-post kit for: " + rec["title"] + "\n3 options for each app. Each option is its own message: tap and hold it, "
          "choose Copy, and paste it into the app.")
+    auto_fb_done = False
     for key, name in (("tiktok", "TikTok"), ("reels", "Instagram Reels"), ("facebook", "Facebook")):
         opts = out.get(key) or []
         if isinstance(opts, dict):
@@ -9056,6 +9071,21 @@ def cmd_crosspost(st, video_id=None):
             if key == "facebook" and fb and file_id:
                 pid = new_pid(st)
                 body = with_guide(body, 1900, "fb")
+                if auto_fb and not auto_fb_done:             # v10.308: autopost posts the first Facebook option itself
+                    auto_fb_done = True
+                    try:
+                        fp_ = _remote_fingerprint("facebook_video", vid, body, file_id)
+                        ops_ = mem().setdefault("remote_ops", {})
+                        if (ops_.get(fp_) or {}).get("status") != "confirmed":
+                            ops_[fp_] = {"kind": "facebook_video", "status": "pending", "ts": time.time()}
+                            _persist_remote_marker(st)
+                            fid_ = fb_post_video(body, file_id)
+                            ops_[fp_] = {"kind": "facebook_video", "status": "confirmed", "remote_id": str(fid_), "ts": time.time()}
+                            _persist_remote_marker(st)
+                            send("✅ Autopost: option 1 is now on your Facebook Page " + fb_cfg().get("page_name", "") + ".\nhttps://www.facebook.com/" + str(fid_ or fb_cfg().get("page_id", "")))
+                            continue
+                    except Exception as e_:
+                        send("⚠️ Autopost to Facebook did not work: " + clean(e_)[:200] + "\nThe tap button below still works.")
                 st["props"][pid] = {"type": "fbpost", "video_id": vid, "caption": body, "created": time.time()}
                 send(body, [[btn("📘 Post this to my Facebook Page", pid, "fp")]])
             elif key == "reels" and fb and file_id:
@@ -12155,6 +12185,10 @@ def on_message(msg, st):
         cmd_fixcomments(st, raw)
     elif text.startswith("/fixdomain"):
         cmd_fixdomain(st, raw)
+    elif text.startswith("/autopost"):
+        cmd_autopost(st, raw)
+    elif text.startswith("/posts"):
+        cmd_posts(st, raw)
     elif text.startswith("/bookarticle"):
         cmd_bookarticle(st, raw)
     elif text.startswith("/bookshorts"):
@@ -13977,18 +14011,65 @@ def cf_deploy(file_id):
             indexnow_prepare(root)
         except Exception as e:
             print("indexnow prepare:", clean(e)[:100])
-        env = dict(os.environ, CLOUDFLARE_API_TOKEN=cfg["token"], CLOUDFLARE_ACCOUNT_ID=cfg["account"], WRANGLER_SEND_METRICS="false", CI="true")
-        cmd = ["npx", "--yes", "wrangler@3", "pages", "deploy", str(root), "--project-name", cfg["project"], "--branch", cfg.get("branch", "main"), "--commit-dirty=true"]
+        return _pages_deploy(root, cfg, d)
+
+
+def _pages_deploy(root, cfg, d):
+    """wrangler uploads the folder as the Production deployment. Returns (ok, text)."""
+    env = dict(os.environ, CLOUDFLARE_API_TOKEN=cfg["token"], CLOUDFLARE_ACCOUNT_ID=cfg["account"], WRANGLER_SEND_METRICS="false", CI="true")
+    cmd = ["npx", "--yes", "wrangler@3", "pages", "deploy", str(root), "--project-name", cfg["project"], "--branch", cfg.get("branch", "main"), "--commit-dirty=true"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900, env=env, cwd=d)
+    except Exception as e:
+        return False, clean(e)[:200]
+    out = (r.stdout or "") + "\n" + (r.stderr or "")
+    if r.returncode != 0:
+        out = out.replace(cfg["token"], "***")
+        return False, "Cloudflare refused the upload: " + clean(out.strip().splitlines()[-1] if out.strip() else "no details")[:240]
+    m = re.search(r"https://[\w.-]+\.pages\.dev", out)
+    return True, m.group(0) if m else ""
+
+
+def ig_host_on_site(data):
+    """v10.306: Instagram can fetch a Reel only from a public link. Put the video on your own site for a few minutes (the stored, already
+    published site version plus one temporary file), and return its link. ig_unhost_site() puts the site back exactly as it was."""
+    cfg, sz, pub = cf_cfg(), mem().get("site_zip") or {}, mem().get("site_pub") or {}
+    if not cfg or not sz.get("file_id"):
+        raise RuntimeError("Cloudflare or the stored site zip is missing (/cfsetup, then send the site zip)")
+    if pub.get("file_id") != sz.get("file_id"):
+        raise RuntimeError("the live site is not the stored site version yet: send /publish first, then try again")
+    if len(data) > 24 * 1024 * 1024:
+        raise RuntimeError("the video is over 24 MB, too big for a Cloudflare Pages file")
+    name = "reels-tmp/" + uuid.uuid4().hex[:12] + ".mp4"
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        (root / "reels-tmp").mkdir(exist_ok=True)
+        (root / name).write_bytes(data)
+        ok, info = _pages_deploy(root, cfg, d)
+    if not ok:
+        raise RuntimeError(info)
+    url = SITE_BASE + "/" + name
+    for _ in range(12):                                     # wait until the public address serves the video
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900, env=env, cwd=d)
-        except Exception as e:
-            return False, clean(e)[:200]
-        out = (r.stdout or "") + "\n" + (r.stderr or "")
-        if r.returncode != 0:
-            out = out.replace(cfg["token"], "***")
-            return False, "Cloudflare refused the upload: " + clean(out.strip().splitlines()[-1] if out.strip() else "no details")[:240]
-        m = re.search(r"https://[\w.-]+\.pages\.dev", out)
-        return True, m.group(0) if m else ""
+            h = S.head(url, timeout=20, allow_redirects=True)
+            if h.status_code == 200 and "video" in (h.headers.get("content-type") or "").lower():
+                return url
+        except Exception:
+            pass
+        time.sleep(5)
+    return url
+
+
+def ig_unhost_site():
+    sz = mem().get("site_zip") or {}
+    try:
+        ok, info = cf_deploy(sz.get("file_id"))
+        if not ok:
+            print("ig unhost:", info)
+            send("⚠️ The temporary video is still on the site (" + clean(info)[:120] + "). Send /publish to put the normal site back.")
+    except Exception as e:
+        print("ig unhost:", clean(e)[:100])
+        send("⚠️ I could not remove the temporary video from the site. Send /publish to put the normal site back.")
 
 
 _QUIET_PUB = False        # while the fix-all queue runs, one Publish offer comes at the end
@@ -18407,6 +18488,161 @@ def cmd_articlelinks(st):
         send("\n".join(msg))
 
 
+BOOKPOSTS = {int(k): v for k, v in {
+"1": {
+"q": "Did the pharaoh's curse really kill them?",
+"x": "Did the pharaoh's curse really kill them?\n\nCarnarvon died months after Tutankhamun's tomb opened, and the papers invented a curse.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Tutankhamun #PharaohsCurse",
+"ig": "Did the pharaoh's curse really kill them?\n\nLord Carnarvon died months after Tutankhamun's tomb was opened, and the newspapers invented a curse. What does the evidence say?\n\nShort 1 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #tutankhamun #pharaohscurse",
+"li": "Did the pharaoh's curse really kill them?\n\nLord Carnarvon died months after Tutankhamun's tomb was opened, and the newspapers invented a curse. What does the evidence say?\n\nShort 1 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Tutankhamun #PharaohsCurse"
+},
+"2": {
+"q": "Who really built the pyramids?",
+"x": "Who really built the pyramids?\n\nNear Giza, archaeologists found the builders' town: bakeries, breweries, tombs beside the pyramids.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Pyramids #Giza",
+"ig": "Who really built the pyramids?\n\nNear Giza, archaeologists found the town where the builders lived: bakeries, breweries and tombs beside the pyramids. What the evidence shows about the workforce.\n\nShort 2 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #pyramids #giza",
+"li": "Who really built the pyramids?\n\nNear Giza, archaeologists found the town where the builders lived: bakeries, breweries and tombs beside the pyramids. What the evidence shows about the workforce.\n\nShort 2 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Pyramids #Giza"
+},
+"3": {
+"q": "What does a 4,500-year-old logbook say about the Great Pyramid?",
+"x": "What does a 4,500-year-old logbook say about the Great Pyramid?\n\nPapyri found in 2013 include a crew leader's logbook: moving limestone to Giza for Khufu.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Khufu #Papyrus",
+"ig": "What does a 4,500-year-old logbook say about the Great Pyramid?\n\nIn 2013, papyri about 4,500 years old were found at Wadi al-Jarf. One is the logbook of a crew leader moving limestone to Giza for Khufu.\n\nShort 3 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #khufu #papyrus",
+"li": "What does a 4,500-year-old logbook say about the Great Pyramid?\n\nIn 2013, papyri about 4,500 years old were found at Wadi al-Jarf. One is the logbook of a crew leader moving limestone to Giza for Khufu.\n\nShort 3 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Khufu #Papyrus"
+},
+"4": {
+"q": "Did the Egyptians cut granite with sound?",
+"x": "Did the Egyptians cut granite with sound?\n\nUnfinished granite at Aswan shows pounder marks and copper saws with sand. No sound machine left a trace.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Aswan #Engineering",
+"ig": "Did the Egyptians cut granite with sound?\n\nThe marks on unfinished granite at Aswan show dolerite pounders and copper saws with sand. No sound machine, no trace of one.\n\nShort 4 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #aswan #engineering",
+"li": "Did the Egyptians cut granite with sound?\n\nThe marks on unfinished granite at Aswan show dolerite pounders and copper saws with sand. No sound machine, no trace of one.\n\nShort 4 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Aswan #Engineering"
+},
+"5": {
+"q": "What did Herodotus get right about mummification?",
+"x": "What did Herodotus get right about mummification?\n\nHe described it 2,400 years ago. Embalming vessels at Saqqara show how much he got right.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Mummies #Herodotus",
+"ig": "What did Herodotus get right about mummification?\n\nA Greek historian described mummification 2,400 years ago. Chemical analysis of embalming vessels at Saqqara tells how much he got right.\n\nShort 5 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #mummies #herodotus",
+"li": "What did Herodotus get right about mummification?\n\nA Greek historian described mummification 2,400 years ago. Chemical analysis of embalming vessels at Saqqara tells how much he got right.\n\nShort 5 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Mummies #Herodotus"
+},
+"6": {
+"q": "What did Cleopatra really look like?",
+"x": "What did Cleopatra really look like?\n\nHer coins show strong features, and an ancient writer says her charm mattered more than her looks.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Cleopatra #PtolemaicEgypt",
+"ig": "What did Cleopatra really look like?\n\nHer coins show strong features, and an ancient writer says her charm and conversation mattered more than her looks.\n\nShort 6 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #cleopatra #ptolemaicegypt",
+"li": "What did Cleopatra really look like?\n\nHer coins show strong features, and an ancient writer says her charm and conversation mattered more than her looks.\n\nShort 6 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Cleopatra #PtolemaicEgypt"
+},
+"7": {
+"q": "Was Tutankhamun's dagger made from a meteorite?",
+"x": "Was Tutankhamun's dagger made from a meteorite?\n\nThe iron blade was analysed without being cut. Its nickel and cobalt match meteorites.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Tutankhamun #Meteorite",
+"ig": "Was Tutankhamun's dagger made from a meteorite?\n\nIts iron blade was analysed without being cut. The nickel and cobalt match meteorites.\n\nShort 7 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #tutankhamun #meteorite",
+"li": "Was Tutankhamun's dagger made from a meteorite?\n\nIts iron blade was analysed without being cut. The nickel and cobalt match meteorites.\n\nShort 7 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Tutankhamun #Meteorite"
+},
+"8": {
+"q": "Do the pyramids copy Orion's belt?",
+"x": "Do the pyramids copy Orion's belt?\n\nA striking idea, but the pyramids were built over several reigns and the match needs a flipped map.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Orion #Giza",
+"ig": "Do the pyramids copy Orion's belt?\n\nThe Orion correlation is a striking idea, but the pyramids were built over several reigns and the match needs a flipped map.\n\nShort 8 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #orion #giza",
+"li": "Do the pyramids copy Orion's belt?\n\nThe Orion correlation is a striking idea, but the pyramids were built over several reigns and the match needs a flipped map.\n\nShort 8 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Orion #Giza"
+},
+"9": {
+"q": "Is the Sphinx older than Egypt?",
+"x": "Is the Sphinx older than Egypt?\n\nOne theory blames ancient rain. Geologists point to limestone of different hardness, wind, sand and salt.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Sphinx #Giza",
+"ig": "Is the Sphinx older than Egypt?\n\nOne theory blames ancient rain. Geologists point to limestone layers of different hardness, wind, sand and salt.\n\nShort 9 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #sphinx #giza",
+"li": "Is the Sphinx older than Egypt?\n\nOne theory blames ancient rain. Geologists point to limestone layers of different hardness, wind, sand and salt.\n\nShort 9 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Sphinx #Giza"
+},
+"10": {
+"q": "Did the Egyptians reach America?",
+"x": "Did the Egyptians reach America?\n\nA 1992 study claimed American plant drugs in mummies. Other labs could not repeat it.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Mummies #Archaeology",
+"ig": "Did the Egyptians reach America?\n\nA 1992 study claimed plant drugs from the Americas in mummies. Other labs could not repeat it, and no Egyptian object has been found there.\n\nShort 10 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #mummies #archaeology",
+"li": "Did the Egyptians reach America?\n\nA 1992 study claimed plant drugs from the Americas in mummies. Other labs could not repeat it, and no Egyptian object has been found there.\n\nShort 10 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Mummies #Archaeology"
+},
+"11": {
+"q": "How precise is the Great Pyramid?",
+"x": "How precise is the Great Pyramid?\n\nIts sides differ by a few centimetres and it faces true north within a fraction of a degree.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #GreatPyramid #Giza",
+"ig": "How precise is the Great Pyramid?\n\nIts sides differ by only a few centimetres and it faces true north within a fraction of a degree. Ropes, plumb lines and the sky, not secret machines.\n\nShort 11 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #greatpyramid #giza",
+"li": "How precise is the Great Pyramid?\n\nIts sides differ by only a few centimetres and it faces true north within a fraction of a degree. Ropes, plumb lines and the sky, not secret machines.\n\nShort 11 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #GreatPyramid #Giza"
+},
+"12": {
+"q": "Is that a helicopter carved at Abydos?",
+"x": "Is that a helicopter carved at Abydos?\n\nIn Seti I's temple it is two inscriptions, re-carved over plaster, overlapping.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Abydos #SetiI",
+"ig": "Is that a helicopter carved at Abydos?\n\nA carving in Seti I's temple looks like a helicopter. It is two inscriptions, re-carved over plaster, overlapping.\n\nShort 12 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #abydos #setii",
+"li": "Is that a helicopter carved at Abydos?\n\nA carving in Seti I's temple looks like a helicopter. It is two inscriptions, re-carved over plaster, overlapping.\n\nShort 12 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Abydos #SetiI"
+},
+"13": {
+"q": "Were Egyptian temples really colourful?",
+"x": "Were Egyptian temples really colourful?\n\nTemples were painted. At Dendera, vivid blues and golds survive on the ceilings.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Dendera #Temples",
+"ig": "Were Egyptian temples really colourful?\n\nEgyptian temples were painted. At Dendera, vivid blues and golds survive on the ceilings.\n\nShort 13 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #dendera #temples",
+"li": "Were Egyptian temples really colourful?\n\nEgyptian temples were painted. At Dendera, vivid blues and golds survive on the ceilings.\n\nShort 13 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Dendera #Temples"
+},
+"14": {
+"q": "Why are there millions of cat mummies?",
+"x": "Why are there millions of cat mummies?\n\nScans show many were young animals, and some wrappings hold little or no cat.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #CatMummies #Bastet",
+"ig": "Why are there millions of cat mummies?\n\nMillions of cat mummies were offered at temples. Scans show many were young animals, and some wrappings hold little or no cat.\n\nShort 14 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #catmummies #bastet",
+"li": "Why are there millions of cat mummies?\n\nMillions of cat mummies were offered at temples. Scans show many were young animals, and some wrappings hold little or no cat.\n\nShort 14 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #CatMummies #Bastet"
+},
+"15": {
+"q": "Why do people in Egyptian paintings wear cones?",
+"x": "Why do people in Egyptian paintings wear cones?\n\nScholars still debate whether the cones melted into perfume or were symbolic.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #EgyptianArt #Banquet",
+"ig": "Why do people in Egyptian paintings wear cones?\n\nBanquet scenes show guests with small cones on their heads. Scholars still debate whether they melted into perfume or were symbolic.\n\nShort 15 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #egyptianart #banquet",
+"li": "Why do people in Egyptian paintings wear cones?\n\nBanquet scenes show guests with small cones on their heads. Scholars still debate whether they melted into perfume or were symbolic.\n\nShort 15 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #EgyptianArt #Banquet"
+},
+"16": {
+"q": "Did the Egyptians drill skulls?",
+"x": "Did the Egyptians drill skulls?\n\nThe Edwin Smith Papyrus describes injuries with practical treatment. Skull surgery in Egypt is rare.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #AncientMedicine #Papyrus",
+"ig": "Did the Egyptians drill skulls?\n\nThe Edwin Smith Papyrus describes injuries with practical treatment. Skull surgery in Egypt is rare and debated.\n\nShort 16 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #ancientmedicine #papyrus",
+"li": "Did the Egyptians drill skulls?\n\nThe Edwin Smith Papyrus describes injuries with practical treatment. Skull surgery in Egypt is rare and debated.\n\nShort 16 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #AncientMedicine #Papyrus"
+},
+"17": {
+"q": "Are AI pharaohs real faces?",
+"x": "Are AI pharaohs real faces?\n\nStatues idealise and skull reconstructions are estimates. AI adds guesses on top of guesses.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #AI #Pharaohs",
+"ig": "Are AI pharaohs real faces?\n\nStatues idealise and skull reconstructions are estimates. An AI image adds guesses on top of guesses.\n\nShort 17 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #ai #pharaohs",
+"li": "Are AI pharaohs real faces?\n\nStatues idealise and skull reconstructions are estimates. An AI image adds guesses on top of guesses.\n\nShort 17 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #AI #Pharaohs"
+},
+"18": {
+"q": "What does ancient Egyptian DNA say?",
+"x": "What does ancient Egyptian DNA say?\n\nRecent studies show mostly local North African ancestry with some from the Near East.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #AncientDNA #Genetics",
+"ig": "What does ancient Egyptian DNA say?\n\nRecent studies show mostly local North African ancestry with some from the Near East, and the results keep growing.\n\nShort 18 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #ancientdna #genetics",
+"li": "What does ancient Egyptian DNA say?\n\nRecent studies show mostly local North African ancestry with some from the Near East, and the results keep growing.\n\nShort 18 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #AncientDNA #Genetics"
+},
+"19": {
+"q": "Was there a light bulb at Dendera?",
+"x": "Was there a light bulb at Dendera?\n\nThe relief shows a lotus with a serpent inside. It fits Egyptian creation myths: no wires, no soot.\n\nAncient Egypt: Myth vs Evidence\nhttps://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Dendera #Myth",
+"ig": "Was there a light bulb at Dendera?\n\nA relief at Dendera shows a lotus with a serpent inside. It fits Egyptian creation myths, with no wires and no soot.\n\nShort 19 of 19 from the book Ancient Egypt: Myth vs Evidence. Book link in bio.\n\n#ancientegypt #egyptology #history #dendera #myth",
+"li": "Was there a light bulb at Dendera?\n\nA relief at Dendera shows a lotus with a serpent inside. It fits Egyptian creation myths, with no wires and no soot.\n\nShort 19 of 19, one for each chapter of the book Ancient Egypt: Myth vs Evidence. Get the book on Kindle: https://kemetstories.com/book/\n\n#AncientEgypt #Egyptology #History #Dendera #Myth"
+}
+}.items()}
+
+def cmd_posts(st, raw=""):
+    """v10.307: the ready-to-paste captions of one book Short for X, Instagram/TikTok, LinkedIn and Facebook, each with its own counted /book/ link.
+    /posts N sends Short N. /posts alone sends the next one after the last you asked for."""
+    bp = mem().setdefault("bookposts", {"last": 5})
+    m_ = re.search(r"\d+", raw or "")
+    n = int(m_.group(0)) if m_ else bp.get("last", 5) + 1
+    if n not in BOOKPOSTS:
+        return send("All 19 are done. 🎉 Send /posts 1 to 19 to see any caption again.")
+    p = BOOKPOSTS[n]
+    b = BOOK_LINK
+    x = p["x"].replace(b, b + "x/")
+    li = p["li"].replace(b, b + "linkedin/")
+    fb = p["li"].replace(b, b + "facebook/")
+    bp["last"] = n
+    send(f"📣 Short {n} of 19: {p['q']}\nFour captions follow. Tap and hold one, choose Copy, paste it into the app. Each uses that app's own counted link.")
+    send("━━ X ━━")
+    send(x)
+    send("━━ Instagram and TikTok (link in bio) ━━")
+    send(p["ig"])
+    send("━━ LinkedIn ━━")
+    send(li)
+    send("━━ Facebook ━━")
+    send(fb)
+    send(f"Next: /posts {n + 1}" if n < 19 else "That was the last one. 🎉")
+
+
+def cmd_autopost(st, raw=""):
+    """v10.308: /autopost on | off. When a video you upload through me goes public, I post it to your Facebook Page myself and send the captions for the other apps."""
+    t = (raw or "").lower().split()
+    if len(t) > 1 and t[1] in ("on", "off"):
+        mem()["autopost"] = (t[1] == "on")
+        return send("✅ Autopost is ON. Each time a video goes public through me, I post it to your Facebook Page and send you the captions for X, Instagram, TikTok and LinkedIn."
+                    if t[1] == "on" else "Autopost is OFF. Nothing posts by itself. /crosspost still works by tap.")
+    send("Autopost is " + ("ON" if mem().get("autopost") else "OFF") + ". Facebook: " + ("connected" if fb_cfg() else "not connected") +
+         ".\nWhat it does: when a video goes public through me, I post it to your Facebook Page (caption option 1) and send the captions for the other apps. "
+         "X, Instagram, TikTok and LinkedIn have no free posting key, so those you paste. Send /autopost on or /autopost off.")
+
+
 def cmd_bookarticle(st, raw):
     """/bookarticle 9 : give book Short number 9 an article of its own (the weekly list no longer suggests the book Shorts)."""
     m_ = re.search(r"\d+", raw or "")
@@ -18934,6 +19170,8 @@ def main():
             {"command": "fixcomments", "description": "Update old links in the bot's own comments"},
             {"command": "fixdomain", "description": "Replace old pages.dev links in all video descriptions"},
             {"command": "bookshorts", "description": "Upload the 19 book Shorts and build the playlist"},
+            {"command": "autopost", "description": "Auto-post new public videos to Facebook, send captions for the rest"},
+            {"command": "posts", "description": "Captions for the next book Short (X, Instagram, LinkedIn, Facebook)"},
             {"command": "kindleline", "description": "Kindle line in old descriptions, 5 a day"},
             {"command": "searchcheck", "description": "Google and Bing: sitemap and indexed pages"},
             {"command": "fbviews", "description": "Facebook views vs YouTube"},
