@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.311"
+BOT_VERSION = "v10.312"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -4068,8 +4068,10 @@ def on_prop(jid, act, st):
         ops[fp] = {"kind": "tiktok_video", "status": "confirmed", "remote_id": zurl or zid or "posted", "ts": time.time()}
         _persist_remote_marker(st)
         st["props"].pop(jid, None)
-        mode = "PUBLIC" if zn_cfg().get("privacy") == "PUBLIC_TO_EVERYONE" else "'only me' (private). Check it on your phone, then /zernio public for public posts"
-        return send(f"✅ Sent to TikTok ({zst or 'accepted'}), visibility: {mode}." + ("\n" + zurl if zurl else ""))
+        if zn_is_draft():
+            return send(f"✅ Sent to TikTok as a DRAFT ({zst or 'accepted'}). Open the TikTok app, look in your Inbox or drafts, check it and tap Post. "
+                        "Send /zernio public when you want the bot to publish directly." + ("\n" + zurl if zurl else ""))
+        return send(f"✅ Sent to TikTok ({zst or 'accepted'}), visibility: PUBLIC." + ("\n" + zurl if zurl else ""))
     if act == "ip" and kind == "igpost":
         rec = mem()["videos"].get(prop["video_id"]) or {}
         file_id = str(rec.get("file_id") or "").strip()
@@ -8472,7 +8474,7 @@ ZN_SETUP_HELP = (
     "2. In the dashboard open Settings → API keys → create a key. Copy it.\n"
     "3. Send me ONE message (I delete it at once):\n/zernio YOUR_API_KEY\n\n"
     "I keep the key encrypted, find your TikTok account, and tell you. /zerniotest checks it. /zerniooff removes it.\n"
-    "At first, TikTok posts are 'only me' so you can check one safely. When you are happy, send /zernio public."
+    "At first, TikTok posts go to your TikTok app as drafts so you can check one safely. When you are happy, send /zernio public."
 )
 
 
@@ -8482,18 +8484,18 @@ def cmd_zerniosetup(st):
 
 def cmd_zernio(msg, st, raw):
     parts = raw.split()
-    if len(parts) >= 2 and parts[1].lower() in ("public", "private"):
+    if len(parts) >= 2 and parts[1].lower() in ("public", "private", "draft"):
         cfg = mem().setdefault("zernio", {})
         if not cfg.get("key"):
             return send("Zernio is not connected yet. Send /zerniosetup.")
-        cfg["privacy"] = "PUBLIC_TO_EVERYONE" if parts[1].lower() == "public" else "SELF_ONLY"
-        return send("✅ TikTok posts will be " + ("PUBLIC to everyone." if parts[1].lower() == "public" else "'only me' (private) so you can check them first."))
+        cfg["privacy"] = "PUBLIC_TO_EVERYONE" if parts[1].lower() == "public" else "DRAFT"
+        return send("✅ TikTok posts will be " + ("PUBLIC to everyone, straight away." if parts[1].lower() == "public" else "sent to your TikTok app as DRAFTS. Open TikTok, tap Inbox or your drafts, check it, and publish it yourself."))
     forget_message(msg)
     if len(parts) < 2 or len(parts[1]) < 20:
         return send("I need your key in the same message: /zernio YOUR_API_KEY. I deleted what you sent. Send /zerniosetup for the steps.")
     key = parts[1]
     old = mem().get("zernio")
-    mem()["zernio"] = {"key": key, "ts": time.time(), "privacy": (old or {}).get("privacy", "SELF_ONLY")}
+    mem()["zernio"] = {"key": key, "ts": time.time(), "privacy": (old or {}).get("privacy", "DRAFT")}
     send("Connecting to Zernio...")
     try:
         accs = zn_accounts()
@@ -8515,7 +8517,7 @@ def cmd_zernio(msg, st, raw):
     lines = ["✅ Zernio key saved (your message is deleted)."]
     lines.append("🎵 TikTok: " + (("@" + tk[0]["name"]) if tk else "not connected yet. Connect TikTok in the Zernio dashboard, then send /zernio again."))
     lines.append("𝕏: " + ("connected in Zernio. I do not post or read X through it, because X charges per call." if xs else "not connected (fine)."))
-    lines.append("Try /zerniotest. TikTok posts start as 'only me'.")
+    lines.append("Try /zerniotest. TikTok posts start as drafts in your TikTok app.")
     send("\n".join(lines))
 
 
@@ -8523,6 +8525,10 @@ def cmd_zerniooff(st):
     mem().pop("zernio", None)
     mem().pop("zn_ins", None)
     send("Zernio is disconnected and the key is deleted from my notes. To remove the access fully, delete the API key in the Zernio dashboard.")
+
+
+def zn_is_draft():
+    return (zn_cfg().get("privacy") or "DRAFT") != "PUBLIC_TO_EVERYONE"
 
 
 def zn_upload_video(file_id):
@@ -8551,9 +8557,11 @@ def zn_post_tiktok(caption, file_id):
     url = zn_upload_video(file_id)
     body = {"content": caption[:2200], "mediaItems": [{"type": "video", "url": url}],
             "platforms": [{"platform": "tiktok", "accountId": cfg["tiktok"]}],
-            "tiktokSettings": {"privacy_level": cfg.get("privacy") or "SELF_ONLY", "allow_comment": True, "allow_duet": False, "allow_stitch": False,
+            "tiktokSettings": {"privacy_level": "PUBLIC_TO_EVERYONE", "allow_comment": True, "allow_duet": False, "allow_stitch": False,
                                "content_preview_confirmed": True, "express_consent_given": True},
             "publishNow": True}
+    if zn_is_draft():                                       # v10.312: a TikTok business account cannot post privately; a draft goes to the TikTok app for him to finish
+        body["draft"] = True
     j = zn_call("POST", "posts", json=body, timeout=300)
     post = j.get("post") if isinstance(j.get("post"), dict) else j
     pl = (post.get("platforms") or [{}])[0] if isinstance(post, dict) else {}
@@ -8648,7 +8656,7 @@ def cmd_zerniotest(st):
         out.extend(zn_numbers_lines(force=False))
         for e in (c.get("err") or [])[:3]:
             out.append("   ⚠ " + e)
-        out.append("Posting mode: " + ("PUBLIC" if cfg.get("privacy") == "PUBLIC_TO_EVERYONE" else "'only me' (private)") + ". Change it with /zernio public or /zernio private.")
+        out.append("Posting mode: " + ("PUBLIC" if cfg.get("privacy") == "PUBLIC_TO_EVERYONE" else "DRAFT (goes to your TikTok app)") + ". Change it with /zernio public or /zernio draft.")
         out.append("To test a post: send /crosspost and tap the TikTok button under a TikTok caption.")
     send("\n".join(out))
 
