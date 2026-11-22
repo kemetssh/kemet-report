@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.317"
+BOT_VERSION = "v10.319"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -4132,6 +4132,10 @@ def on_prop(jid, act, st):
                 e_["rated"][key] = int(k or 0)
                 break
         return send(f"👍 Noted: {key} = {SCORE_LABEL.get(int(k or 0), '')}. Tap the other apps too if you used them.")
+    if act == "bd" and kind == "bookdesc":
+        st["props"].pop(jid, None)
+        send("Adding the book link to your book Shorts...")
+        return run_bookdesc(st)
     if act == "ck" and kind == "shortlink":
         st["props"].pop(jid, None)
         return send("Skipped.")
@@ -12485,6 +12489,8 @@ def on_message(msg, st):
         cmd_fixdomain(st, raw)
     elif text.startswith("/autopost"):
         cmd_autopost(st, raw)
+    elif text.startswith("/bookdesc"):
+        cmd_bookdesc(st)
     elif text.startswith("/posts"):
         cmd_posts(st, raw)
     elif text.startswith("/bookarticle"):
@@ -12589,7 +12595,7 @@ def on_callback(cb, st):
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
     if jid == "q" and act in ("qa", "qi"):
         return ask_callback(cb, act, st)
-    if act in ("ta", "ts", "tu", "ca", "cs", "fbr", "fbn", "chp", "chs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "ip", "tp", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr", "fy", "fz", "lk", "lu", "mw"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "fbr", "fbn", "chp", "chs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "ip", "tp", "bd", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr", "fy", "fz", "lk", "lu", "mw"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -18961,6 +18967,55 @@ BOOKTHOUGHTS = {
 }
 
 
+BOOK_DESC_LINE = "📖 The book behind this film, Ancient Egypt: Myth vs Evidence: " + SITE_BASE + "/book/youtube/"
+
+
+def cmd_bookdesc(st):
+    """v10.318: put the counted YouTube book link (/book/youtube/) on top of the description of every book Short. Nothing changes until you tap."""
+    ids = sorted(book_short_ids())
+    if not ids:
+        return send("I do not know which videos are the book Shorts yet. Send /health first so I can list them.")
+    tok = yt_token()
+    have = 0
+    for i in range(0, len(ids), 50):
+        for it in yt_get("videos", tok, part="snippet", id=",".join(ids[i:i + 50])).get("items", []):
+            if "/book/youtube/" in (it["snippet"].get("description") or ""):
+                have += 1
+    todo = len(ids) - have
+    if not todo:
+        return send(f"All {len(ids)} book Shorts already carry the YouTube book link. ✅ Visits from it show in /booktraffic as 'youtube'.")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "bookdesc", "created": time.time()}
+    send(f"📖 {todo} of {len(ids)} book Shorts have no book link in their description. I add this line at the top of each one:\n\n{BOOK_DESC_LINE}\n\n"
+         "The link has its own counter, so /booktraffic shows how many people come from YouTube. It uses about 50 of your daily YouTube units per video.",
+         [[btn(f"📖 Add it to {todo} Shorts", pid, "bd")], [btn("Cancel", pid, "cs")]])
+
+
+def book_desc_add(vid, tok):
+    """Prepend the book line unless the description already carries the /book/youtube/ link in any wording."""
+    sn = yt_get("videos", tok, part="snippet", id=vid)["items"][0]["snippet"]
+    desc = sn.get("description", "")
+    if "/book/youtube/" in desc or len(BOOK_DESC_LINE) + 2 + len(desc) > 4990:
+        return False
+    return _put_description(vid, tok, sn, BOOK_DESC_LINE + "\n\n" + desc)
+
+
+def run_bookdesc(st):
+    ids = sorted(book_short_ids())
+    done, failed, skipped = 0, [], 0
+    for vid in ids:
+        try:
+            if book_desc_add(vid, yt_token()):
+                done += 1
+            else:
+                skipped += 1
+        except Exception as e:
+            failed.append(f"{vid}: {clean(e)[:100]}")
+            if "quota" in str(e).lower():
+                break
+    send(f"✅ Added the book link to {done} Short(s); {skipped} already had it." + (f"\n⚠️ {len(failed)} did not change:\n" + "\n".join(failed[:4]) + "\nSend /bookdesc again later (YouTube quota resets at 10:00 Cairo)." if failed else ""))
+
+
 def cmd_posts(st, raw=""):
     """v10.307: the ready-to-paste captions of one book Short for X, Instagram/TikTok, LinkedIn and Facebook, each with its own counted /book/ link.
     /posts N sends Short N. /posts alone sends the next one after the last you asked for."""
@@ -19531,6 +19586,7 @@ def main():
             {"command": "zerniosetup", "description": "Connect TikTok through Zernio: post and read numbers"},
             {"command": "zerniotest", "description": "Check the TikTok connection and numbers"},
             {"command": "autopost", "description": "Auto-post new public videos to Facebook, send captions for the rest"},
+            {"command": "bookdesc", "description": "Add the counted book link to the book Shorts' descriptions"},
             {"command": "posts", "description": "Captions for the next book Short (X, Instagram, LinkedIn, Facebook)"},
             {"command": "kindleline", "description": "Kindle line in old descriptions, 5 a day"},
             {"command": "searchcheck", "description": "Google and Bing: sitemap and indexed pages"},
