@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.315"
+BOT_VERSION = "v10.317"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -2994,7 +2994,8 @@ The aim is to grow followers and watch time so each account can earn: x invites 
 - instagram: a caption of 3 to 5 short lines. Open with a "how" or "why" question about everyday Egyptian life or a myth when the story truly is about that. End with one question that invites a comment and one short line inviting a follow for the next piece of evidence. Never say "save this post". Do not mention a link or the bio (I add them).
 - linkedin: 3 to 4 short sentences for a LinkedIn post by a professional who values evidence. Open with a "how" or "why" question or a surprising fact the story truly shows. Say what the evidence shows, plainly, and end with one question that invites a comment. No emoji, no hype, no hashtags, no link (I add them). Under 600 characters.
 - tiktok: one punchy line under 120 characters. Open with a "how" or "why" question when the story truly is about that, and use the main phrase people would type into TikTok search (for example "hieroglyphic numbers"). Do not add a follow line or a link (I add them).
-Return JSON only: {{"x": "...", "facebook": "...", "instagram": "...", "tiktok": "...", "linkedin": "..."}}"""
+- thoughts: 2 to 3 short sentences in the FIRST PERSON for the owner's personal LinkedIn profile, written as the comment on top of a repost of the Kemet Stories Page post. Plain, human, British English, no hashtags, no links, no em-dashes. Say what he looked at and what the evidence shows or does not show, using only what the story states, then end with one genuine question for his network.
+Return JSON only: {{"x": "...", "facebook": "...", "instagram": "...", "tiktok": "...", "linkedin": "...", "thoughts": "..."}}"""
 
 
 def x_intent(text, link):
@@ -3053,10 +3054,11 @@ def share_pack(title, blurb):
         print("share pack:", clean(e)[:100])
         d = {}
     out = {}
-    for k, cap in (("x", 170), ("facebook", 600), ("instagram", 800), ("tiktok", 150), ("linkedin", 700)):
+    for k, cap in (("x", 170), ("facebook", 600), ("instagram", 800), ("tiktok", 150), ("linkedin", 700), ("thoughts", 420)):
         t = re.sub(r"https?://\S+", "", str(d.get(k, ""))).strip()
         t = re.sub(r"(?:(?<=\s)|^)#\w+", "", t).strip()                  # the model must not add its own hashtags: only checked ones go in
-        out[k] = t[:cap] or title[:200]
+        out[k] = t[:cap] or (("What the evidence shows about this: " + title[:150] + " What would convince you?") if k == "thoughts" else title[:200])
+    out["thoughts"] = re.sub(r"\s*[\u2014\u2013]\s*", ", ", out["thoughts"])
     try:
         tags = pick_hashtags(title + " " + (blurb or ""), n=5)         # trending niche tags first, only those that are TRUE for this story
     except Exception as e:
@@ -3098,6 +3100,7 @@ def send_share(title, blurb, link, st=None):
              [[{"text": "📘 Share on Facebook", "url": fb_share(link)}]])
     send(f"💼 LinkedIn (press and hold to copy, then paste into a new post):\n{p['linkedin']}\n{link}",
          [[{"text": "💼 Open LinkedIn (link filled in)", "url": "https://www.linkedin.com/sharing/share-offsite/?" + urllib.parse.urlencode({"url": link})}]])
+    send("💬 Your personal LinkedIn: after you post this on the Kemet Stories Page, open that post, tap Repost, and paste these thoughts (press and hold to copy):\n\n" + p["thoughts"])
     send(f"📸 Instagram caption (press and hold to copy):\n{p['instagram']}\n\n📖 Full evidence and sources: link in bio (latest article)\n{title}\n\n(Instagram captions cannot be clicked, so I point to your bio. Put {SITE_BASE}/latest/ in your bio once and it always opens your newest article.)",
          [[{"text": "📸 Open Instagram", "url": "https://www.instagram.com/"}]])
     send(f"🎵 TikTok caption (press and hold to copy):\n{p['tiktok']}\n\nFollow for the next piece of evidence.\n\n(TikTok captions cannot be clicked. If your bio has a link, use {SITE_BASE}/latest/ there. Article: {link})",
@@ -9373,6 +9376,13 @@ def cmd_crosspost(st, video_id=None, auto_fb=False):
                 send(body, [[btn("📸 Post this Reel to my Instagram", pid, "ip")]])
             else:
                 send(body)
+    try:                                                      # v10.317: LinkedIn post and personal-profile thoughts for every video; videos with an article already got them in the post kit
+        if vid not in (slug_map_safe() or {}):
+            sp_ = share_pack(rec["title"], rec.get("summary", ""))
+            send("━━ LinkedIn (Kemet Stories Page) ━━\n" + sp_["linkedin"] + "\n\n(This video has no article yet, so there is no link. Add it later if you write one.)")
+            send("💬 Your personal LinkedIn: after you post on the Kemet Stories Page, open that post, tap Repost, and paste these thoughts (press and hold to copy):\n\n" + sp_["thoughts"])
+    except Exception as e_:
+        print("crosspost linkedin:", clean(e_)[:100])
     if fb and not file_id:
         send("Facebook captions are ready above, but this video has no Telegram file (it was not sent through Telegram). "
              "I did not create a one-tap upload button or resend an empty file ID. Copy the caption and upload the video manually.")
@@ -18928,6 +18938,29 @@ BOOKPOSTS = {int(k): v for k, v in {
 }
 }.items()}
 
+BOOKTHOUGHTS = {
+    1: "The pharaoh's curse is one of the most repeated stories in archaeology. Carnarvon died months after the tomb opened, and the papers did the rest. I checked what the evidence says. Which famous curse story did you grow up believing?",
+    2: "The idea that slaves built the pyramids is repeated everywhere. I looked at what the evidence says about who actually did the work. What surprised you most when you first heard the answer?",
+    3: "A 4,500-year-old logbook from the time of the Great Pyramid survives, and it tells us how stone was moved for the building. I put it in a short film. Which ancient document would you most like to read in full?",
+    4: "Cutting granite with sound sounds impressive, but impressive is not evidence. I checked what the tool marks and the experiments actually show. What would convince you either way?",
+    5: "Herodotus described mummification around 2,500 years ago. I compared his account with what the evidence shows today. How often do old travel writers get it right?",
+    6: "Everyone has an image of Cleopatra, and most of it comes from films. I looked at what coins, portraits and ancient writers actually give us. Which version did you picture?",
+    7: "A dagger in Tutankhamun's tomb made headlines for its iron. I checked what the analysis says about where that metal came from. When does a scientific result become settled for you?",
+    8: "A pattern that looks perfect on a map is not the same as a plan. The Orion belt idea is one of the most repeated claims about Giza, so I put it against the evidence in this short film. What would you need to see before calling a resemblance a blueprint?",
+    9: "People say the Sphinx is older than Egypt itself. I checked what the evidence says about its age. Which claim about Giza would you like checked next?",
+    10: "Did the Egyptians reach America? The idea keeps coming back. I looked at what proof it would take, and what actually exists. What kind of evidence would settle a question like this?",
+    11: "How precise is the Great Pyramid? The numbers people quote are often repeated without a source. I checked them against the measurements. Do you check the number behind a claim before you share it?",
+    12: "The Abydos 'helicopter' is a favourite image online. I checked how the carving was made and what it really shows. Why do you think this one spreads so easily?",
+    13: "Egyptian temples were not the sand-coloured ruins we see today. I looked at the evidence for their colour. What other ancient place do you think we picture wrongly?",
+    14: "Millions of cat mummies is a startling number. I looked at why they were made and what the evidence says. Does a big number make you more or less curious?",
+    15: "Look at the paintings and many figures wear cones on their heads. I checked what the evidence says about them. Have you ever seen an explanation that cited a source?",
+    16: "Did the Egyptians drill skulls? I looked at what remains and what the evidence says. How much weight do you give one skeleton in a big story?",
+    17: "AI faces of the pharaohs look convincing, but looking real is not the same as being right. I checked what a reconstruction can and cannot tell us. Would you trust a face made by software?",
+    18: "What does ancient Egyptian DNA say? Headlines move fast and the science moves slowly. I checked what the studies actually show. How do you tell a headline from a result?",
+    19: "The Dendera 'light bulb' is one of the internet's favourite mysteries. I checked what the relief shows and what the temple's own texts say. Which myth have you seen properly tested?",
+}
+
+
 def cmd_posts(st, raw=""):
     """v10.307: the ready-to-paste captions of one book Short for X, Instagram/TikTok, LinkedIn and Facebook, each with its own counted /book/ link.
     /posts N sends Short N. /posts alone sends the next one after the last you asked for."""
@@ -18942,7 +18975,7 @@ def cmd_posts(st, raw=""):
     li = p["li"].replace(b, b + "linkedin/")
     fb = p["li"].replace(b, b + "facebook/")
     bp["last"] = n
-    send(f"📣 Short {n} of 19: {p['q']}\nFour captions follow. Tap and hold one, choose Copy, paste it into the app. Each uses that app's own counted link.")
+    send(f"📣 Short {n} of 19: {p['q']}\nFive messages follow (four captions and your own LinkedIn thoughts). Tap and hold one, choose Copy, paste it into the app. Each uses that app's own counted link.")
     send("━━ X ━━")
     send(x)
     send("━━ Instagram and TikTok (link in bio) ━━")
@@ -18951,6 +18984,8 @@ def cmd_posts(st, raw=""):
     send(li)
     send("━━ Facebook ━━")
     send(fb)
+    send("━━ Your personal LinkedIn ━━\nAfter you post on the Kemet Stories Page, open that post, tap Repost, and paste these thoughts:")
+    send(BOOKTHOUGHTS.get(n, "I put this claim against the evidence in a short film. What would convince you?"))
     send(f"Next: /posts {n + 1}" if n < 19 else "That was the last one. 🎉")
 
 
