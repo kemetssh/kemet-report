@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.322"
+BOT_VERSION = "v10.324"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -4143,7 +4143,7 @@ def on_prop(jid, act, st):
         if mp:
             mp["items"][prop["idx"]]["keep"] = False
         return send(f"Skipped number {prop['idx'] + 1}.")
-    if act == "gz" and kind == "gscfix":
+    if act == "gz" and kind == "gscmaster":
         if not [x for x in prop.get("items", []) if x.get("keep")]:
             return send("You have not kept any yet. Tap ✔ Keep under the ones you like first.")
         st["props"].pop(jid, None)
@@ -6167,6 +6167,12 @@ def housekeeping(st):
             rc_batch(st)
     except Exception as e:
         print("recheck auto:", clean(e)[:100])
+    try:
+        if m.get("gscauto") and now - m.get("gscauto_last", 0) > 7 * 86400:
+            m["gscauto_last"] = now
+            gscfix_auto(st)
+    except Exception as e:
+        print("gscfix auto:", clean(e)[:100])
     try:
         nb_scan(st)
     except Exception as e:
@@ -12506,6 +12512,10 @@ def on_message(msg, st):
         cmd_fixdomain(st, raw)
     elif text.startswith("/autopost"):
         cmd_autopost(st, raw)
+    elif text.startswith("/gscauto"):
+        cmd_gscauto(st, raw)
+    elif text.startswith("/gscundo"):
+        cmd_gscundo(st)
     elif text.startswith("/gscfix"):
         cmd_gscfix(st)
     elif text.startswith("/gsctitle"):
@@ -19087,6 +19097,192 @@ def gscfix_candidates(g, done):
     return sorted(rows, key=lambda x: -x[2])
 
 
+def gscfix_generate(sz, cands, pq):
+    """Ask the AI for a better title and description for each candidate. Returns (items, current texts, error text or None)."""
+    cur, payload = {}, []
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        for pth, c, im, pos in cands:
+            f = Path(root) / pth.strip("/") / "index.html"
+            if not f.exists():
+                continue
+            t = f.read_text(encoding="utf-8", errors="ignore")
+            mt = re.search(r"<title>(.*?)</title>", t, re.S)
+            md = re.search(r'<meta name="description" content="([^"]*)"', t) or re.search(r'<meta content="([^"]*)" name="description"', t)
+            if not mt or not md:
+                continue
+            cur[pth] = {"title": html.unescape(mt.group(1)).strip(), "desc": html.unescape(md.group(1)).strip(), "imp": im, "clicks": c, "pos": round(pos, 1)}
+            qs = sorted(pq.get(pth, []), key=lambda x: -x[2])[:5]
+            payload.append({"path": pth, "current_title": cur[pth]["title"], "current_description": cur[pth]["desc"],
+                            "searches": [{"query": q, "impressions": i, "position": round(p_, 1)} for q, _, i, p_ in qs], "article_text": _page_text(t)})
+    if not payload:
+        return [], cur, "I could not find those articles in your stored site copy. Send the latest site .zip and try again."
+    try:
+        res = gemini([{"text": GSCFIX_PROMPT + json.dumps(payload, ensure_ascii=False)}])
+    except Exception as e:
+        return [], cur, "Google's AI did not answer (busy or at its free limit). Try again later. " + clean(e)[:80]
+    items = []
+    for it in res.get("items", []):
+        pth = it.get("path")
+        t_ = re.sub(r"\s*[\u2014\u2013]\s*", ", ", (it.get("title") or "").strip())
+        d_ = re.sub(r"\s*[\u2014\u2013]\s*", ", ", (it.get("desc") or "").strip())
+        if t_.endswith("| Kemet"):
+            t_ = t_[:-7].rstrip()
+        if pth not in cur or not (25 <= len(t_) <= 62) or not (90 <= len(d_) <= 158):
+            continue
+        if re.match(r"\s*fact[\s-]*check", t_, re.I) or t_.endswith("?") or t_ == cur[pth]["title"].removesuffix(" | Kemet"):
+            continue
+        if re.match(r"\s*(learn|understand|examine|study|discover|explore)\b", d_, re.I):
+            continue
+        items.append({"path": pth, "title": t_, "desc": d_, "keep": False, "old": cur[pth]["title"], "olddesc": cur[pth]["desc"],
+                      "imp": cur[pth]["imp"], "clicks": cur[pth]["clicks"], "pos": cur[pth]["pos"]})
+    return items, cur, None
+
+
+GSCFIX_VERIFY_PROMPT = """You are a strict fact checker for a history website. For each item, ARTICLE TEXT is the only source of truth.
+Say ok=true only if EVERY claim in the new title and the new description is clearly supported by the article text, with no overclaim
+(for example 'proves', 'confirms', 'identifies X as the architect', exact numbers or names the text does not give), and nothing is misleading or sensational.
+When in doubt say ok=false. Return JSON only: {"items": [{"path": "...", "ok": true, "problem": "one short line if not ok"}]}
+Items: """
+
+
+def gscfix_verify(sz, items):
+    """Second AI pass against the full article text. Fails closed: an item that is not clearly ok=true is not returned."""
+    pay = []
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        for it in items:
+            f = Path(root) / it["path"].strip("/") / "index.html"
+            if f.exists():
+                pay.append({"path": it["path"], "new_title": it["title"], "new_description": it["desc"], "article_text": _page_text(f.read_text(encoding="utf-8", errors="ignore"), 3500)})
+    if not pay:
+        return [], {}
+    try:
+        res = gemini([{"text": GSCFIX_VERIFY_PROMPT + json.dumps(pay, ensure_ascii=False)}])
+    except Exception as e:
+        print("gscfix verify:", clean(e)[:100])
+        return [], {x["path"]: "the checking AI did not answer" for x in pay}
+    okp = {x.get("path"): x for x in res.get("items", [])}
+    good = [it for it in items if (okp.get(it["path"]) or {}).get("ok") is True]
+    why = {it["path"]: (okp.get(it["path"]) or {}).get("problem", "not confirmed") for it in items if it not in good}
+    return good, why
+
+
+def gscfix_write(root, items):
+    """Write title and description into the site copy. Returns [(path, old title, old description)] for every page that changed."""
+    out = []
+    for it in items:
+        f = Path(root) / it["path"].strip("/") / "index.html"
+        if not f.exists():
+            continue
+        t = f.read_text(encoding="utf-8")
+        mt = re.search(r"<title>(.*?)</title>", t, re.S)
+        md = re.search(r'<meta name="description" content="([^"]*)"', t) or re.search(r'<meta content="([^"]*)" name="description"', t)
+        if not mt or not md:
+            continue
+        old_t, old_d = mt.group(1), md.group(1)
+        base = old_t[:-len(" | Kemet")] if old_t.endswith(" | Kemet") else old_t
+        new_t = html.escape(it["title"])
+        t2 = t.replace("<title>" + old_t + "</title>", "<title>" + (new_t + " | Kemet" if len(it["title"]) + 8 <= 65 else new_t) + "</title>")
+        t2 = t2.replace('content="' + base + '"', 'content="' + new_t + '"').replace('content="' + old_d + '"', 'content="' + html.escape(it["desc"]) + '"')
+        if t2 != t:
+            f.write_text(t2, encoding="utf-8")
+            out.append((it["path"], html.unescape(base), html.unescape(old_d)))
+    return out
+
+
+def gscfix_publish_now(st):
+    """Publish the site copy I hold right now (used by the automatic mode and /gscundo)."""
+    cur = mem().get("site_zip") or {}
+    ver = {"file_id": cur.get("file_id"), "name": cur.get("name", ""), "ts": cur.get("ts", 0)}
+    do_site_publish({"file_id": ver["file_id"], "site_version": ver}, st)
+
+
+def gscfix_auto(st):
+    """v10.324: weekly and hands-off: pick up to 3 articles, write new Google text, check it against the article, publish, report with an undo."""
+    m = mem()
+    sz = m.get("site_zip")
+    if not sz or not cf_cfg():
+        return
+    ok, g = gsc_sync()
+    if not ok:
+        m["gscauto_last"] = time.time() - 6 * 86400          # try again tomorrow
+        return
+    cands = gscfix_candidates(g, m.setdefault("gscfix_done", {}))[:3]
+    if not cands:
+        return
+    end = datetime.date.today() - datetime.timedelta(days=2)
+    try:
+        pq = _gsc_page_queries(g["site"], end - datetime.timedelta(days=27), end)
+    except Exception:
+        pq = {}
+    items, cur, err = gscfix_generate(sz, cands, pq)
+    if err or not items:
+        m["gscauto_last"] = time.time() - 6 * 86400
+        return
+    good, why = gscfix_verify(sz, items)
+    if not good:
+        send("🔎 Weekly Google title update: I wrote new texts but my fact-check did not clear any, so nothing changed. " + "; ".join(f"{k.split('/')[-2][:30]}: {v}" for k, v in list(why.items())[:3]))
+        return
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        done = gscfix_write(root, good)
+        if not done:
+            return
+        r_ = pack_site(root, d, f"🔎 Weekly update: new Google titles and descriptions on {len(done)} article(s).")
+    if not r_.get("ok"):
+        return send("🔎 Weekly Google title update: Telegram refused the site file, so nothing was published.")
+    newt = {it["path"]: it for it in good}
+    for pth, _, _ in done:
+        m["gscfix_done"][pth] = time.time()
+    m.setdefault("gscfix_log", []).append({"ts": time.time(), "items": [{"path": p_, "old_title": ot, "old_desc": od, "new_title": newt[p_]["title"]} for p_, ot, od in done]})
+    m["gscfix_log"] = m["gscfix_log"][-12:]
+    lines = [f"🔎 Weekly Google update: {len(done)} article(s) have new search titles and descriptions (checked against the article text, headlines on the pages unchanged):"]
+    for p_, ot, _ in done:
+        lines.append(f"• {ot}\n  → {newt[p_]['title']}")
+    if why:
+        lines.append(f"{len(why)} more were not clear enough to pass the check, so I left them.")
+    lines.append("Publishing now. To put the old ones back: /gscundo")
+    send("\n".join(lines)[:3800])
+    gscfix_publish_now(st)
+
+
+def cmd_gscauto(st, raw=""):
+    t = (raw or "").lower().split()
+    m = mem()
+    if len(t) > 1 and t[1] in ("on", "off"):
+        m["gscauto"] = (t[1] == "on")
+        m["gscauto_last"] = 0
+        return send("✅ Automatic Google titles are ON. About once a week I pick up to 3 articles that Google shows often but nobody clicks, write a better search title and description, "
+                    "fact-check them against the article text, publish, and tell you what changed. /gscundo puts the last batch back. The first run happens within the hour."
+                    if t[1] == "on" else "Automatic Google titles are OFF.")
+    send("Automatic Google titles are " + ("ON" if m.get("gscauto") else "OFF") + ". Send /gscauto on or /gscauto off. /gscfix still lets you choose by hand, /gscundo puts the last automatic batch back.")
+
+
+def cmd_gscundo(st):
+    log = mem().get("gscfix_log") or []
+    if not log:
+        return send("There is no automatic change to put back.")
+    sz = mem().get("site_zip")
+    if not sz or not cf_cfg():
+        return send("I need your site copy and the Cloudflare connection to do that.")
+    batch = log[-1]
+    items = [{"path": x["path"], "title": x["old_title"], "desc": x["old_desc"]} for x in batch["items"]]
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        done = gscfix_write(root, items)
+        if not done:
+            return send("Those pages already have their old texts.")
+        r_ = pack_site(root, d, f"↩️ Put back the old Google titles on {len(done)} article(s).")
+    if not r_.get("ok"):
+        return send("Telegram refused the site file; nothing was changed.")
+    for p_, _, _ in done:
+        (mem().setdefault("gscfix_done", {})).pop(p_, None)
+    log.pop()
+    send(f"↩️ Old titles and descriptions restored on {len(done)} article(s). Publishing now.")
+    gscfix_publish_now(st)
+
+
 def cmd_gscfix(st):
     """v10.321: better Google title and description for the articles that get many impressions and no clicks. Shows old and new; nothing changes until you tap."""
     sz = mem().get("site_zip")
@@ -19106,42 +19302,9 @@ def cmd_gscfix(st):
         pq = {}
         print("gscfix queries:", clean(e)[:100])
     send(f"🔎 Reading {len(cands)} articles that Google shows often but nobody clicks...")
-    cur, payload = {}, []
-    with tempfile.TemporaryDirectory() as d:
-        root = site_zip_from(sz["file_id"], d)
-        for pth, c, im, pos in cands:
-            f = Path(root) / pth.strip("/") / "index.html"
-            if not f.exists():
-                continue
-            t = f.read_text(encoding="utf-8", errors="ignore")
-            mt = re.search(r"<title>(.*?)</title>", t, re.S)
-            md = re.search(r'<meta name="description" content="([^"]*)"', t) or re.search(r'<meta content="([^"]*)" name="description"', t)
-            if not mt or not md:
-                continue
-            cur[pth] = {"title": html.unescape(mt.group(1)).strip(), "desc": html.unescape(md.group(1)).strip(), "imp": im, "clicks": c, "pos": round(pos, 1)}
-            qs = sorted(pq.get(pth, []), key=lambda x: -x[2])[:5]
-            payload.append({"path": pth, "current_title": cur[pth]["title"], "current_description": cur[pth]["desc"],
-                            "searches": [{"query": q, "impressions": i, "position": round(p_, 1)} for q, _, i, p_ in qs], "article_text": _page_text(t)})
-    if not payload:
-        return send("I could not find those articles in your stored site copy. Send the latest site .zip and try again.")
-    try:
-        res = gemini([{"text": GSCFIX_PROMPT + json.dumps(payload, ensure_ascii=False)}])
-    except Exception as e:
-        return send("Google's AI did not answer (busy or at its free limit). Try /gscfix again later. " + clean(e)[:80])
-    items = []
-    for it in res.get("items", []):
-        pth = it.get("path")
-        t_ = re.sub(r"\s*[—–]\s*", ", ", (it.get("title") or "").strip())
-        d_ = re.sub(r"\s*[—–]\s*", ", ", (it.get("desc") or "").strip())
-        if t_.endswith("| Kemet"):
-            t_ = t_[:-7].rstrip()
-        if pth not in cur or not (25 <= len(t_) <= 62) or not (90 <= len(d_) <= 158):
-            continue
-        if re.match(r"\s*fact[\s-]*check", t_, re.I) or t_.endswith("?") or t_ == cur[pth]["title"].removesuffix(" | Kemet"):
-            continue
-        if re.match(r"\s*(learn|understand|examine|study|discover|explore)\b", d_, re.I):
-            continue
-        items.append({"path": pth, "title": t_, "desc": d_, "keep": False, "old": cur[pth]["title"], "imp": cur[pth]["imp"], "clicks": cur[pth]["clicks"], "pos": cur[pth]["pos"]})
+    items, cur, err = gscfix_generate(sz, cands, pq)
+    if err:
+        return send(err)
     if not items:
         return send("The AI's suggestions did not pass my checks (length, no question titles). Try /gscfix again.")
     master = new_pid(st)
@@ -19179,29 +19342,14 @@ def run_gscfix(st, prop):
     sz = mem().get("site_zip")
     if not sz:
         return send("First send me your current site as a .zip file, then try again.")
-    n = 0
     with tempfile.TemporaryDirectory() as d:
         root = site_zip_from(sz["file_id"], d)
-        for it in [x for x in prop.get("items", []) if x.get("keep")]:
-            f = Path(root) / it["path"].strip("/") / "index.html"
-            if not f.exists():
-                continue
-            t = f.read_text(encoding="utf-8")
-            mt = re.search(r"<title>(.*?)</title>", t, re.S)
-            md = re.search(r'<meta name="description" content="([^"]*)"', t) or re.search(r'<meta content="([^"]*)" name="description"', t)
-            if not mt or not md:
-                continue
-            old_t, old_d = mt.group(1), md.group(1)
-            base = old_t[:-len(" | Kemet")] if old_t.endswith(" | Kemet") else old_t
-            new_t = html.escape(it["title"])
-            t2 = t.replace("<title>" + old_t + "</title>", "<title>" + (new_t + " | Kemet" if len(it["title"]) + 8 <= 65 else new_t) + "</title>")
-            t2 = t2.replace('content="' + base + '"', 'content="' + new_t + '"').replace('content="' + old_d + '"', 'content="' + html.escape(it["desc"]) + '"')
-            if t2 != t:
-                f.write_text(t2, encoding="utf-8")
-                mem().setdefault("gscfix_done", {})[it["path"]] = time.time()
-                n += 1
+        done = gscfix_write(root, [x for x in prop.get("items", []) if x.get("keep")])
+        n = len(done)
         if not n:
             return send("Nothing needed changing (the site copy already has those texts).")
+        for p_, _, _ in done:
+            mem().setdefault("gscfix_done", {})[p_] = time.time()
         r = pack_site(root, d, f"🔎 Site updated: new Google titles and descriptions on {n} article(s). Tap 🚀 Publish below to put it live.")
     if not r.get("ok"):
         return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
@@ -19781,6 +19929,8 @@ def main():
             {"command": "autopost", "description": "Auto-post new public videos to Facebook, send captions for the rest"},
             {"command": "bookdesc", "description": "Add the counted book link to the book Shorts' descriptions"},
             {"command": "gscfix", "description": "Better Google titles and descriptions for articles that get views but no clicks"},
+            {"command": "gscauto", "description": "Do the Google title fixes by itself every week (on or off)"},
+            {"command": "gscundo", "description": "Put back the last automatic Google title changes"},
             {"command": "posts", "description": "Captions for the next book Short (X, Instagram, LinkedIn, Facebook)"},
             {"command": "kindleline", "description": "Kindle line in old descriptions, 5 a day"},
             {"command": "searchcheck", "description": "Google and Bing: sitemap and indexed pages"},
