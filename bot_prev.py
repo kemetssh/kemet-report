@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.320"
+BOT_VERSION = "v10.321"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -4132,6 +4132,10 @@ def on_prop(jid, act, st):
                 e_["rated"][key] = int(k or 0)
                 break
         return send(f"👍 Noted: {key} = {SCORE_LABEL.get(int(k or 0), '')}. Tap the other apps too if you used them.")
+    if act == "gz" and kind == "gscfix":
+        st["props"].pop(jid, None)
+        send("Writing the new titles and descriptions into your site copy...")
+        return run_gscfix(st, prop)
     if act == "bd" and kind == "bookdesc":
         st["props"].pop(jid, None)
         send("Adding the book link to your book Shorts...")
@@ -12489,6 +12493,8 @@ def on_message(msg, st):
         cmd_fixdomain(st, raw)
     elif text.startswith("/autopost"):
         cmd_autopost(st, raw)
+    elif text.startswith("/gscfix"):
+        cmd_gscfix(st)
     elif text.startswith("/bookdesc"):
         cmd_bookdesc(st)
     elif text.startswith("/posts"):
@@ -12595,7 +12601,7 @@ def on_callback(cb, st):
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
     if jid == "q" and act in ("qa", "qi"):
         return ask_callback(cb, act, st)
-    if act in ("ta", "ts", "tu", "ca", "cs", "fbr", "fbn", "chp", "chs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "ip", "tp", "bd", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr", "fy", "fz", "lk", "lu", "mw"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "fbr", "fbn", "chp", "chs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "ip", "tp", "bd", "gz", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr", "fy", "fz", "lk", "lu", "mw"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -19016,6 +19022,152 @@ def run_bookdesc(st):
     send(f"✅ Added the book link to {done} Short(s); {skipped} already had it." + (f"\n⚠️ {len(failed)} did not change:\n" + "\n".join(failed[:4]) + "\nSend /bookdesc again later (YouTube quota resets at 10:00 Cairo)." if failed else ""))
 
 
+def _gsc_page_queries(site, start, end):
+    """page -> [(query, clicks, impressions, position)] from Search Console (one request, up to 1000 rows)."""
+    H = {"Authorization": "Bearer " + yt_token()}
+    rr = S.post("https://www.googleapis.com/webmasters/v3/sites/" + urllib.parse.quote(site, safe="") + "/searchAnalytics/query", headers=H,
+                json={"startDate": start.isoformat(), "endDate": end.isoformat(), "dimensions": ["page", "query"], "rowLimit": 1000}, timeout=60)
+    rr.raise_for_status()
+    out = {}
+    for x in rr.json().get("rows", []):
+        pth = urllib.parse.urlparse(x["keys"][0]).path
+        out.setdefault(pth, []).append((x["keys"][1], int(x["clicks"]), int(x["impressions"]), float(x["position"])))
+    return out
+
+
+def _page_text(t, n=1400):
+    t = re.sub(r"(?is)<(script|style|nav|header|footer)\b.*?</\1>", " ", t)
+    i = t.lower().find("<h1")
+    t = t[i:] if i >= 0 else t
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", t))).strip()[:n]
+
+
+GSCFIX_PROMPT = """You write search-result titles and descriptions for the history website "Kemet" (Ancient Egypt, evidence-based).
+Below are articles that Google shows many times but almost nobody clicks. For each one write a better title and meta description.
+RULES: stay 100% true to the article text given (never add a fact that is not there). Title: 35 to 60 characters, a plain statement (no question, never "Fact Check:", no clickbait, no all caps),
+put the main thing people searched for near the start, name the king, queen, god or place when the article is about one. Description: 120 to 155 characters, says concretely what the reader learns,
+uses the main search words naturally, no hype. Do not use dashes as punctuation (use commas or colons). Do not end the title with "| Kemet".
+Return JSON only: {"items": [{"path": "...", "title": "...", "desc": "..."}]}
+Articles: """
+
+
+def gscfix_candidates(g, done):
+    """Article pages with enough impressions and (almost) no clicks, best chances first."""
+    agg = {}
+    for u, c, im, pos in g.get("pages", []):
+        pth = urllib.parse.urlparse(u).path
+        if not pth.startswith("/articles/") or pth.rstrip("/") == "/articles":
+            continue
+        a = agg.setdefault(pth, [0, 0, 0.0])
+        a[0] += c
+        a[1] += im
+        a[2] += pos * im
+    rows = []
+    for pth, (c, im, ps) in agg.items():
+        pos = ps / max(im, 1)
+        if im >= 20 and c / im < 0.02 and pos <= 20 and time.time() - (done.get(pth) or 0) > 21 * 86400:
+            rows.append((pth, c, im, pos))
+    return sorted(rows, key=lambda x: -x[2])
+
+
+def cmd_gscfix(st):
+    """v10.321: better Google title and description for the articles that get many impressions and no clicks. Shows old and new; nothing changes until you tap."""
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("First send me your current site as a .zip file, then try again.")
+    ok, g = gsc_sync()
+    if not ok:
+        return send(g)
+    done = mem().setdefault("gscfix_done", {})
+    cands = gscfix_candidates(g, done)[:6]
+    if not cands:
+        return send("No article has enough Google impressions with no clicks yet (I need 20 or more impressions, under 2% clicks, within the first 20 results). Try again in a week or two.")
+    end = datetime.date.today() - datetime.timedelta(days=2)
+    try:
+        pq = _gsc_page_queries(g["site"], end - datetime.timedelta(days=27), end)
+    except Exception as e:
+        pq = {}
+        print("gscfix queries:", clean(e)[:100])
+    send(f"🔎 Reading {len(cands)} articles that Google shows often but nobody clicks...")
+    cur, payload = {}, []
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        for pth, c, im, pos in cands:
+            f = Path(root) / pth.strip("/") / "index.html"
+            if not f.exists():
+                continue
+            t = f.read_text(encoding="utf-8", errors="ignore")
+            mt = re.search(r"<title>(.*?)</title>", t, re.S)
+            md = re.search(r'<meta name="description" content="([^"]*)"', t) or re.search(r'<meta content="([^"]*)" name="description"', t)
+            if not mt or not md:
+                continue
+            cur[pth] = {"title": html.unescape(mt.group(1)).strip(), "desc": html.unescape(md.group(1)).strip(), "imp": im, "clicks": c, "pos": round(pos, 1)}
+            qs = sorted(pq.get(pth, []), key=lambda x: -x[2])[:5]
+            payload.append({"path": pth, "current_title": cur[pth]["title"], "current_description": cur[pth]["desc"],
+                            "searches": [{"query": q, "impressions": i, "position": round(p_, 1)} for q, _, i, p_ in qs], "article_text": _page_text(t)})
+    if not payload:
+        return send("I could not find those articles in your stored site copy. Send the latest site .zip and try again.")
+    try:
+        res = gemini([{"text": GSCFIX_PROMPT + json.dumps(payload, ensure_ascii=False)}])
+    except Exception as e:
+        return send("Google's AI did not answer (busy or at its free limit). Try /gscfix again later. " + clean(e)[:80])
+    items = []
+    for it in res.get("items", []):
+        pth = it.get("path")
+        t_ = re.sub(r"\s*[—–]\s*", ", ", (it.get("title") or "").strip())
+        d_ = re.sub(r"\s*[—–]\s*", ", ", (it.get("desc") or "").strip())
+        if t_.endswith("| Kemet"):
+            t_ = t_[:-7].rstrip()
+        if pth not in cur or not (25 <= len(t_) <= 62) or not (90 <= len(d_) <= 158):
+            continue
+        if re.match(r"\s*fact[\s-]*check", t_, re.I) or t_.endswith("?") or t_ == cur[pth]["title"].removesuffix(" | Kemet"):
+            continue
+        items.append({"path": pth, "title": t_, "desc": d_})
+    if not items:
+        return send("The AI's suggestions did not pass my checks (length, no question titles). Try /gscfix again.")
+    lines = ["🔎 New Google titles and descriptions. Your headline on the page itself does not change, only what Google shows:\n"]
+    for it in items:
+        c_ = cur[it["path"]]
+        lines.append(f"{it['path']}\n{c_['imp']} impressions, {c_['clicks']} clicks, position {c_['pos']}\nNow: {c_['title']}\nNew: {it['title']}\nDescription: {it['desc']}\n")
+    pid = new_pid(st)
+    st["props"][pid] = {"type": "gscfix", "items": items, "created": time.time()}
+    send("\n".join(lines)[:3800], [[btn(f"✅ Apply {len(items)} to the site", pid, "gz")], [btn("Cancel", pid, "cs")]])
+
+
+def run_gscfix(st, prop):
+    sz = mem().get("site_zip")
+    if not sz:
+        return send("First send me your current site as a .zip file, then try again.")
+    n = 0
+    with tempfile.TemporaryDirectory() as d:
+        root = site_zip_from(sz["file_id"], d)
+        for it in prop.get("items", []):
+            f = Path(root) / it["path"].strip("/") / "index.html"
+            if not f.exists():
+                continue
+            t = f.read_text(encoding="utf-8")
+            mt = re.search(r"<title>(.*?)</title>", t, re.S)
+            md = re.search(r'<meta name="description" content="([^"]*)"', t) or re.search(r'<meta content="([^"]*)" name="description"', t)
+            if not mt or not md:
+                continue
+            old_t, old_d = mt.group(1), md.group(1)
+            base = old_t[:-len(" | Kemet")] if old_t.endswith(" | Kemet") else old_t
+            new_t = html.escape(it["title"])
+            t2 = t.replace("<title>" + old_t + "</title>", "<title>" + (new_t + " | Kemet" if len(it["title"]) + 8 <= 65 else new_t) + "</title>")
+            t2 = t2.replace('content="' + base + '"', 'content="' + new_t + '"').replace('content="' + old_d + '"', 'content="' + html.escape(it["desc"]) + '"')
+            if t2 != t:
+                f.write_text(t2, encoding="utf-8")
+                mem().setdefault("gscfix_done", {})[it["path"]] = time.time()
+                n += 1
+        if not n:
+            return send("Nothing needed changing (the site copy already has those texts).")
+        r = pack_site(root, d, f"🔎 Site updated: new Google titles and descriptions on {n} article(s). Tap 🚀 Publish below to put it live.")
+    if not r.get("ok"):
+        return send("Telegram refused the file: " + str(r.get("description", ""))[:120])
+    send(f"✅ {n} article(s) updated. After publishing, Google takes a few days to show the new text. Check the clicks in /health and the scoreboard in two weeks.")
+    offer_publish(st)
+
+
 def cmd_posts(st, raw=""):
     """v10.307: the ready-to-paste captions of one book Short for X, Instagram/TikTok, LinkedIn and Facebook, each with its own counted /book/ link.
     /posts N sends Short N. /posts alone sends the next one after the last you asked for."""
@@ -19587,6 +19739,7 @@ def main():
             {"command": "zerniotest", "description": "Check the TikTok connection and numbers"},
             {"command": "autopost", "description": "Auto-post new public videos to Facebook, send captions for the rest"},
             {"command": "bookdesc", "description": "Add the counted book link to the book Shorts' descriptions"},
+            {"command": "gscfix", "description": "Better Google titles and descriptions for articles that get views but no clicks"},
             {"command": "posts", "description": "Captions for the next book Short (X, Instagram, LinkedIn, Facebook)"},
             {"command": "kindleline", "description": "Kindle line in old descriptions, 5 a day"},
             {"command": "searchcheck", "description": "Google and Bing: sitemap and indexed pages"},
