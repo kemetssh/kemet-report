@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.319"
+BOT_VERSION = "v10.320"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -3213,7 +3213,7 @@ TITLES_PROMPT = """You help the YouTube history channel "Kemet | Ancient Egypt".
 Below are the channel's recent videos as JSON. Pick at most 3 (or the number asked below) whose TITLE could clearly be
 better (more curious, clearer, under 70 characters) while staying 100% true to the video.
 Do not touch titles that are already good. Never invent facts or use clickbait lies.
-NEVER start a title with "Fact Check:" (this channel tested it three times and every test lost views), and avoid "X or Y" titles; a plain question works better ("Were Millions of Kittens Sacrificed in Ancient Egypt?").
+NEVER start a title with "Fact Check:" (this channel tested it three times and every test lost views), and avoid "X or Y" titles; prefer a plain statement title that names a king or queen and includes a number ("Khufu's Pyramid: 3 Ramp Theories, Tested"); on this channel named rulers did about 6x and a number in the title about 6x better, while question titles did worse.
 Return JSON only: {"proposals": [{"video_id": "...", "new_title": "...", "why": "one short line"}]}
 Videos: """
 
@@ -5910,9 +5910,9 @@ def cmd_besttime(st):
     if known:
         tot = sum(v for _, v in known) or 1
         lines += ["", "Where your views come from: " + ", ".join(f"{c} {v / tot:.0%}" for c, v in known[:5])]
-        # people watch most in the evening, about 19:00 local: convert each country's evening to Cairo time
-        ang = sum(((19 - TZ_OFFSET[c] + 3) % 24) * v for c, v in known) / tot
-        lines.append(f"Their evenings (19:00 local) fall around {ang:.0f}:00 Cairo time, so publish about 1-2 hours before: "
+        # v10.320: videos posted at or after 4 PM US Eastern did about 5x worse, so aim for early afternoon local (14:00), published 1-2 hours before
+        ang = sum(((14 - TZ_OFFSET[c] + 3) % 24) * v for c, v in known) / tot
+        lines.append(f"Their early afternoons (14:00 local) fall around {ang:.0f}:00 Cairo time, so publish about 1-2 hours before: "
                      f"{(ang - 2) % 24:.0f}:00 to {(ang - 1) % 24:.0f}:00 Cairo.")
     else:
         lines.append("\nI have no country data yet, so I cannot suggest a clock time.")
@@ -5938,7 +5938,7 @@ def us_zone():
 
 
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-US_DEFAULT_HOUR = 17.0          # US Eastern: 1-2 hours before the evening on the East and Central coasts, still afternoon on the West coast
+US_DEFAULT_HOUR = 12.5          # US Eastern (v10.320): posts at or after 4 PM Eastern did about 5x worse, so publish around noon
 HOUR_BUCKETS = {"morning": (6, 11, 9.0), "afternoon": (12, 16, 14.0), "evening": (17, 21, 18.0)}
 
 
