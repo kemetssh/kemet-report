@@ -137,7 +137,7 @@ TGFILE = f"{TG_BASE}/file/bot{TG_TOKEN}"
 GBASE = os.getenv("GEMINI_BASE", "https://generativelanguage.googleapis.com")
 GOOGLE_TOKEN = os.getenv("GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token")
 GH_API = os.getenv("GH_API", "https://api.github.com")
-BOT_VERSION = "v10.321"
+BOT_VERSION = "v10.322"
 YT = os.getenv("YT_BASE", "https://www.googleapis.com")
 RUN_SECONDS = int(os.getenv("RUN_SECONDS", "240"))
 WORKER = os.getenv("WORKER_URL", "").rstrip("/")      # optional instant-relay (Cloudflare Worker)
@@ -4132,9 +4132,22 @@ def on_prop(jid, act, st):
                 e_["rated"][key] = int(k or 0)
                 break
         return send(f"👍 Noted: {key} = {SCORE_LABEL.get(int(k or 0), '')}. Tap the other apps too if you used them.")
+    if act == "gk" and kind == "gscitem":
+        mp = st["props"].get(prop["master"])
+        if not mp:
+            return send("That list is too old. Send /gscfix again.")
+        mp["items"][prop["idx"]]["keep"] = True
+        return send(f"✔ Kept number {prop['idx'] + 1}. Tap the others, then the Apply button at the bottom.")
+    if act == "gs" and kind == "gscitem":
+        mp = st["props"].get(prop["master"])
+        if mp:
+            mp["items"][prop["idx"]]["keep"] = False
+        return send(f"Skipped number {prop['idx'] + 1}.")
     if act == "gz" and kind == "gscfix":
+        if not [x for x in prop.get("items", []) if x.get("keep")]:
+            return send("You have not kept any yet. Tap ✔ Keep under the ones you like first.")
         st["props"].pop(jid, None)
-        send("Writing the new titles and descriptions into your site copy...")
+        send("Writing the chosen titles and descriptions into your site copy...")
         return run_gscfix(st, prop)
     if act == "bd" and kind == "bookdesc":
         st["props"].pop(jid, None)
@@ -12495,6 +12508,8 @@ def on_message(msg, st):
         cmd_autopost(st, raw)
     elif text.startswith("/gscfix"):
         cmd_gscfix(st)
+    elif text.startswith("/gsctitle"):
+        cmd_gsctitle(st, raw)
     elif text.startswith("/bookdesc"):
         cmd_bookdesc(st)
     elif text.startswith("/posts"):
@@ -12601,7 +12616,7 @@ def on_callback(cb, st):
     jid, act, val = (cb["data"].split("|") + ["", ""])[:3]
     if jid == "q" and act in ("qa", "qi"):
         return ask_callback(cb, act, st)
-    if act in ("ta", "ts", "tu", "ca", "cs", "fbr", "fbn", "chp", "chs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "ip", "tp", "bd", "gz", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr", "fy", "fz", "lk", "lu", "mw"):
+    if act in ("ta", "ts", "tu", "ca", "cs", "fbr", "fbn", "chp", "chs", "sg", "cu", "ek", "er", "is", "pg", "xg", "fs", "fp", "ip", "tp", "bd", "gz", "gk", "gs", "fq", "fa", "gh", "gw", "vp", "pa", "ls", "ci", "ad", "am", "as", "av", "avp", "avv", "nfa", "ar", "ah", "al", "aa", "pd", "pe", "ax", "cp", "sr", "pc", "fd", "sl", "rd", "bl", "sb", "sa", "sq", "bi", "bq", "bs", "sh", "sy", "su", "wn", "wa", "wz", "va", "sx", "sk", "ck", "gb", "gi", "gf", "gx", "gn", "aq", "tl", "dl", "vl", "hy", "hz", "pn", "pw", "rt", "rp", "rw", "rh", "rs", "rl", "rv", "rn", "rg", "rx", "nd", "np", "wy", "ns", "nl", "ts2", "pq", "nf", "hq", "nr", "fy", "fz", "lk", "lu", "mw"):
         st["_val"] = val or "0"
         return on_prop(jid, act, st)
     job = st["jobs"].get(jid)
@@ -19047,6 +19062,8 @@ Below are articles that Google shows many times but almost nobody clicks. For ea
 RULES: stay 100% true to the article text given (never add a fact that is not there). Title: 35 to 60 characters, a plain statement (no question, never "Fact Check:", no clickbait, no all caps),
 put the main thing people searched for near the start, name the king, queen, god or place when the article is about one. Description: 120 to 155 characters, says concretely what the reader learns,
 uses the main search words naturally, no hype. Do not use dashes as punctuation (use commas or colons). Do not end the title with "| Kemet".
+The title must read like a natural headline a person wrote, never a string of search words (bad: "Egypt old name Kemet and the meaning of the word"; good: "Kemet: Egypt's Ancient Name and What It Means").
+Keep the strongest idea of the current title when it is good. The description must NOT begin with Learn, Understand, Examine, Study, Discover or Explore: start with the subject or the finding itself.
 Return JSON only: {"items": [{"path": "...", "title": "...", "desc": "..."}]}
 Articles: """
 
@@ -19122,16 +19139,40 @@ def cmd_gscfix(st):
             continue
         if re.match(r"\s*fact[\s-]*check", t_, re.I) or t_.endswith("?") or t_ == cur[pth]["title"].removesuffix(" | Kemet"):
             continue
-        items.append({"path": pth, "title": t_, "desc": d_})
+        if re.match(r"\s*(learn|understand|examine|study|discover|explore)\b", d_, re.I):
+            continue
+        items.append({"path": pth, "title": t_, "desc": d_, "keep": False, "old": cur[pth]["title"], "imp": cur[pth]["imp"], "clicks": cur[pth]["clicks"], "pos": cur[pth]["pos"]})
     if not items:
         return send("The AI's suggestions did not pass my checks (length, no question titles). Try /gscfix again.")
-    lines = ["🔎 New Google titles and descriptions. Your headline on the page itself does not change, only what Google shows:\n"]
-    for it in items:
+    master = new_pid(st)
+    st["props"][master] = {"type": "gscmaster", "items": items, "created": time.time()}
+    st["gscfix_pid"] = master
+    send("🔎 New Google titles and descriptions. Your headline on the page itself does not change, only what Google shows. Tap ✔ Keep under the ones you like. "
+         "To use your own title for one, send: /gsctitle 2 Your title here")
+    for i, it in enumerate(items):
         c_ = cur[it["path"]]
-        lines.append(f"{it['path']}\n{c_['imp']} impressions, {c_['clicks']} clicks, position {c_['pos']}\nNow: {c_['title']}\nNew: {it['title']}\nDescription: {it['desc']}\n")
-    pid = new_pid(st)
-    st["props"][pid] = {"type": "gscfix", "items": items, "created": time.time()}
-    send("\n".join(lines)[:3800], [[btn(f"✅ Apply {len(items)} to the site", pid, "gz")], [btn("Cancel", pid, "cs")]])
+        ipid = new_pid(st)
+        st["props"][ipid] = {"type": "gscitem", "master": master, "idx": i, "created": time.time()}
+        send(f"{i + 1}. {it['path']}\n{c_['imp']} impressions, {c_['clicks']} clicks, position {c_['pos']}\nNow: {c_['title']}\nNew: {it['title']}\nDescription: {it['desc']}",
+             [[btn("✔ Keep", ipid, "gk"), btn("Skip", ipid, "gs")]])
+    send("When you have chosen, tap here:", [[btn("✅ Apply the ones I kept", master, "gz")], [btn("Cancel", master, "cs")]])
+
+
+def cmd_gsctitle(st, raw):
+    """/gsctitle N your title: replace the title of card N in the current /gscfix list and keep it."""
+    mp = st["props"].get(st.get("gscfix_pid") or "")
+    m_ = re.match(r"\s*/gsctitle\S*\s+(\d+)\s+(.+)", raw or "", re.S)
+    if not mp or not m_:
+        return send("Send /gscfix first, then: /gsctitle 2 Your title here (the number is the card number).")
+    i = int(m_.group(1)) - 1
+    t_ = m_.group(2).strip()
+    if t_.endswith("| Kemet"):
+        t_ = t_[:-7].rstrip()
+    if not (0 <= i < len(mp["items"])) or not (20 <= len(t_) <= 62):
+        return send("I need a card number from the list and a title of 20 to 62 characters.")
+    mp["items"][i]["title"] = t_
+    mp["items"][i]["keep"] = True
+    send(f"✔ Number {i + 1} will use your title: {t_}\nTap the Apply button under the list when you are done.")
 
 
 def run_gscfix(st, prop):
@@ -19141,7 +19182,7 @@ def run_gscfix(st, prop):
     n = 0
     with tempfile.TemporaryDirectory() as d:
         root = site_zip_from(sz["file_id"], d)
-        for it in prop.get("items", []):
+        for it in [x for x in prop.get("items", []) if x.get("keep")]:
             f = Path(root) / it["path"].strip("/") / "index.html"
             if not f.exists():
                 continue
